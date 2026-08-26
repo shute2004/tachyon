@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::InitialContextInjection;
@@ -26,12 +25,13 @@ use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
+use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::retry::ModelStreamRequest;
+use crate::model_runtime::retry::ModelStreamRetryState;
+use crate::model_runtime::retry::handle_retryable_turn_runtime_error;
 use crate::plugins::build_plugin_injections;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
-use crate::responses_retry::ResponsesStreamRequest;
-use crate::responses_retry::ResponsesStreamRetryState;
-use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -156,14 +156,14 @@ pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     input: Vec<TurnInput>,
-    prewarmed_client_session: Option<ModelClientSession>,
+    prepared_turn_runtime: Option<ModelTurnRuntime>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let mut turn_runtime = prepared_turn_runtime
+        .unwrap_or_else(|| sess.services.model_runtime().begin_turn());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -171,7 +171,7 @@ pub(crate) async fn run_turn(
     if let Err(err) = run_pre_sampling_compact(
         &sess,
         &turn_context,
-        &mut client_session,
+        &mut turn_runtime,
         &cancellation_token,
     )
     .await
@@ -292,8 +292,9 @@ pub(crate) async fn run_turn(
         TurnDiffTracker::with_environment_display_roots(display_roots),
     ));
 
-    // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
-    // one instance across retries within this turn.
+    // `ModelTurnRuntime` is the single model-execution owner for this harness turn. Fresh
+    // turn-affinity state stays private to it, while reusable backend state can be checked out from
+    // and returned to the session-scoped `ModelRuntime` according to adapter-private rules.
     // Pending input is drained into history before building the next model request.
     // However, we defer that drain until after sampling in two cases:
     // 1. At the start of a turn, so the fresh turn input in `input` gets sampled first.
@@ -385,7 +386,7 @@ pub(crate) async fn run_turn(
                 Arc::clone(&step_context),
                 Arc::clone(&turn_context.extension_data),
                 Arc::clone(&turn_diff_tracker),
-                &mut client_session,
+                &mut turn_runtime,
                 &responses_metadata,
                 sampling_request_input,
                 cancellation_token.child_token(),
@@ -474,7 +475,7 @@ pub(crate) async fn run_turn(
                         &sess,
                         Arc::clone(&step_context),
                         /*fallback_step_context*/ None,
-                        &mut client_session,
+                        &mut turn_runtime,
                         InitialContextInjection::BeforeLastUserMessage {
                             world_state: Arc::clone(&world_state),
                             step_context: Arc::clone(&step_context),
@@ -1025,10 +1026,10 @@ async fn track_turn_resolved_config_analytics(
 async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
+    maybe_run_previous_model_inline_compact(sess, turn_context, turn_runtime, cancellation_token)
         .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
@@ -1043,7 +1044,7 @@ async fn run_pre_sampling_compact(
             sess,
             step_context,
             /*fallback_step_context*/ None,
-            client_session,
+            turn_runtime,
             InitialContextInjection::DoNotInject,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
@@ -1093,7 +1094,7 @@ async fn capture_current_model_fallback_step_context(
 async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
@@ -1125,7 +1126,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             step_context,
             fallback_step_context,
-            client_session,
+            turn_runtime,
             InitialContextInjection::DoNotInject,
             CompactionReason::CompHashChanged,
             CompactionPhase::PreTurn,
@@ -1173,7 +1174,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             step_context,
             fallback_step_context,
-            client_session,
+            turn_runtime,
             InitialContextInjection::DoNotInject,
             CompactionReason::ModelDownshift,
             CompactionPhase::PreTurn,
@@ -1192,7 +1193,7 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -1227,7 +1228,7 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
-                client_session,
+                turn_runtime,
                 initial_context_injection,
                 reason,
                 phase,
@@ -1244,7 +1245,7 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
-                client_session.turn_state(),
+                turn_runtime,
                 initial_context_injection,
                 reason,
                 phase,
@@ -1356,7 +1357,7 @@ async fn run_sampling_request(
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
@@ -1375,7 +1376,8 @@ async fn run_sampling_request(
         Arc::clone(&turn_diff_tracker),
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
-    let mut retry_state = ResponsesStreamRetryState::default();
+    let allow_unbounded_connection_retry = !turn_context.provider.info().is_amazon_bedrock();
+    let mut retry_state = ModelStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1404,7 +1406,7 @@ async fn run_sampling_request(
             Arc::clone(&sess),
             Arc::clone(&step_context),
             Arc::clone(&turn_store),
-            client_session,
+            turn_runtime,
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
@@ -1439,14 +1441,15 @@ async fn run_sampling_request(
             return Err(err);
         }
 
-        handle_retryable_response_stream_error(
+        handle_retryable_turn_runtime_error(
             &mut retry_state,
             max_retries,
             err,
-            client_session,
+            turn_runtime,
             &sess,
             &turn_context,
-            ResponsesStreamRequest::Sampling,
+            ModelStreamRequest::Sampling,
+            allow_unbounded_connection_retry,
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();
@@ -2195,7 +2198,7 @@ async fn try_run_sampling_request(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
@@ -2221,7 +2224,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
+    let mut stream = turn_runtime
         .stream(
             prompt,
             &step_context.settings.model_info,

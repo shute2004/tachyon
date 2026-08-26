@@ -50,6 +50,17 @@ impl ModelRuntime {
             adapter: self.adapter.begin_turn(),
         }
     }
+
+    /// Returns whether startup preparation should produce a turn runtime that is transferred into
+    /// the first harness turn. The concrete reason remains adapter-private.
+    pub(crate) fn startup_preparation_uses_turn_runtime(&self) -> bool {
+        self.adapter.startup_preparation_uses_turn_runtime()
+    }
+
+    /// Performs session-scoped startup preparation when no prepared turn runtime is produced.
+    pub(crate) async fn prepare_session(&self) -> Result<()> {
+        self.adapter.prepare_session().await
+    }
 }
 
 /// Opaque model execution handle scoped to one harness turn.

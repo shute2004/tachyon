@@ -11,8 +11,8 @@ use tracing::instrument;
 use tracing::trace_span;
 use tracing::warn;
 
-use crate::client::ModelClientSession;
 use crate::guardian::routes_approval_to_guardian;
+use crate::model_runtime::ModelTurnRuntime;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::session::Session;
@@ -24,24 +24,25 @@ use codex_otel::SessionTelemetry;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::BaseInstructions;
 
-pub(crate) struct SessionStartupPrewarmHandle {
-    task: AbortOnDropHandle<CodexResult<ModelClientSession>>,
+/// Session-owned background preparation that may yield a prepared model turn runtime.
+pub(crate) struct SessionStartupPreparationHandle {
+    task: AbortOnDropHandle<CodexResult<ModelTurnRuntime>>,
     started_at: Instant,
     timeout: Duration,
 }
 
-pub(crate) enum SessionStartupPrewarmResolution {
+pub(crate) enum SessionStartupPreparationResolution {
     Cancelled,
-    Ready(Box<ModelClientSession>),
+    Ready(Box<ModelTurnRuntime>),
     Unavailable {
         status: &'static str,
-        prewarm_duration: Option<Duration>,
+        preparation_duration: Option<Duration>,
     },
 }
 
-impl SessionStartupPrewarmHandle {
+impl SessionStartupPreparationHandle {
     pub(crate) fn new(
-        task: JoinHandle<CodexResult<ModelClientSession>>,
+        task: JoinHandle<CodexResult<ModelTurnRuntime>>,
         started_at: Instant,
         timeout: Duration,
     ) -> Self {
@@ -57,12 +58,13 @@ impl SessionStartupPrewarmHandle {
         let _ = self.task.await;
     }
 
+    // Keep the existing telemetry span name while the metrics contract still uses prewarm naming.
     #[instrument(name = "startup_prewarm.resolve", level = "trace", skip_all)]
     async fn resolve(
         self,
         session_telemetry: &SessionTelemetry,
         cancellation_token: &CancellationToken,
-    ) -> SessionStartupPrewarmResolution {
+    ) -> SessionStartupPreparationResolution {
         let resolve_started_at = Instant::now();
         let Self {
             mut task,
@@ -82,10 +84,10 @@ impl SessionStartupPrewarmHandle {
                 Some(Ok(result)) => Self::resolution_from_join_result(result, started_at),
                 Some(Err(_elapsed)) => {
                     task.abort();
-                    info!("startup websocket prewarm timed out before the first turn could use it");
-                    SessionStartupPrewarmResolution::Unavailable {
+                    info!("startup model preparation timed out before the first turn could use it");
+                    SessionStartupPreparationResolution::Unavailable {
                         status: "timed_out",
-                        prewarm_duration: Some(started_at.elapsed()),
+                        preparation_duration: Some(started_at.elapsed()),
                     }
                 }
                 None => {
@@ -105,14 +107,14 @@ impl SessionStartupPrewarmHandle {
                         started_at.elapsed(),
                         &[("status", "cancelled")],
                     );
-                    return SessionStartupPrewarmResolution::Cancelled;
+                    return SessionStartupPreparationResolution::Cancelled;
                 }
             }
         };
         let status = match &resolution {
-            SessionStartupPrewarmResolution::Cancelled => "cancelled",
-            SessionStartupPrewarmResolution::Ready(_) => "ready",
-            SessionStartupPrewarmResolution::Unavailable { status, .. } => status,
+            SessionStartupPreparationResolution::Cancelled => "cancelled",
+            SessionStartupPreparationResolution::Ready(_) => "ready",
+            SessionStartupPreparationResolution::Unavailable { status, .. } => status,
         };
         session_telemetry.record_startup_phase(
             "startup_prewarm_resolve",
@@ -121,61 +123,61 @@ impl SessionStartupPrewarmHandle {
         );
 
         match resolution {
-            SessionStartupPrewarmResolution::Cancelled => {
-                SessionStartupPrewarmResolution::Cancelled
+            SessionStartupPreparationResolution::Cancelled => {
+                SessionStartupPreparationResolution::Cancelled
             }
-            SessionStartupPrewarmResolution::Ready(prewarmed_session) => {
+            SessionStartupPreparationResolution::Ready(prepared_turn_runtime) => {
                 session_telemetry.record_duration(
                     STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC,
                     age_at_first_turn,
                     &[("status", "consumed")],
                 );
-                SessionStartupPrewarmResolution::Ready(prewarmed_session)
+                SessionStartupPreparationResolution::Ready(prepared_turn_runtime)
             }
-            SessionStartupPrewarmResolution::Unavailable {
+            SessionStartupPreparationResolution::Unavailable {
                 status,
-                prewarm_duration,
+                preparation_duration,
             } => {
                 session_telemetry.record_duration(
                     STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC,
                     age_at_first_turn,
                     &[("status", status)],
                 );
-                if let Some(prewarm_duration) = prewarm_duration {
+                if let Some(preparation_duration) = preparation_duration {
                     session_telemetry.record_duration(
                         STARTUP_PREWARM_DURATION_METRIC,
-                        prewarm_duration,
+                        preparation_duration,
                         &[("status", status)],
                     );
                 }
-                SessionStartupPrewarmResolution::Unavailable {
+                SessionStartupPreparationResolution::Unavailable {
                     status,
-                    prewarm_duration,
+                    preparation_duration,
                 }
             }
         }
     }
 
     fn resolution_from_join_result(
-        result: std::result::Result<CodexResult<ModelClientSession>, tokio::task::JoinError>,
+        result: std::result::Result<CodexResult<ModelTurnRuntime>, tokio::task::JoinError>,
         started_at: Instant,
-    ) -> SessionStartupPrewarmResolution {
+    ) -> SessionStartupPreparationResolution {
         match result {
-            Ok(Ok(prewarmed_session)) => {
-                SessionStartupPrewarmResolution::Ready(Box::new(prewarmed_session))
+            Ok(Ok(prepared_turn_runtime)) => {
+                SessionStartupPreparationResolution::Ready(Box::new(prepared_turn_runtime))
             }
             Ok(Err(err)) => {
-                warn!("startup websocket prewarm setup failed: {err:#}");
-                SessionStartupPrewarmResolution::Unavailable {
+                warn!("startup model preparation failed: {err:#}");
+                SessionStartupPreparationResolution::Unavailable {
                     status: "failed",
-                    prewarm_duration: None,
+                    preparation_duration: None,
                 }
             }
             Err(err) => {
-                warn!("startup websocket prewarm setup join failed: {err}");
-                SessionStartupPrewarmResolution::Unavailable {
+                warn!("startup model preparation join failed: {err}");
+                SessionStartupPreparationResolution::Unavailable {
                     status: "join_failed",
-                    prewarm_duration: Some(started_at.elapsed()),
+                    preparation_duration: Some(started_at.elapsed()),
                 }
             }
         }
@@ -183,7 +185,7 @@ impl SessionStartupPrewarmHandle {
 }
 
 impl Session {
-    pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+    pub(crate) async fn schedule_startup_preparation(self: &Arc<Self>, base_instructions: String) {
         if self.features().enabled(Feature::CodeModePrewarm)
             && self.services.code_mode_service.is_available()
         {
@@ -195,27 +197,30 @@ impl Session {
             });
         }
 
-        if !self.services.model_client.responses_websocket_enabled() {
-            // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
-            // register or engage this session's bearer fallback before the first user request.
-            let model_client = self.services.model_client.clone();
+        let model_runtime = self.services.model_runtime();
+        if !model_runtime.startup_preparation_uses_turn_runtime() {
+            // Some backends only need session-scoped preparation before the first request.
             tokio::spawn(async move {
-                if let Err(err) = model_client.prewarm_auth().await {
-                    warn!("startup auth prewarm failed: {err:#}");
+                if let Err(err) = model_runtime.prepare_session().await {
+                    warn!("startup model session preparation failed: {err:#}");
                 }
             });
             return;
         }
 
         let session_telemetry = self.services.session_telemetry.clone();
-        let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
+        // Preserve the current Codex timeout source while the concrete preparation implementation
+        // remains the Responses WebSocket adapter.
+        let preparation_timeout = self.provider().await.websocket_connect_timeout();
         let started_at = Instant::now();
-        let startup_prewarm_session = Arc::clone(self);
-        let startup_prewarm = tokio::spawn(
+        let startup_preparation_session = Arc::clone(self);
+        let startup_preparation = tokio::spawn(
             async move {
-                let result =
-                    schedule_startup_prewarm_inner(startup_prewarm_session, base_instructions)
-                        .await;
+                let result = schedule_startup_preparation_inner(
+                    startup_preparation_session,
+                    base_instructions,
+                )
+                .await;
                 let status = if result.is_ok() { "ready" } else { "failed" };
                 session_telemetry.record_startup_phase(
                     "startup_prewarm_total",
@@ -235,41 +240,49 @@ impl Session {
                 thread.id = %self.thread_id(),
             )),
         );
-        self.set_session_startup_prewarm(SessionStartupPrewarmHandle::new(
-            startup_prewarm,
+        // These state helpers retain their legacy names temporarily; the stored type is now the
+        // generic preparation handle and the compatibility alias is removed when the large session
+        // module is next touched for a semantic change.
+        self.set_session_startup_prewarm(SessionStartupPreparationHandle::new(
+            startup_preparation,
             started_at,
-            websocket_connect_timeout,
+            preparation_timeout,
         ))
         .await;
     }
 
-    pub(crate) async fn consume_startup_prewarm_for_regular_turn(
+    pub(crate) async fn consume_startup_preparation_for_regular_turn(
         &self,
         cancellation_token: &CancellationToken,
-    ) -> SessionStartupPrewarmResolution {
-        let Some(startup_prewarm) = self.take_session_startup_prewarm().await else {
-            return SessionStartupPrewarmResolution::Unavailable {
+    ) -> SessionStartupPreparationResolution {
+        let Some(startup_preparation) = self.take_session_startup_prewarm().await else {
+            return SessionStartupPreparationResolution::Unavailable {
                 status: "not_scheduled",
-                prewarm_duration: None,
+                preparation_duration: None,
             };
         };
-        startup_prewarm
+        startup_preparation
             .resolve(&self.services.session_telemetry, cancellation_token)
             .await
     }
+
+    /// Compatibility entry point for initialization code that has not yet been renamed.
+    pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+        self.schedule_startup_preparation(base_instructions).await;
+    }
 }
 
-async fn schedule_startup_prewarm_inner(
+async fn schedule_startup_preparation_inner(
     session: Arc<Session>,
     base_instructions: String,
-) -> CodexResult<ModelClientSession> {
-    let prewarm_started_at = Instant::now();
+) -> CodexResult<ModelTurnRuntime> {
+    let preparation_started_at = Instant::now();
     let startup_turn_context = session
         .new_startup_prewarm_turn_with_sub_id(INITIAL_SUBMIT_ID.to_owned())
         .await;
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_create_turn_context",
-        prewarm_started_at.elapsed(),
+        preparation_started_at.elapsed(),
         /*status*/ None,
     );
     if routes_approval_to_guardian(&startup_turn_context) {
@@ -287,7 +300,7 @@ async fn schedule_startup_prewarm_inner(
     }
     let startup_cancellation_token = CancellationToken::new();
     let built_tools_started_at = Instant::now();
-    // Startup prewarm runs before run_turn and needs its own tool-building snapshot.
+    // Startup preparation runs before run_turn and needs its own tool-building snapshot.
     let step_context = session
         .capture_step_context(
             Arc::clone(&startup_turn_context),
@@ -321,10 +334,10 @@ async fn schedule_startup_prewarm_inner(
             window_id,
             CodexResponsesRequestKind::Prewarm,
         );
-    let mut client_session = session.services.model_client.new_session();
-    let websocket_warmup_started_at = Instant::now();
-    client_session
-        .prewarm_websocket(
+    let mut turn_runtime = session.services.model_runtime().begin_turn();
+    let backend_preparation_started_at = Instant::now();
+    turn_runtime
+        .prepare(
             &startup_prompt,
             &step_context.settings.model_info,
             &step_context.session_telemetry,
@@ -336,8 +349,8 @@ async fn schedule_startup_prewarm_inner(
         .await?;
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_websocket_warmup",
-        websocket_warmup_started_at.elapsed(),
+        backend_preparation_started_at.elapsed(),
         /*status*/ None,
     );
-    Ok(client_session)
+    Ok(turn_runtime)
 }

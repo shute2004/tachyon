@@ -15,7 +15,6 @@ mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
 mod responses_metadata;
-mod responses_retry;
 pub(crate) mod session;
 pub use codex_protocol::turn_input::NotSubmittedReason;
 pub use codex_protocol::turn_input::RecoverTurnRequest;
@@ -104,7 +103,11 @@ pub(crate) mod mentions {
 mod sandbox_tags;
 pub mod sandboxing;
 mod session_prefix;
-mod session_startup_prewarm;
+mod session_startup_preparation;
+// Transitional module alias for large session files that have not yet been renamed.
+mod session_startup_prewarm {
+    pub(crate) use crate::session_startup_preparation::SessionStartupPreparationHandle as SessionStartupPrewarmHandle;
+}
 mod skills;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
 pub(crate) use skills::skills_load_input_from_config;
