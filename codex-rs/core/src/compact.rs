@@ -262,7 +262,10 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
-    let mut turn_runtime = sess.services.model_runtime().begin_turn();
+    let mut turn_runtime = sess
+        .services
+        .model_runtime()
+        .begin_turn_for_provider(turn_context.config.model_provider_id.clone());
     // Reuse one turn runtime so fresh turn-affinity state and any checked-out reusable backend
     // resources survive retries within this compact turn.
     let responses_metadata = sess
