@@ -9,6 +9,8 @@ mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+#[doc(hidden)]
+pub mod model_runtime;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
