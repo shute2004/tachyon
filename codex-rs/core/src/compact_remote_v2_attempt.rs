@@ -205,6 +205,7 @@ async fn run_remote_compaction_request_v2_with_turn_runtime(
                     sess,
                     turn_context,
                     ModelStreamRequest::RemoteCompactionV2,
+                    /*allow_unbounded_connection_retry*/ false,
                 )
                 .await?;
             }
