@@ -31,6 +31,23 @@ fn tool_calls_distinguish_structured_and_freeform_input() {
 }
 
 #[test]
+fn tool_results_keep_structured_output_out_of_message_content() {
+    let result = ModelToolResult {
+        call_id: ModelToolCallId("call-1".to_string()),
+        content: vec![ModelToolResultContent::Json(serde_json::json!({
+            "path": "README.md",
+            "exists": true,
+        }))],
+        is_error: false,
+    };
+
+    assert!(matches!(
+        result.content.as_slice(),
+        [ModelToolResultContent::Json(_)]
+    ));
+}
+
+#[test]
 fn completion_carries_usage_without_provider_response_identity() {
     let completion = ModelCompletion {
         usage: Some(ModelUsage {
@@ -39,11 +56,13 @@ fn completion_carries_usage_without_provider_response_identity() {
             cache_write_input_tokens: 0,
             output_tokens: 20,
             reasoning_output_tokens: 5,
+            total_tokens: Some(120),
         }),
         end_turn: Some(true),
     };
 
     assert_eq!(completion.usage.as_ref().map(|usage| usage.output_tokens), Some(20));
+    assert_eq!(completion.usage.as_ref().and_then(|usage| usage.total_tokens), Some(120));
     assert_eq!(completion.end_turn, Some(true));
 }
 
