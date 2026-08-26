@@ -296,7 +296,7 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input_metadata,
         compaction_output,
         token_usage,
-        owned_client_session: _owned_client_session,
+        owned_turn_runtime: _owned_turn_runtime,
     } = attempt;
     if let Some(token_usage) = token_usage {
         sess.record_rollout_budget_usage(&token_usage)?;
