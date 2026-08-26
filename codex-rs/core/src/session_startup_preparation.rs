@@ -334,7 +334,10 @@ async fn schedule_startup_preparation_inner(
             window_id,
             CodexResponsesRequestKind::Prewarm,
         );
-    let mut turn_runtime = session.services.model_runtime().begin_turn();
+    let mut turn_runtime = session
+        .services
+        .model_runtime()
+        .begin_turn_for_provider(startup_turn_context.config.model_provider_id.clone());
     let backend_preparation_started_at = Instant::now();
     turn_runtime
         .prepare(
