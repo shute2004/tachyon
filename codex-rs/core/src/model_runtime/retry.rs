@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use super::ModelTurnRuntime;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
@@ -40,6 +41,39 @@ impl Default for ModelStreamRetryState {
             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
         }
     }
+}
+
+/// Retry entry point for call sites that already own a `ModelTurnRuntime`.
+pub(crate) async fn handle_retryable_turn_runtime_error(
+    retry_state: &mut ModelStreamRetryState,
+    max_retries: u64,
+    err: CodexErr,
+    turn_runtime: &mut ModelTurnRuntime,
+    sess: &Session,
+    turn_context: &TurnContext,
+    request: ModelStreamRequest,
+) -> Result<(), CodexErr> {
+    // Preserve the current Codex UX while the adapter is still the only backend: the first
+    // transient retry notification is suppressed when the backend is using its prepared streaming
+    // path. This policy input can be made an explicit backend capability later.
+    let suppress_first_retry_notification = sess.services.model_runtime().has_turn_preparation();
+    handle_retryable_model_stream_error(
+        retry_state,
+        max_retries,
+        err,
+        sess,
+        turn_context,
+        request,
+        suppress_first_retry_notification,
+        "Falling back from WebSockets to HTTPS transport.",
+        || {
+            turn_runtime.try_recover_after_stream_error(
+                &turn_context.session_telemetry,
+                turn_context.model_info(),
+            )
+        },
+    )
+    .await
 }
 
 /// Handles a retryable model-stream error and returns `Ok(())` when the caller should retry.
