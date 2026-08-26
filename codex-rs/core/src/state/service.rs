@@ -14,6 +14,7 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
+use crate::model_runtime::ModelRuntime;
 use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -91,10 +92,22 @@ pub(crate) struct SessionServices {
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) time_provider: Arc<dyn TimeProvider>,
-    /// Session-scoped model client shared across turns.
+    /// Transitional Codex model client. Callers moving into the Tachyon model boundary should use
+    /// [`SessionServices::model_runtime`] rather than depending on this field directly.
     pub(crate) model_client: ModelClient,
     pub(crate) executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
+}
+
+impl SessionServices {
+    /// Returns the session-scoped Tachyon model runtime backed by the transitional Codex client.
+    ///
+    /// `ModelClient` remains stored here until all harness call sites have migrated. Because
+    /// `ModelClient` clones share the same internal state, constructing this lightweight wrapper
+    /// preserves the existing session-scoped provider, recovery, and reusable backend cache.
+    pub(crate) fn model_runtime(&self) -> ModelRuntime {
+        ModelRuntime::from_codex_client(self.model_client.clone())
+    }
 }

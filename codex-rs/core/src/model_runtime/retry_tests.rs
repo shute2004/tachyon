@@ -1,4 +1,4 @@
-use super::ResponsesStreamRequest;
+use super::ModelStreamRequest;
 use super::log_retry;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
@@ -18,7 +18,7 @@ async fn sampling_retry_logs_stream_error_context() {
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
     log_retry(
-        ResponsesStreamRequest::Sampling,
+        ModelStreamRequest::Sampling,
         &turn_context,
         &CodexErr::Stream("websocket closed by server before response.completed".to_string()),
         /*retries*/ 2,
