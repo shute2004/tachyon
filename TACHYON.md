@@ -97,7 +97,9 @@ The model-runtime source layout reflects that transition:
 ```text
 codex-rs/core/src/model_runtime/
 ├── mod.rs              # Tachyon-facing runtime boundary
-└── codex_adapter.rs    # transitional Codex/OpenAI implementation
+├── codex_adapter.rs    # transitional Codex/OpenAI implementation
+├── retry.rs            # model-stream retry policy
+└── retry_tests.rs      # retry policy tests
 ```
 
 Canonical provider-neutral `ModelRequest` / `ModelEvent` types and the later Provider / Protocol / Endpoint / Auth / Transport decomposition are intentionally deferred until the execution boundary is wired through existing behavior.
@@ -109,7 +111,8 @@ Codex-derived names are neutralized incrementally when semantic ownership moves 
 A broad repository-wide rename would hide which concepts are already generic and which still represent Codex/OpenAI-specific behavior. Therefore:
 
 - generic harness concepts should acquire Tachyon/provider-neutral names when their boundary is extracted;
-- files, modules, functions, variables, and types follow the same rule;
+- files, modules, functions, variables, types, directories, workspace names, and crate names follow the same rule;
+- `codex-rs/` and `codex-*` crate/package names are migration artifacts and are expected to be neutralized once the corresponding crate boundaries and dependency directions are stable;
 - names that still represent Codex/OpenAI adapters, Responses protocol details, headers, endpoints, compatibility behavior, or product integration remain explicit until that responsibility moves behind an adapter.
 
 See [`docs/tachyon/architecture.md`](docs/tachyon/architecture.md) for the detailed architecture, ownership rules, migration phases, and dependency direction.
