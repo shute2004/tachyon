@@ -30,18 +30,46 @@ Provider and protocol details belong below the canonical IR boundary.
 
 The first IR slice intentionally covers only concepts whose harness meaning is already clear:
 
-- role-bearing messages;
+- role-bearing messages, including optional commentary/final lifecycle semantics;
 - text, image, and audio content;
 - URI- or byte-backed media without assuming a provider upload mechanism;
 - JSON-schema function tools and free-form tools;
+- free-form input grammar constraints without assuming a provider wire representation;
+- immediate versus deferred tool availability and semantic tool-discovery purpose;
 - structured or textual tool-call input;
 - text/JSON/media tool results;
 - text and JSON-schema output contracts;
-- streamed output-item lifecycle;
+- streamed output-item lifecycle with a partial start header distinct from a completed item;
 - text, tool-input, and reasoning deltas;
 - request completion and provider-reported token usage.
 
 The Rust definitions live in `codex-rs/core/src/model_runtime/ir.rs` during extraction.
+
+## Preserve generic capability, not provider realization
+
+Provider-specific realization must not be copied mechanically into the IR, but generic harness
+capabilities underneath it must remain representable.
+
+Current Codex behavior provides three useful examples:
+
+- Responses custom/free-form tools carry a concrete format object. The canonical capability is that
+  free-form input may be unconstrained text or constrained by a grammar, represented by
+  `ModelFreeformInputFormat`; the Responses `type` field itself is not canonical.
+- Codex uses Responses `defer_loading` and a `tool_search` wire tool to implement client-side
+  deferred tool discovery. The canonical capability is represented by `ModelToolAvailability` and
+  `ModelToolPurpose`, not by a Responses-shaped `ToolSearch` variant.
+- Responses assistant messages may carry `Commentary` or `FinalAnswer`. Tachyon keeps the
+  harness-significant distinction as `ModelMessagePhase::{Commentary, Final}` while allowing `None`
+  for providers that do not expose it.
+
+## Stream starts are partial
+
+A streamed item can begin before all of its completed value is available. This matters especially
+for structured tool calls: JSON arguments may still be an incomplete fragment when the item starts.
+
+`OutputItemStarted` therefore carries `ModelOutputItemStart`, a header with correlation and input-kind
+information, while `OutputItemCompleted` carries a complete `ModelOutputItem`. Adapters do not need
+to invent placeholder JSON or delay the start event until tool input has finished streaming.
 
 ## Correlation IDs are not provider IDs
 
@@ -101,6 +129,8 @@ The canonical IR is wired incrementally so existing Codex behavior remains a reg
 
 - introduce kernel-owned request/event/data types;
 - document provider-private exclusions;
+- preserve existing generic harness semantics that are currently realized through Responses-specific
+  tool/message fields;
 - add focused unit coverage for the type semantics;
 - do not change the production sampling path yet.
 
@@ -108,12 +138,16 @@ The canonical IR is wired incrementally so existing Codex behavior remains a reg
 
 - build `ModelRequest` in the harness for the supported common path;
 - convert it to Responses request types only inside the Codex adapter;
+- preserve grammar-constrained free-form tools and deferred tool discovery through the canonical
+  semantics rather than Responses wire variants;
 - keep unsupported provider-specific history/state on an explicit transitional path rather than
   smuggling it into the canonical IR.
 
 ### C3 — event conversion boundary
 
 - map generic stream lifecycle into `ModelEvent` in the adapter;
+- preserve assistant commentary/final phase where the backend reports it;
+- use partial `ModelOutputItemStart` for stream starts and complete values for completion;
 - keep Codex/OpenAI product notifications outside the canonical event stream;
 - migrate the agent loop away from matching `ResponseEvent` directly.
 
