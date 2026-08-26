@@ -51,6 +51,9 @@ pub enum ModelInputItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelMessage {
     pub role: ModelMessageRole,
+    /// Optional assistant-message lifecycle phase. Providers that do not expose this distinction
+    /// leave it as `None`.
+    pub phase: Option<ModelMessagePhase>,
     pub content: Vec<ModelContent>,
 }
 
@@ -61,6 +64,15 @@ pub enum ModelMessageRole {
     Developer,
     User,
     Assistant,
+}
+
+/// Harness-significant lifecycle phase for assistant text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelMessagePhase {
+    /// Interim assistant text that may be followed by more model/tool activity in the same turn.
+    Commentary,
+    /// Terminal assistant answer for the current turn.
+    Final,
 }
 
 /// Provider-neutral message content.
@@ -105,12 +117,47 @@ pub enum ModelToolSpec {
         description: String,
         input_schema: Value,
         strict: bool,
+        availability: ModelToolAvailability,
+        purpose: ModelToolPurpose,
     },
-    /// Free-form textual tool input.
+    /// Free-form textual tool input, optionally constrained by a grammar.
     Freeform {
         namespace: Option<String>,
         name: String,
         description: String,
+        input_format: ModelFreeformInputFormat,
+        availability: ModelToolAvailability,
+        purpose: ModelToolPurpose,
+    },
+}
+
+/// When a tool becomes visible to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelToolAvailability {
+    /// The tool is present in the current model-visible tool surface.
+    Immediate,
+    /// The tool is intentionally withheld until model-driven discovery exposes it.
+    Deferred,
+}
+
+/// Semantic role of a model-visible tool declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelToolPurpose {
+    /// Normal harness capability invoked for its declared effect or result.
+    Invocation,
+    /// Harness capability whose invocation discovers or exposes additional tools.
+    Discovery,
+}
+
+/// Input contract for a free-form tool without assuming a provider-specific wire shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelFreeformInputFormat {
+    /// Unconstrained free-form text.
+    Text,
+    /// Text constrained by a grammar understood by the target model backend.
+    Grammar {
+        syntax: String,
+        definition: String,
     },
 }
 
@@ -132,6 +179,13 @@ pub struct ModelToolCall {
 pub enum ModelToolInput {
     Json(Value),
     Text(String),
+}
+
+/// Tool-call input category known before a streamed input value is complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelToolInputKind {
+    Json,
+    Text,
 }
 
 /// Harness-authored result for a previous model tool call.
@@ -180,11 +234,34 @@ pub enum ModelOutputFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelItemId(pub String);
 
-/// Provider-neutral model output item.
+/// Partial header emitted when a streamed output item begins.
+///
+/// A started item must not require values that can only be known after deltas have completed. In
+/// particular, structured tool input may be incomplete JSON at this point.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelOutputItemStart {
+    Message {
+        id: ModelItemId,
+        phase: Option<ModelMessagePhase>,
+    },
+    ToolCall {
+        id: ModelItemId,
+        call_id: ModelToolCallId,
+        namespace: Option<String>,
+        name: String,
+        input_kind: ModelToolInputKind,
+    },
+    Reasoning {
+        id: ModelItemId,
+    },
+}
+
+/// Provider-neutral completed model output item.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelOutputItem {
     Message {
         id: ModelItemId,
+        phase: Option<ModelMessagePhase>,
         content: Vec<ModelContent>,
     },
     ToolCall {
@@ -201,7 +278,7 @@ pub enum ModelOutputItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelEvent {
     Started,
-    OutputItemStarted(ModelOutputItem),
+    OutputItemStarted(ModelOutputItemStart),
     OutputItemCompleted(ModelOutputItem),
     TextDelta {
         item_id: ModelItemId,
