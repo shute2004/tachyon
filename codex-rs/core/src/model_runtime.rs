@@ -7,8 +7,10 @@
 //! The important boundary introduced by this module is lifetime and ownership:
 //!
 //! - [`ModelRuntime`] is session-scoped.
-//! - [`ModelTurnRuntime`] is fresh for each harness turn.
-//! - Provider-private turn state stays inside [`ModelTurnRuntime`].
+//! - [`ModelTurnRuntime`] is a fresh handle for each harness turn.
+//! - Fresh turn-affinity state stays private to [`ModelTurnRuntime`].
+//! - A turn runtime may temporarily hold opaque backend state checked out from [`ModelRuntime`]
+//!   when that state is reusable across turns.
 //!
 //! The current implementation is a thin adapter over `ModelClient` / `ModelClientSession`. It is
 //! intentionally behavior-preserving so the mature Codex transport, retry, prewarm, continuation,
@@ -44,26 +46,23 @@ impl ModelRuntime {
         Self { client }
     }
 
-    /// Creates a fresh turn-scoped runtime.
+    /// Creates a fresh turn-scoped runtime handle.
     ///
-    /// A new value must be created for every harness turn. Reusing a turn runtime across turns
-    /// would also reuse provider-private state such as the current OpenAI sticky-routing token.
+    /// The handle gets fresh provider-private turn-affinity state, while the wrapped Codex
+    /// implementation may also check out opaque reusable backend state from the session runtime.
+    /// Reusable state is returned by `ModelClientSession::drop`; it must not be modeled as generic
+    /// Tachyon fields merely because it is temporarily owned by the turn handle.
     pub fn begin_turn(&self) -> ModelTurnRuntime {
         ModelTurnRuntime::from_codex_session(self.client.new_session())
     }
 }
 
-impl From<ModelClient> for ModelRuntime {
-    fn from(client: ModelClient) -> Self {
-        Self::from_codex_client(client)
-    }
-}
-
-/// Opaque model execution state scoped to one harness turn.
+/// Opaque model execution handle scoped to one harness turn.
 ///
 /// The adapter intentionally does not expose `x-codex-turn-state`, `previous_response_id`, the
-/// Responses WebSocket object, or incremental request bookkeeping. Those remain implementation
-/// details of the current OpenAI/Codex adapter.
+/// Responses WebSocket object, or incremental request bookkeeping. `x-codex-turn-state` is fresh
+/// per turn; other opaque backend state may be reusable across turns even when it is temporarily
+/// held by this handle. Those lifetime details remain private to the current OpenAI/Codex adapter.
 pub struct ModelTurnRuntime {
     session: ModelClientSession,
 }
@@ -104,10 +103,11 @@ impl ModelTurnRuntime {
             .await
     }
 
-    /// Prepares this turn runtime using the existing Codex prewarm implementation.
+    /// Prepares this turn runtime using the existing Codex preparation implementation.
     ///
-    /// The operation is named for the generic runtime capability rather than its current WebSocket
-    /// realization. Responses-specific transport details remain inside the adapter.
+    /// Runtime preparation is the generic optional capability. The current OpenAI/Codex adapter
+    /// realizes it with a Responses WebSocket `generate=false` warmup, but that mechanism is not
+    /// part of the Tachyon contract and another backend may prepare differently or do nothing.
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         &mut self,
@@ -130,27 +130,5 @@ impl ModelTurnRuntime {
                 responses_metadata,
             )
             .await
-    }
-
-    /// Activates the current adapter's transport fallback policy.
-    ///
-    /// The generic retry policy remains above the model runtime; the concrete WebSocket-to-HTTP
-    /// mechanism remains behind this boundary.
-    pub fn try_switch_fallback_transport(
-        &mut self,
-        session_telemetry: &SessionTelemetry,
-        model_info: &ModelInfo,
-    ) -> bool {
-        self.session
-            .try_switch_fallback_transport(session_telemetry, model_info)
-    }
-
-    /// Temporary bridge for Codex subsystems that still take `ModelClientSession` directly.
-    ///
-    /// This is crate-private on purpose. It allows remote compaction and retry call sites to move
-    /// incrementally without making provider-private state part of Tachyon's public runtime
-    /// contract. New code outside the migration should not depend on it.
-    pub(crate) fn legacy_session_mut(&mut self) -> &mut ModelClientSession {
-        &mut self.session
     }
 }
