@@ -619,7 +619,7 @@ async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, Pat
         .ok()
         .flatten()
         .unwrap_or_else(|| cwd.clone());
-        display_roots.push((environment.selection().environment_id.clone(), root));
+        display_roots.push((turn_environment.selection.environment_id.clone(), root));
     }
     display_roots
 }
@@ -779,7 +779,7 @@ async fn build_skills_and_plugins(
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
     // plugin mentions from that generated prompt as requests to inject additional instructions.
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
-        return Some((Vec::new(), Vec::new().into_iter().collect()));
+        return Some((Vec::new(), HashSet::new()));
     }
 
     let tracking = build_track_events_context(
@@ -928,7 +928,7 @@ async fn build_extension_turn_input_items(
         .turn_environments()
         .enumerate()
         .map(|(index, environment)| TurnInputEnvironment {
-            environment_id: environment.selection().environment_id.clone(),
+            environment_id: environment.selection.environment_id.clone(),
             cwd: environment.cwd().clone(),
             is_primary: index == 0,
         })
@@ -2069,7 +2069,7 @@ async fn emit_agent_message_in_plan_mode(
     state.started_agent_message_items.remove(&agent_message_id);
 }
 
-/// Emit a completed plan-mode turn item, handling agent messages specially.
+/// Emit completion for a plan-mode turn item, handling agent messages specially.
 async fn emit_turn_item_in_plan_mode(
     sess: &Session,
     turn_context: &TurnContext,
