@@ -45,8 +45,8 @@ impl Default for ModelStreamRetryState {
 /// Handles a retryable model-stream error and returns `Ok(())` when the caller should retry.
 ///
 /// `try_backend_recovery` performs a backend-private recovery action after the normal retry budget
-/// is exhausted. `suppress_first_retry_notification` preserves an adapter-specific UX choice
-/// without teaching the generic policy why a particular transport wants that behavior.
+/// is exhausted. The caller also supplies the existing recovery warning text so extracting policy
+/// does not alter user-visible behavior.
 pub(crate) async fn handle_retryable_model_stream_error<F>(
     retry_state: &mut ModelStreamRetryState,
     max_retries: u64,
@@ -55,6 +55,7 @@ pub(crate) async fn handle_retryable_model_stream_error<F>(
     turn_context: &TurnContext,
     request: ModelStreamRequest,
     suppress_first_retry_notification: bool,
+    recovery_warning: &str,
     mut try_backend_recovery: F,
 ) -> Result<(), CodexErr>
 where
@@ -79,7 +80,7 @@ where
             turn_id = %turn_context.sub_id,
             error = %err,
             ?retry_delay,
-            "model stream connection failed; waiting to retry"
+            "stream connection failed; waiting to retry"
         );
         sess.notify_stream_error(turn_context, "Reconnecting... waiting for network", err)
             .await;
@@ -96,7 +97,7 @@ where
         sess.send_event(
             turn_context,
             EventMsg::Warning(WarningEvent {
-                message: format!("Model backend changed execution path after stream failure. {err:#}"),
+                message: format!("{recovery_warning} {err:#}"),
             }),
         )
         .await;
@@ -144,7 +145,7 @@ pub(crate) fn log_retry(
                 retries,
                 max_retries,
                 sampling_error = %err,
-                "model stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+                "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
             );
         }
         ModelStreamRequest::RemoteCompactionV2 => {
@@ -153,7 +154,7 @@ pub(crate) fn log_retry(
                 retries,
                 max_retries,
                 compact_error = %err,
-                "remote compaction stream failed; retrying request after delay"
+                "remote compaction v2 stream failed; retrying request after delay"
             );
         }
     }
