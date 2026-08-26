@@ -37,6 +37,9 @@ pub struct ModelRuntime {
 
 impl ModelRuntime {
     /// Wraps the current Codex model client without changing its behavior.
+    ///
+    /// This constructor is part of the extraction bridge, not a commitment that providers will be
+    /// represented by `ModelClient` in the standalone Tachyon architecture.
     pub fn from_codex_client(client: ModelClient) -> Self {
         Self { client }
     }
@@ -47,19 +50,6 @@ impl ModelRuntime {
     /// would also reuse provider-private state such as the current OpenAI sticky-routing token.
     pub fn begin_turn(&self) -> ModelTurnRuntime {
         ModelTurnRuntime::from_codex_session(self.client.new_session())
-    }
-
-    /// Returns whether the current adapter can use its Responses WebSocket transport.
-    ///
-    /// This method exists only to preserve startup-prewarm behavior during the migration. The
-    /// Responses-specific capability will move behind a provider-neutral preparation capability.
-    pub fn responses_websocket_enabled(&self) -> bool {
-        self.client.responses_websocket_enabled()
-    }
-
-    /// Performs the existing authentication prewarm path.
-    pub async fn prewarm_auth(&self) -> Result<()> {
-        self.client.prewarm_auth().await
     }
 }
 
@@ -114,12 +104,12 @@ impl ModelTurnRuntime {
             .await
     }
 
-    /// Runs the existing Responses WebSocket prewarm for this turn runtime.
+    /// Prepares this turn runtime using the existing Codex prewarm implementation.
     ///
-    /// The generic capability is runtime preparation; the concrete WebSocket operation remains an
-    /// adapter detail and will be generalized after the seam is wired through the agent loop.
+    /// The operation is named for the generic runtime capability rather than its current WebSocket
+    /// realization. Responses-specific transport details remain inside the adapter.
     #[allow(clippy::too_many_arguments)]
-    pub async fn prewarm(
+    pub async fn prepare(
         &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
