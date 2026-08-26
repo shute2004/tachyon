@@ -184,7 +184,7 @@ Harness Compaction Manager
 
 Retry scheduling, budgets, and user-visible recovery lifecycle are reusable harness concerns. The concrete mechanism used to recover a model request may remain provider/route/transport-specific.
 
-The initial migration preserves existing retry and WebSocket-to-HTTP fallback behavior rather than making "switch fallback transport" a stable generic runtime contract. A later extraction step can introduce a provider-neutral recovery capability while leaving concrete route/transport changes in adapters.
+The initial migration preserves existing retry and WebSocket-to-HTTP fallback behavior rather than making "switch fallback transport" a stable generic runtime contract. Backend-specific retry eligibility, retry-UX hints, and recovery warning details are supplied to generic retry policy rather than inferred from provider identities or transport details inside that policy.
 
 ## Long-term model execution shape
 
@@ -252,15 +252,25 @@ Not in scope for Step A:
 
 ### Step B — call-site migration
 
-The following PR should wire existing Codex behavior through the reviewed seam without changing behavior:
+Step B may be implemented across multiple focused PRs so each migration slice remains reviewable and build-checkable while preserving behavior.
+
+The first Step B slice establishes the source/module boundary needed by migrated call sites and moves independent request boundaries first:
+
+- split the model-runtime source boundary from the transitional Codex/OpenAI adapter implementation
+- extract reusable retry scheduling/backoff/notification policy while keeping backend-specific recovery details outside the generic policy
+- migrate independently owned local/manual compaction to `ModelTurnRuntime`
+- migrate independently owned standalone remote compaction paths to `ModelTurnRuntime`
+- preserve compatibility paths for inline compaction while the regular harness turn still owns `ModelClientSession`
+
+The coordinated regular-turn slice then completes the turn-owned migration:
 
 - make the agent sampling path depend on `ModelRuntime` / `ModelTurnRuntime` rather than concrete `ModelClientSession`
 - preserve one turn-runtime handle across sampling, tool follow-up, retry, and inline compaction within a turn
 - preserve startup preparation and ownership transfer into the first regular turn
 - preserve cross-turn reusable backend cache semantics
-- migrate retry/recovery without exposing a concrete WebSocket-to-HTTP mechanism as the final generic contract
-- migrate remote compaction without exposing `x-codex-turn-state` through the Tachyon API
-- preserve standalone compaction's independently owned runtime lifetime where required
+- migrate sampling retry/recovery through the generic retry policy without exposing a concrete WebSocket-to-HTTP mechanism as the generic contract
+- remove inline compaction compatibility paths once the regular turn supplies `ModelTurnRuntime`
+- preserve standalone compaction's independently owned runtime lifetime
 
 Explicitly out of scope for the initial migration phase:
 
