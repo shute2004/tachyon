@@ -50,11 +50,6 @@ impl ModelRuntime {
             adapter: self.adapter.begin_turn(),
         }
     }
-
-    /// Returns whether the current transitional backend has a turn preparation path.
-    pub(crate) fn has_turn_preparation(&self) -> bool {
-        self.adapter.has_turn_preparation()
-    }
 }
 
 /// Opaque model execution handle scoped to one harness turn.
@@ -142,13 +137,18 @@ impl ModelTurnRuntime {
             .await
     }
 
+    /// Returns a backend-provided retry UX hint without tying it to runtime preparation semantics.
+    pub(crate) fn suppress_first_retry_notification(&self) -> bool {
+        self.adapter.suppress_first_retry_notification()
+    }
+
     /// Lets the current backend attempt request-path recovery while retry policy remains above the
-    /// runtime boundary.
+    /// runtime boundary. A successful recovery may return a backend-specific warning message.
     pub(crate) fn try_recover_after_stream_error(
         &mut self,
         session_telemetry: &SessionTelemetry,
         model_info: &ModelInfo,
-    ) -> bool {
+    ) -> Option<String> {
         self.adapter
             .try_recover_after_stream_error(session_telemetry, model_info)
     }
