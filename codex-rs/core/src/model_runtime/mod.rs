@@ -8,6 +8,7 @@
 //! shapes. They are not the canonical Tachyon model IR.
 
 mod codex_adapter;
+pub(crate) mod retry;
 
 use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
