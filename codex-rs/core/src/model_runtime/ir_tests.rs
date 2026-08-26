@@ -31,6 +31,104 @@ fn tool_calls_distinguish_structured_and_freeform_input() {
 }
 
 #[test]
+fn freeform_tool_can_preserve_grammar_constraint_without_wire_format() {
+    let tool = ModelToolSpec::Freeform {
+        namespace: None,
+        name: "apply_patch".to_string(),
+        description: "Apply a patch".to_string(),
+        input_format: ModelFreeformInputFormat::Grammar {
+            syntax: "lark".to_string(),
+            definition: "start: patch".to_string(),
+        },
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Invocation,
+    };
+
+    assert!(matches!(
+        tool,
+        ModelToolSpec::Freeform {
+            input_format: ModelFreeformInputFormat::Grammar { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn deferred_discovery_semantics_do_not_require_tool_search_wire_type() {
+    let deferred_tool = ModelToolSpec::Function {
+        namespace: Some("mcp".to_string()),
+        name: "expensive_tool".to_string(),
+        description: "Loaded after discovery".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        strict: false,
+        availability: ModelToolAvailability::Deferred,
+        purpose: ModelToolPurpose::Invocation,
+    };
+    let discovery_tool = ModelToolSpec::Function {
+        namespace: None,
+        name: "discover_tools".to_string(),
+        description: "Discover additional tools".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Discovery,
+    };
+
+    assert!(matches!(
+        deferred_tool,
+        ModelToolSpec::Function {
+            availability: ModelToolAvailability::Deferred,
+            purpose: ModelToolPurpose::Invocation,
+            ..
+        }
+    ));
+    assert!(matches!(
+        discovery_tool,
+        ModelToolSpec::Function {
+            availability: ModelToolAvailability::Immediate,
+            purpose: ModelToolPurpose::Discovery,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn message_phase_preserves_harness_control_flow_semantics() {
+    let message = ModelOutputItem::Message {
+        id: ModelItemId("message-1".to_string()),
+        phase: Some(ModelMessagePhase::Commentary),
+        content: vec![ModelContent::Text("working".to_string())],
+    };
+
+    assert!(matches!(
+        message,
+        ModelOutputItem::Message {
+            phase: Some(ModelMessagePhase::Commentary),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn tool_call_start_does_not_require_complete_json_input() {
+    let start = ModelOutputItemStart::ToolCall {
+        id: ModelItemId("item-1".to_string()),
+        call_id: ModelToolCallId("call-1".to_string()),
+        namespace: Some("workspace".to_string()),
+        name: "read_file".to_string(),
+        input_kind: ModelToolInputKind::Json,
+    };
+
+    assert!(matches!(
+        start,
+        ModelOutputItemStart::ToolCall {
+            input_kind: ModelToolInputKind::Json,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn tool_results_keep_structured_output_out_of_message_content() {
     let result = ModelToolResult {
         call_id: ModelToolCallId("call-1".to_string()),
