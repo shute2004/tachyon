@@ -88,21 +88,39 @@ ModelRuntime                    session-scoped
        ModelTurnRuntime         fresh handle per harness turn
 ```
 
-The current implementation preserves Codex's existing `ModelClient` / `ModelClientSession` behavior behind a transitional adapter while keeping provider-private state opaque.
+Step B moved the regular agent turn, startup preparation, sampling retry/recovery, and inline/standalone compaction through that runtime boundary while preserving the existing Codex `ModelClient` / `ModelClientSession` implementation behind the adapter.
 
-Step B is now migrating the existing agent-loop, startup preparation, retry/recovery, and remote-compaction call sites through this boundary.
+The current runtime ownership is therefore:
 
-The model-runtime source layout reflects that transition:
+```text
+ModelRuntime
+    |
+    `-- ModelTurnRuntime
+          +-- startup preparation
+          +-- pre-turn compaction
+          +-- sampling
+          +-- tool follow-up
+          +-- retry / recovery
+          `-- inline compaction
+```
+
+The project is now entering Step C: introducing canonical provider-neutral model request/event data without promoting the existing OpenAI Responses shapes into Tachyon's stable kernel vocabulary.
+
+The model-runtime source layout now includes the first canonical IR nucleus:
 
 ```text
 codex-rs/core/src/model_runtime/
 ├── mod.rs              # Tachyon-facing runtime boundary
+├── ir.rs               # canonical provider-neutral request/event vocabulary
+├── ir_tests.rs         # focused IR semantics tests
 ├── codex_adapter.rs    # transitional Codex/OpenAI implementation
 ├── retry.rs            # model-stream retry policy
 └── retry_tests.rs      # retry policy tests
 ```
 
-Canonical provider-neutral `ModelRequest` / `ModelEvent` types and the later Provider / Protocol / Endpoint / Auth / Transport decomposition are intentionally deferred until the execution boundary is wired through existing behavior.
+The production sampling path still uses migration-only `Prompt` / `ResponseItem` / `ResponseEvent` shapes while adapter conversions are introduced incrementally. Provider / Protocol / Endpoint / Auth / Transport decomposition follows after the execution IR is established.
+
+See [`docs/tachyon/model-ir.md`](docs/tachyon/model-ir.md) for the canonical model IR boundary and migration order.
 
 ## Naming during extraction
 
