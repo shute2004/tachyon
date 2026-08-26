@@ -63,7 +63,7 @@ pub enum ModelMessageRole {
     Assistant,
 }
 
-/// Provider-neutral message/tool content.
+/// Provider-neutral message content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelContent {
     Text(String),
@@ -138,8 +138,20 @@ pub enum ModelToolInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelToolResult {
     pub call_id: ModelToolCallId,
-    pub content: Vec<ModelContent>,
+    pub content: Vec<ModelToolResultContent>,
     pub is_error: bool,
+}
+
+/// Tool-result content is distinct from ordinary message content because structured JSON output is
+/// a first-class harness capability even when a provider's message content model is text/media only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelToolResultContent {
+    Text(String),
+    Json(Value),
+    Image {
+        source: ModelMediaSource,
+        detail: Option<ModelImageDetail>,
+    },
 }
 
 /// Desired output contract for one model request.
@@ -230,6 +242,9 @@ pub struct ModelUsage {
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
+    /// Provider-reported total when available. It is not recomputed because providers may account
+    /// for additional token classes that are not represented by the fields above.
+    pub total_tokens: Option<u64>,
 }
 
 #[cfg(test)]
