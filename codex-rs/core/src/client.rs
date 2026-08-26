@@ -398,7 +398,7 @@ impl WebsocketSession {
     }
 }
 
-enum WebsocketStreamOutcome {
+pub(crate) enum WebsocketStreamOutcome {
     Stream(ResponseStream),
     FallbackToHttp,
 }
@@ -1469,7 +1469,7 @@ impl ModelClientSession {
             turn.has_metadata_header = responses_metadata.has_turn_metadata()
         )
     )]
-    async fn stream_responses_api(
+    pub(crate) async fn stream_responses_api(
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
@@ -1614,7 +1614,7 @@ impl ModelClientSession {
             websocket.warmup = warmup
         )
     )]
-    async fn stream_responses_websocket(
+    pub(crate) async fn stream_responses_websocket(
         &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,

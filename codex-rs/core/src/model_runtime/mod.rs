@@ -7,13 +7,16 @@
 //! Canonical provider-neutral request/event vocabulary lives in `ir`. C2 routes representable
 //! regular sampling requests through `ModelRequest`; C3 maps representable stream events into
 //! `ModelEvent` while retaining an explicit compatibility side channel for Codex/Responses-only
-//! event semantics and product/backend notifications.
+//! event semantics and product/backend notifications. D1 begins route decomposition by moving
+//! protocol/transport selection into the model-runtime adapter without promoting `ModelProviderInfo`
+//! into Tachyon's generic route contract.
 
 mod codex_adapter;
 mod codex_event;
 mod codex_request;
 pub mod ir;
 pub(crate) mod retry;
+pub mod route;
 
 use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;

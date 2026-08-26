@@ -1,6 +1,7 @@
 use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
+use crate::client::WebsocketStreamOutcome;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -8,8 +9,12 @@ use crate::model_runtime::codex_event::CodexEventMapper;
 use crate::model_runtime::codex_event::ModelRuntimeEvent;
 use crate::model_runtime::codex_request::prompt_from_model_request;
 use crate::model_runtime::ir::ModelRequest;
+use crate::model_runtime::route::ModelProtocol;
+use crate::model_runtime::route::ModelRoute;
+use crate::model_runtime::route::ModelTransport;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
+use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::Result;
 use codex_protocol::models::ResponseItem;
@@ -19,6 +24,16 @@ use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 
 const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
+const OPENAI_RESPONSES_PROTOCOL_ID: &str = "openai.responses";
+
+fn codex_route(websocket_enabled: bool) -> ModelRoute {
+    let transport = if websocket_enabled {
+        ModelTransport::WebSocket
+    } else {
+        ModelTransport::Http
+    };
+    ModelRoute::new(ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID), transport)
+}
 
 /// Transitional adapter over the current Codex session-scoped model client.
 #[derive(Debug, Clone)]
@@ -35,8 +50,12 @@ impl CodexModelRuntimeAdapter {
         CodexModelTurnRuntimeAdapter::new(self.client.clone())
     }
 
+    fn current_route(&self) -> ModelRoute {
+        codex_route(self.client.responses_websocket_enabled())
+    }
+
     pub(super) fn startup_preparation_uses_turn_runtime(&self) -> bool {
-        self.client.responses_websocket_enabled()
+        matches!(self.current_route().transport(), ModelTransport::WebSocket)
     }
 
     pub(super) async fn prepare_session(&self) -> Result<()> {
@@ -61,6 +80,10 @@ impl CodexModelTurnRuntimeAdapter {
         }
     }
 
+    fn current_route(&self) -> ModelRoute {
+        codex_route(self.client.responses_websocket_enabled())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn stream(
         &mut self,
@@ -73,18 +96,62 @@ impl CodexModelTurnRuntimeAdapter {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        self.session
-            .stream(
-                prompt,
-                model_info,
-                session_telemetry,
-                effort,
-                summary,
-                service_tier,
-                responses_metadata,
-                inference_trace,
-            )
-            .await
+        let route = self.current_route();
+
+        match (route.protocol().id(), route.transport()) {
+            (OPENAI_RESPONSES_PROTOCOL_ID, ModelTransport::Http) => {
+                self.session
+                    .stream_responses_api(
+                        prompt,
+                        model_info,
+                        session_telemetry,
+                        effort,
+                        summary,
+                        service_tier,
+                        responses_metadata,
+                        inference_trace,
+                    )
+                    .await
+            }
+            (OPENAI_RESPONSES_PROTOCOL_ID, ModelTransport::WebSocket) => {
+                let request_trace = current_span_w3c_trace_context();
+                match self
+                    .session
+                    .stream_responses_websocket(
+                        prompt,
+                        model_info,
+                        session_telemetry,
+                        effort.clone(),
+                        summary,
+                        service_tier.clone(),
+                        responses_metadata,
+                        /*warmup*/ false,
+                        request_trace,
+                        inference_trace,
+                    )
+                    .await?
+                {
+                    WebsocketStreamOutcome::Stream(stream) => Ok(stream),
+                    WebsocketStreamOutcome::FallbackToHttp => {
+                        self.session
+                            .try_switch_fallback_transport(session_telemetry, model_info);
+                        self.session
+                            .stream_responses_api(
+                                prompt,
+                                model_info,
+                                session_telemetry,
+                                effort,
+                                summary,
+                                service_tier,
+                                responses_metadata,
+                                inference_trace,
+                            )
+                            .await
+                    }
+                }
+            }
+            _ => unreachable!("Codex adapter resolved an unsupported model protocol"),
+        }
     }
 
     /// Converts Tachyon's canonical request semantics back into the current Codex request shape at
@@ -134,6 +201,10 @@ impl CodexModelTurnRuntimeAdapter {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
+        if !matches!(self.current_route().transport(), ModelTransport::WebSocket) {
+            return Ok(());
+        }
+
         self.session
             .prewarm_websocket(
                 prompt,
@@ -171,7 +242,7 @@ impl CodexModelTurnRuntimeAdapter {
     }
 
     pub(super) fn suppress_first_retry_notification(&self) -> bool {
-        self.client.responses_websocket_enabled()
+        matches!(self.current_route().transport(), ModelTransport::WebSocket)
     }
 
     pub(super) fn try_recover_after_stream_error(
@@ -179,8 +250,16 @@ impl CodexModelTurnRuntimeAdapter {
         session_telemetry: &SessionTelemetry,
         model_info: &ModelInfo,
     ) -> Option<String> {
+        if !matches!(self.current_route().transport(), ModelTransport::WebSocket) {
+            return None;
+        }
+
         self.session
             .try_switch_fallback_transport(session_telemetry, model_info)
             .then(|| FALLBACK_TO_HTTP_WARNING.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "codex_route_tests.rs"]
+mod tests;
