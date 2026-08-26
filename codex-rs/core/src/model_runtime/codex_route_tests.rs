@@ -2,14 +2,12 @@ use super::*;
 use crate::model_runtime::route::ModelProviderId;
 
 #[test]
-fn session_route_stays_unresolved_only_for_startup_capability_checks() {
-    let http = unresolved_codex_route(/*websocket_enabled*/ false);
-    let websocket = unresolved_codex_route(/*websocket_enabled*/ true);
+fn session_startup_transport_tracks_websocket_capability() {
+    let http = codex_transport(/*websocket_enabled*/ false);
+    let websocket = codex_transport(/*websocket_enabled*/ true);
 
-    assert_eq!(http.protocol().id(), OPENAI_RESPONSES_PROTOCOL_ID);
-    assert_eq!(websocket.protocol().id(), OPENAI_RESPONSES_PROTOCOL_ID);
-    assert_eq!(http.transport(), ModelTransport::Http);
-    assert_eq!(websocket.transport(), ModelTransport::WebSocket);
+    assert_eq!(http, ModelTransport::Http);
+    assert_eq!(websocket, ModelTransport::WebSocket);
 }
 
 #[test]

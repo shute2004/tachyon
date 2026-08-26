@@ -13,7 +13,6 @@ use crate::model_runtime::route::ModelProtocol;
 use crate::model_runtime::route::ModelProviderId;
 use crate::model_runtime::route::ModelRoute;
 use crate::model_runtime::route::ModelTransport;
-use crate::model_runtime::route::UnresolvedModelRoute;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
@@ -28,13 +27,12 @@ use codex_rollout_trace::InferenceTraceContext;
 const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
 const OPENAI_RESPONSES_PROTOCOL_ID: &str = "openai.responses";
 
-fn unresolved_codex_route(websocket_enabled: bool) -> UnresolvedModelRoute {
-    let transport = if websocket_enabled {
+fn codex_transport(websocket_enabled: bool) -> ModelTransport {
+    if websocket_enabled {
         ModelTransport::WebSocket
     } else {
         ModelTransport::Http
-    };
-    UnresolvedModelRoute::new(ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID), transport)
+    }
 }
 
 fn codex_route(provider_id: ModelProviderId, websocket_enabled: bool) -> ModelRoute {
@@ -50,28 +48,6 @@ fn codex_route(provider_id: ModelProviderId, websocket_enabled: bool) -> ModelRo
     )
 }
 
-#[derive(Debug, Clone)]
-enum CodexTurnRoute {
-    Resolved(ModelRoute),
-    Unresolved(UnresolvedModelRoute),
-}
-
-impl CodexTurnRoute {
-    fn protocol(&self) -> &ModelProtocol {
-        match self {
-            Self::Resolved(route) => route.protocol(),
-            Self::Unresolved(route) => route.protocol(),
-        }
-    }
-
-    fn transport(&self) -> ModelTransport {
-        match self {
-            Self::Resolved(route) => route.transport(),
-            Self::Unresolved(route) => route.transport(),
-        }
-    }
-}
-
 /// Transitional adapter over the current Codex session-scoped model client.
 #[derive(Debug, Clone)]
 pub(super) struct CodexModelRuntimeAdapter {
@@ -83,23 +59,19 @@ impl CodexModelRuntimeAdapter {
         Self { client }
     }
 
-    pub(super) fn begin_turn(&self) -> CodexModelTurnRuntimeAdapter {
-        CodexModelTurnRuntimeAdapter::new(self.client.clone(), None)
-    }
-
     pub(super) fn begin_turn_for_provider(
         &self,
         provider_id: ModelProviderId,
     ) -> CodexModelTurnRuntimeAdapter {
-        CodexModelTurnRuntimeAdapter::new(self.client.clone(), Some(provider_id))
+        CodexModelTurnRuntimeAdapter::new(self.client.clone(), provider_id)
     }
 
-    fn current_route(&self) -> UnresolvedModelRoute {
-        unresolved_codex_route(self.client.responses_websocket_enabled())
+    fn current_transport(&self) -> ModelTransport {
+        codex_transport(self.client.responses_websocket_enabled())
     }
 
     pub(super) fn startup_preparation_uses_turn_runtime(&self) -> bool {
-        matches!(self.current_route().transport(), ModelTransport::WebSocket)
+        matches!(self.current_transport(), ModelTransport::WebSocket)
     }
 
     pub(super) async fn prepare_session(&self) -> Result<()> {
@@ -110,13 +82,13 @@ impl CodexModelRuntimeAdapter {
 /// Transitional adapter over the current Codex turn-scoped model execution state.
 pub(super) struct CodexModelTurnRuntimeAdapter {
     client: ModelClient,
-    provider_id: Option<ModelProviderId>,
+    provider_id: ModelProviderId,
     session: ModelClientSession,
     event_mapper: CodexEventMapper,
 }
 
 impl CodexModelTurnRuntimeAdapter {
-    fn new(client: ModelClient, provider_id: Option<ModelProviderId>) -> Self {
+    fn new(client: ModelClient, provider_id: ModelProviderId) -> Self {
         let session = client.new_session();
         Self {
             client,
@@ -126,16 +98,11 @@ impl CodexModelTurnRuntimeAdapter {
         }
     }
 
-    fn current_route(&self) -> CodexTurnRoute {
-        match &self.provider_id {
-            Some(provider_id) => CodexTurnRoute::Resolved(codex_route(
-                provider_id.clone(),
-                self.client.responses_websocket_enabled(),
-            )),
-            None => CodexTurnRoute::Unresolved(unresolved_codex_route(
-                self.client.responses_websocket_enabled(),
-            )),
-        }
+    fn current_route(&self) -> ModelRoute {
+        codex_route(
+            self.provider_id.clone(),
+            self.client.responses_websocket_enabled(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

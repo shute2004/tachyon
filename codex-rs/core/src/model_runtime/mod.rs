@@ -9,8 +9,8 @@
 //! `ModelEvent` while retaining an explicit compatibility side channel for Codex/Responses-only
 //! event semantics and product/backend notifications. D1 moved protocol/transport selection into
 //! the model-runtime adapter. D2 introduced provider identity as an independent route dimension.
-//! D3 binds configured provider identity through an explicit provider-bound turn entry point while
-//! retaining a migration-only unresolved entry point for call sites that have not been converted.
+//! D3 binds configured provider identity for every turn-scoped runtime. Session startup capability
+//! checks remain adapter-private and do not construct a model route before provider binding.
 
 mod codex_adapter;
 mod codex_event;
@@ -62,14 +62,6 @@ impl ModelRuntime {
     pub fn from_codex_client(client: ModelClient) -> Self {
         Self {
             adapter: CodexModelRuntimeAdapter::new(client),
-        }
-    }
-
-    /// Migration-only entry point for call sites that have not yet retained provider identity at
-    /// turn construction time.
-    pub fn begin_turn(&self) -> ModelTurnRuntime {
-        ModelTurnRuntime {
-            adapter: self.adapter.begin_turn(),
         }
     }
 
