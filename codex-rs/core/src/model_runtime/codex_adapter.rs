@@ -2,7 +2,10 @@ use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::model_runtime::codex_event::CodexEventMapper;
+use crate::model_runtime::codex_event::ModelRuntimeEvent;
 use crate::model_runtime::codex_request::prompt_from_model_request;
 use crate::model_runtime::ir::ModelRequest;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -45,12 +48,17 @@ impl CodexModelRuntimeAdapter {
 pub(super) struct CodexModelTurnRuntimeAdapter {
     client: ModelClient,
     session: ModelClientSession,
+    event_mapper: CodexEventMapper,
 }
 
 impl CodexModelTurnRuntimeAdapter {
     fn new(client: ModelClient) -> Self {
         let session = client.new_session();
-        Self { client, session }
+        Self {
+            client,
+            session,
+            event_mapper: CodexEventMapper::default(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -107,6 +115,12 @@ impl CodexModelTurnRuntimeAdapter {
             inference_trace,
         )
         .await
+    }
+
+    /// Maps one Codex/OpenAI stream event into canonical model semantics or the explicit
+    /// compatibility side channel. Mapping state is turn-scoped and resets on each Created event.
+    pub(super) fn map_stream_event(&mut self, event: ResponseEvent) -> ModelRuntimeEvent {
+        self.event_mapper.map(event)
     }
 
     #[allow(clippy::too_many_arguments)]
