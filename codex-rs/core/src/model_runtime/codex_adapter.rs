@@ -3,6 +3,8 @@ use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
+use crate::model_runtime::codex_request::prompt_from_model_request;
+use crate::model_runtime::ir::ModelRequest;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
 use codex_protocol::config_types::ReasoningSummary;
@@ -75,6 +77,36 @@ impl CodexModelTurnRuntimeAdapter {
                 inference_trace,
             )
             .await
+    }
+
+    /// Converts Tachyon's canonical request semantics back into the current Codex request shape at
+    /// the adapter boundary. `legacy_prompt` is migration-only preservation state for provider-
+    /// private item decorations that intentionally do not belong in `ModelRequest`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn stream_model_request(
+        &mut self,
+        request: &ModelRequest,
+        legacy_prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffort>,
+        summary: ReasoningSummary,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let prompt = prompt_from_model_request(request, legacy_prompt)?;
+        self.stream(
+            &prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            inference_trace,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
