@@ -318,6 +318,22 @@ The current planned order is:
 10. Remove remaining Codex/OpenAI product dependencies from kernel crates.
 11. Extract the standalone Tachyon workspace structure.
 
+## Naming migration
+
+Codex-derived names should be neutralized incrementally as semantic ownership moves into Tachyon. Naming follows architectural ownership rather than cosmetic rebranding.
+
+- Rename a `Codex*`, `codex_*`, or `codex-*` identifier when the concept it names has become a genuinely model/vendor/UI-independent Tachyon concern and the touched boundary makes that ownership clear.
+- Keep explicit Codex/OpenAI/Responses naming when an identifier still represents a transitional adapter, provider/product integration, wire protocol, header, endpoint, compatibility behavior, or other intentionally specific implementation detail.
+- Prefer opportunistic, local renames in the same PR that moves the corresponding responsibility across a boundary. Avoid repository-wide mechanical renames that mix semantic extraction with unrelated churn.
+- Do not rename merely to hide ancestry. A specific name is useful when it tells future maintainers that the implementation still belongs below an adapter boundary.
+- Once a generic API replaces a Codex-specific API, new kernel code should use the neutral name and callers should migrate toward it rather than introducing new Codex-branded aliases above the boundary.
+
+Examples during the model-runtime migration:
+
+- a session service accessor that exposes the generic boundary should be named `model_runtime`, even while its transitional backing field is still `model_client`;
+- `ModelClient` and `ModelClientSession` retain their current names while they are the concrete Codex/OpenAI implementation behind `ModelRuntime` / `ModelTurnRuntime`;
+- Responses-specific metadata, headers, continuation identifiers, and transport operations retain explicit provider/protocol naming until their generic capability is extracted.
+
 ## Development workflow
 
 - `main` should stay build/test-capable.
