@@ -52,16 +52,23 @@ fn completion_carries_usage_without_provider_response_identity() {
     let completion = ModelCompletion {
         usage: Some(ModelUsage {
             input_tokens: 100,
-            cached_input_tokens: 60,
-            cache_write_input_tokens: 0,
             output_tokens: 20,
-            reasoning_output_tokens: 5,
+            cached_input_tokens: Some(60),
+            cache_write_input_tokens: None,
+            reasoning_output_tokens: Some(5),
             total_tokens: Some(120),
         }),
         end_turn: Some(true),
     };
 
     assert_eq!(completion.usage.as_ref().map(|usage| usage.output_tokens), Some(20));
+    assert_eq!(
+        completion
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.cache_write_input_tokens),
+        None
+    );
     assert_eq!(completion.usage.as_ref().and_then(|usage| usage.total_tokens), Some(120));
     assert_eq!(completion.end_turn, Some(true));
 }
