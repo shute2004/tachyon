@@ -101,7 +101,10 @@ pub(crate) async fn run_remote_compact_task(
         CompactionImplementation::ResponsesCompact,
         CompactionPhase::StandaloneTurn,
     );
-    let turn_runtime = sess.services.model_runtime().begin_turn();
+    let turn_runtime = sess
+        .services
+        .model_runtime()
+        .begin_turn_for_provider(turn_context.config.model_provider_id.clone());
     run_remote_compact_task_inner(
         &sess,
         &step_context,
