@@ -10,8 +10,8 @@ use crate::model_runtime::codex_event::ModelRuntimeEvent;
 use crate::model_runtime::codex_request::prompt_from_model_request;
 use crate::model_runtime::ir::ModelRequest;
 use crate::model_runtime::route::ModelProtocol;
-use crate::model_runtime::route::ModelRoute;
 use crate::model_runtime::route::ModelTransport;
+use crate::model_runtime::route::UnresolvedModelRoute;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
@@ -26,13 +26,13 @@ use codex_rollout_trace::InferenceTraceContext;
 const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
 const OPENAI_RESPONSES_PROTOCOL_ID: &str = "openai.responses";
 
-fn codex_route(websocket_enabled: bool) -> ModelRoute {
+fn codex_route(websocket_enabled: bool) -> UnresolvedModelRoute {
     let transport = if websocket_enabled {
         ModelTransport::WebSocket
     } else {
         ModelTransport::Http
     };
-    ModelRoute::new(ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID), transport)
+    UnresolvedModelRoute::new(ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID), transport)
 }
 
 /// Transitional adapter over the current Codex session-scoped model client.
@@ -50,7 +50,7 @@ impl CodexModelRuntimeAdapter {
         CodexModelTurnRuntimeAdapter::new(self.client.clone())
     }
 
-    fn current_route(&self) -> ModelRoute {
+    fn current_route(&self) -> UnresolvedModelRoute {
         codex_route(self.client.responses_websocket_enabled())
     }
 
@@ -80,7 +80,7 @@ impl CodexModelTurnRuntimeAdapter {
         }
     }
 
-    fn current_route(&self) -> ModelRoute {
+    fn current_route(&self) -> UnresolvedModelRoute {
         codex_route(self.client.responses_websocket_enabled())
     }
 
