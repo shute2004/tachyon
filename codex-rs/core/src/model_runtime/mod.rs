@@ -4,11 +4,12 @@
 //! implementation is still backed by Codex/OpenAI behavior, which is isolated in
 //! `codex_adapter` while the extraction is in progress.
 //!
-//! Canonical provider-neutral request/event vocabulary lives in `ir`. The runtime method
-//! signatures below still use migration-only Codex/Responses shapes until call sites and the
-//! adapter are migrated in follow-up slices.
+//! Canonical provider-neutral request/event vocabulary lives in `ir`. The C2 migration path now
+//! routes representable regular sampling requests through `ModelRequest` while retaining an
+//! explicit legacy fallback for Codex/Responses-only request shapes.
 
 mod codex_adapter;
+mod codex_request;
 pub mod ir;
 pub(crate) mod retry;
 
@@ -27,6 +28,13 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
+use ir::ModelRequest;
+
+/// Transitional C2 bridge: project the current Codex prompt into canonical request semantics when
+/// doing so is lossless. Unsupported provider-specific history/state stays on the legacy path.
+pub(crate) fn try_model_request_from_prompt(prompt: &Prompt) -> Option<ModelRequest> {
+    codex_request::try_model_request_from_prompt(prompt)
+}
 
 /// Session-scoped model execution runtime.
 ///
@@ -99,6 +107,58 @@ impl ModelTurnRuntime {
                 inference_trace,
             )
             .await
+    }
+
+    /// Transitional C2 entry point for regular sampling.
+    ///
+    /// Representable requests are sent through the canonical `ModelRequest` conversion boundary.
+    /// Requests that still contain unsupported Codex/Responses-only semantics use the legacy
+    /// `Prompt` path unchanged. The legacy template is also used below the boundary to restore
+    /// provider-private item decorations that deliberately do not belong in the canonical IR.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn stream_migrating_request(
+        &mut self,
+        request: Option<&ModelRequest>,
+        legacy_prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffort>,
+        summary: ReasoningSummary,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        match request {
+            Some(request) => {
+                self.adapter
+                    .stream_model_request(
+                        request,
+                        legacy_prompt,
+                        model_info,
+                        session_telemetry,
+                        effort,
+                        summary,
+                        service_tier,
+                        responses_metadata,
+                        inference_trace,
+                    )
+                    .await
+            }
+            None => {
+                self.adapter
+                    .stream(
+                        legacy_prompt,
+                        model_info,
+                        session_telemetry,
+                        effort,
+                        summary,
+                        service_tier,
+                        responses_metadata,
+                        inference_trace,
+                    )
+                    .await
+            }
+        }
     }
 
     /// Optionally prepares backend resources or opaque execution state before regular inference.
