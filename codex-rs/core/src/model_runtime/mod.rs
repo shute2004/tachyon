@@ -55,11 +55,6 @@ impl ModelRuntime {
     pub(crate) fn has_turn_preparation(&self) -> bool {
         self.adapter.has_turn_preparation()
     }
-
-    /// Performs session-level preparation when no prepared turn runtime will be produced.
-    pub(crate) async fn prepare_session(&self) -> Result<()> {
-        self.adapter.prepare_session().await
-    }
 }
 
 /// Opaque model execution handle scoped to one harness turn.
