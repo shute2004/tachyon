@@ -45,8 +45,8 @@ impl SessionTask for RegularTask {
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
-        // not wait on startup runtime preparation resolution.
-        let startup_preparation = async {
+        // not wait on startup prewarm resolution.
+        let prewarmed_client_session = async {
             let event = EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: ctx.sub_id.clone(),
                 trace_id: ctx.trace_id.clone(),
@@ -61,24 +61,24 @@ impl SessionTask for RegularTask {
         }
         .instrument(trace_span!("regular_task.prepare_run_turn"))
         .await;
-        let prepared_turn_runtime = match startup_preparation {
+        let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
                 run_hooks_and_record_inputs(&sess, &ctx, &input, PersistContext::Standard).await;
                 return Ok(None);
             }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
-            SessionStartupPrewarmResolution::Ready(prepared_turn_runtime) => {
-                Some(*prepared_turn_runtime)
+            SessionStartupPrewarmResolution::Ready(prewarmed_client_session) => {
+                Some(*prewarmed_client_session)
             }
         };
         let mut next_input = input;
-        let mut prepared_turn_runtime = prepared_turn_runtime;
+        let mut prewarmed_client_session = prewarmed_client_session;
         loop {
             let last_agent_message = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 next_input,
-                prepared_turn_runtime.take(),
+                prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
             .instrument(run_turn_span.clone())
