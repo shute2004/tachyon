@@ -23,7 +23,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
-    let suppress_first_retry_notification = sess.services.model_client.responses_websocket_enabled();
+    let suppress_first_retry_notification = sess.services.model_runtime().has_turn_preparation();
     handle_retryable_model_stream_error(
         retry_state,
         max_retries,
