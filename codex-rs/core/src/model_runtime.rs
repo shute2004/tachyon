@@ -16,6 +16,7 @@
 //! intentionally behavior-preserving so the mature Codex transport, retry, prewarm, continuation,
 //! and routing behavior can be decomposed behind this seam later instead of being rewritten now.
 
+use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -24,8 +25,10 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::Result;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 
 /// Session-scoped model execution runtime.
@@ -53,7 +56,24 @@ impl ModelRuntime {
     /// Reusable state is returned by `ModelClientSession::drop`; it must not be modeled as generic
     /// Tachyon fields merely because it is temporarily owned by the turn handle.
     pub fn begin_turn(&self) -> ModelTurnRuntime {
-        ModelTurnRuntime::from_codex_session(self.client.new_session())
+        ModelTurnRuntime::from_codex_client(self.client.clone())
+    }
+
+    /// Returns whether the current transitional adapter has a turn-runtime preparation path.
+    ///
+    /// The present Codex implementation maps this to Responses WebSocket preparation. The
+    /// capability name intentionally describes the generic lifecycle rather than that transport.
+    pub(crate) fn has_turn_preparation(&self) -> bool {
+        self.client.responses_websocket_enabled()
+    }
+
+    /// Performs session-level preparation when no prepared turn runtime will be produced.
+    ///
+    /// Today this resolves Codex/OpenAI authentication so Agent Identity bootstrap behavior stays
+    /// unchanged. It remains crate-private while the provider-neutral preparation contract is
+    /// still being extracted.
+    pub(crate) async fn prepare_session(&self) -> Result<()> {
+        self.client.prewarm_auth().await
     }
 }
 
@@ -64,12 +84,17 @@ impl ModelRuntime {
 /// per turn; other opaque backend state may be reusable across turns even when it is temporarily
 /// held by this handle. Those lifetime details remain private to the current OpenAI/Codex adapter.
 pub struct ModelTurnRuntime {
+    /// Session-scoped adapter handle used by capabilities that are implemented outside the
+    /// streaming `ModelClientSession` API during migration. This clone shares the same underlying
+    /// `ModelClientState` as `session`.
+    client: ModelClient,
     session: ModelClientSession,
 }
 
 impl ModelTurnRuntime {
-    fn from_codex_session(session: ModelClientSession) -> Self {
-        Self { session }
+    fn from_codex_client(client: ModelClient) -> Self {
+        let session = client.new_session();
+        Self { client, session }
     }
 
     /// Streams one model request using the existing Codex implementation.
@@ -130,5 +155,47 @@ impl ModelTurnRuntime {
                 responses_metadata,
             )
             .await
+    }
+
+    /// Runs the existing remote-compaction request while keeping provider-private turn affinity
+    /// state inside the runtime boundary.
+    ///
+    /// This is a migration-only capability surface: request/response types are still Codex and
+    /// Responses shaped, but callers no longer need to extract `x-codex-turn-state` themselves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compact_conversation_history(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        settings: CompactConversationRequestSettings,
+        session_telemetry: &SessionTelemetry,
+        compaction_trace: &CompactionTraceContext,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Vec<ResponseItem>> {
+        self.client
+            .compact_conversation_history(
+                prompt,
+                model_info,
+                Some(self.session.turn_state()),
+                settings,
+                session_telemetry,
+                compaction_trace,
+                responses_metadata,
+            )
+            .await
+    }
+
+    /// Lets the current adapter attempt request-path recovery without exposing its concrete
+    /// WebSocket-to-HTTP mechanism as public Tachyon API.
+    ///
+    /// Retry budgets and scheduling remain harness concerns; this crate-private bridge only
+    /// delegates the backend-specific recovery action during the migration.
+    pub(crate) fn try_recover_after_stream_error(
+        &mut self,
+        session_telemetry: &SessionTelemetry,
+        model_info: &ModelInfo,
+    ) -> bool {
+        self.session
+            .try_switch_fallback_transport(session_telemetry, model_info)
     }
 }
