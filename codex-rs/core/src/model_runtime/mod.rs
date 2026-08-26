@@ -4,10 +4,12 @@
 //! implementation is still backed by Codex/OpenAI behavior, which is isolated in
 //! `codex_adapter` while the extraction is in progress.
 //!
-//! Request/response types in the method signatures are still migration-only Codex/Responses
-//! shapes. They are not the canonical Tachyon model IR.
+//! Canonical provider-neutral request/event vocabulary lives in `ir`. The runtime method
+//! signatures below still use migration-only Codex/Responses shapes until call sites and the
+//! adapter are migrated in follow-up slices.
 
 mod codex_adapter;
+pub mod ir;
 pub(crate) mod retry;
 
 use crate::client::CompactConversationRequestSettings;

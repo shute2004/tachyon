@@ -42,13 +42,10 @@ use core_test_support::test_codex::TurnInputRequest as ExternalTurnInputRequest;
 use codex_features::Feature;
 use codex_file_system::FileSystemSandboxContext;
 use codex_http_client::ClientRouteClass;
-use codex_http_client::HttpClientFactory;
-use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::create_model_provider;
-use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
@@ -570,9 +567,10 @@ async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_start
         Some("00000000000000000000000000000011")
     );
     let (_tx, startup_prewarm_rx) = tokio::sync::oneshot::channel::<()>();
+    let model_runtime = sess.services.model_runtime();
     let handle = tokio::spawn(async move {
         let _ = startup_prewarm_rx.await;
-        Ok(test_model_client_session())
+        Ok::<_, codex_protocol::error::CodexErr>(model_runtime.begin_turn())
     });
 
     sess.set_session_startup_prewarm(
@@ -643,9 +641,10 @@ async fn request_mcp_server_elicitation_auto_accepts_when_auto_deny_is_enabled()
 async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let (_tx, startup_prewarm_rx) = tokio::sync::oneshot::channel::<()>();
+    let model_runtime = sess.services.model_runtime();
     let handle = tokio::spawn(async move {
         let _ = startup_prewarm_rx.await;
-        Ok(test_model_client_session())
+        Ok::<_, codex_protocol::error::CodexErr>(model_runtime.begin_turn())
     });
 
     sess.set_session_startup_prewarm(
@@ -699,28 +698,6 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     assert!(started_at.is_some());
     assert!(completed_at.is_some());
     assert!(duration_ms.is_some());
-}
-
-fn test_model_client_session() -> crate::client::ModelClientSession {
-    let thread_id = ThreadId::try_from("00000000-0000-4000-8000-000000000001")
-        .expect("test thread id should be valid");
-    crate::client::ModelClient::new(
-        /*auth_manager*/ None,
-        AgentIdentityAuthPolicy::JwtOnly,
-        thread_id,
-        ModelProviderInfo::create_openai_provider(/* base_url */ /*base_url*/ None),
-        codex_protocol::protocol::SessionSource::Exec,
-        "test_originator".to_string(),
-        /*model_verbosity*/ None,
-        /*content_item_kinds_enabled*/ true,
-        /*enable_request_compression*/ false,
-        /*include_timing_metrics*/ false,
-        /*beta_features_header*/ None,
-        /*concurrent_reasoning_summaries_enabled*/ false,
-        /*attestation_provider*/ None,
-        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-    )
-    .new_session()
 }
 
 pub(super) fn raw_history_items(history: &ContextManager) -> Vec<ResponseItem> {
