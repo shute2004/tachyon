@@ -25,7 +25,7 @@ enum RemoteCompactExecution<'a> {
     /// Transitional path used by call sites that have not moved behind `ModelTurnRuntime` yet.
     LegacyTurnState(Option<Arc<OnceLock<String>>>),
     /// Preferred migration path. Provider-private turn affinity stays inside the runtime.
-    Runtime(&'a ModelTurnRuntime),
+    TurnRuntime(&'a ModelTurnRuntime),
 }
 
 pub(super) async fn run_remote_compact_attempt(
@@ -47,10 +47,10 @@ pub(super) async fn run_remote_compact_attempt(
     .await
 }
 
-pub(super) async fn run_remote_compact_attempt_with_runtime(
+pub(super) async fn run_remote_compact_attempt_with_turn_runtime(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
-    model_runtime: &ModelTurnRuntime,
+    turn_runtime: &ModelTurnRuntime,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -58,7 +58,7 @@ pub(super) async fn run_remote_compact_attempt_with_runtime(
     run_remote_compact_attempt_inner(
         sess,
         step_context,
-        RemoteCompactExecution::Runtime(model_runtime),
+        RemoteCompactExecution::TurnRuntime(turn_runtime),
         compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -145,8 +145,8 @@ async fn run_remote_compact_attempt_inner(
                 )
                 .await?
         }
-        RemoteCompactExecution::Runtime(model_runtime) => {
-            model_runtime
+        RemoteCompactExecution::TurnRuntime(turn_runtime) => {
+            turn_runtime
                 .compact_conversation_history(
                     &prompt,
                     turn_context.model_info(),
