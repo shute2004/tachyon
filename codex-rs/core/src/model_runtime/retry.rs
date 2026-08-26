@@ -1,8 +1,8 @@
 //! Provider-neutral model-stream retry policy used during model-runtime extraction.
 //!
-//! Concrete backend recovery mechanisms are supplied by the caller. The current Codex adapter
-//! still maps recovery to Responses WebSocket-to-HTTP fallback, but that mechanism is not part of
-//! this module's contract.
+//! Concrete backend recovery mechanisms and backend-specific policy inputs are supplied by the
+//! caller. The current Codex adapter may still map recovery to Responses WebSocket-to-HTTP
+//! fallback, but that mechanism is not part of this module's contract.
 
 use std::time::Duration;
 
@@ -44,6 +44,9 @@ impl Default for ModelStreamRetryState {
 }
 
 /// Retry entry point for call sites that already own a `ModelTurnRuntime`.
+///
+/// `allow_unbounded_connection_retry` is an explicit policy input so the generic retry module does
+/// not need to know which concrete backends opt out of that behavior.
 pub(crate) async fn handle_retryable_turn_runtime_error(
     retry_state: &mut ModelStreamRetryState,
     max_retries: u64,
@@ -52,11 +55,9 @@ pub(crate) async fn handle_retryable_turn_runtime_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ModelStreamRequest,
+    allow_unbounded_connection_retry: bool,
 ) -> Result<(), CodexErr> {
-    // Preserve the current Codex UX while the adapter is still the only backend: the first
-    // transient retry notification is suppressed when the backend is using its prepared streaming
-    // path. This policy input can be made an explicit backend capability later.
-    let suppress_first_retry_notification = sess.services.model_runtime().has_turn_preparation();
+    let suppress_first_retry_notification = turn_runtime.suppress_first_retry_notification();
     handle_retryable_model_stream_error(
         retry_state,
         max_retries,
@@ -64,8 +65,8 @@ pub(crate) async fn handle_retryable_turn_runtime_error(
         sess,
         turn_context,
         request,
+        allow_unbounded_connection_retry,
         suppress_first_retry_notification,
-        "Falling back from WebSockets to HTTPS transport.",
         || {
             turn_runtime.try_recover_after_stream_error(
                 &turn_context.session_telemetry,
@@ -79,8 +80,9 @@ pub(crate) async fn handle_retryable_turn_runtime_error(
 /// Handles a retryable model-stream error and returns `Ok(())` when the caller should retry.
 ///
 /// `try_backend_recovery` performs a backend-private recovery action after the normal retry budget
-/// is exhausted. The caller also supplies the existing recovery warning text so extracting policy
-/// does not alter user-visible behavior.
+/// is exhausted. A successful recovery may return a backend-specific warning to emit, keeping the
+/// concrete recovery mechanism out of the generic retry policy.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_retryable_model_stream_error<F>(
     retry_state: &mut ModelStreamRetryState,
     max_retries: u64,
@@ -88,26 +90,26 @@ pub(crate) async fn handle_retryable_model_stream_error<F>(
     sess: &Session,
     turn_context: &TurnContext,
     request: ModelStreamRequest,
+    allow_unbounded_connection_retry: bool,
     suppress_first_retry_notification: bool,
-    recovery_warning: &str,
     mut try_backend_recovery: F,
 ) -> Result<(), CodexErr>
 where
-    F: FnMut() -> bool,
+    F: FnMut() -> Option<String>,
 {
     let operation = match request {
         ModelStreamRequest::Sampling => RetryOperation::Sampling,
         ModelStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
     };
 
-    if turn_context
-        .config
-        .features
-        .enabled(Feature::UnboundedConnectionRetries)
+    if allow_unbounded_connection_retry
+        && turn_context
+            .config
+            .features
+            .enabled(Feature::UnboundedConnectionRetries)
         && matches!(request, ModelStreamRequest::Sampling)
         && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
         && !turn_context.session_source.is_internal()
-        && !turn_context.provider.info().is_amazon_bedrock()
     {
         let retry_delay = retry_state.connection_retry_delay;
         warn!(
@@ -127,7 +129,9 @@ where
         return Ok(());
     }
 
-    if retry_state.retries >= max_retries && try_backend_recovery() {
+    if retry_state.retries >= max_retries
+        && let Some(recovery_warning) = try_backend_recovery()
+    {
         sess.send_event(
             turn_context,
             EventMsg::Warning(WarningEvent {
