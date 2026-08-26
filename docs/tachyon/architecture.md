@@ -68,11 +68,11 @@ There are two materially different cases:
 
 Examples:
 
-- `x-codex-turn-state` is OpenAI/Codex-specific, but turn-scoped backend execution state is a general capability.
+- `x-codex-turn-state` is OpenAI/Codex-specific, but turn-affinity backend execution state is a general capability.
 - `previous_response_id` is Responses-specific, but opaque provider continuation state is general.
 - `/responses/compact` is OpenAI-specific, but compaction orchestration and optional remote compaction capability are general.
-- Responses WebSocket prewarming is OpenAI-specific, but runtime preparation and reusable connection/session resources are general model-runtime concerns.
-- Responses WebSocket-to-HTTP fallback is provider/transport-specific, but recovery policy and an execution backend's ability to change route/transport are general capabilities.
+- Responses WebSocket prewarming is OpenAI-specific, but runtime preparation and reusable backend resources are general model-runtime concerns.
+- Responses WebSocket-to-HTTP fallback is provider/transport-specific, but recovery policy and an execution backend's ability to recover or change execution route are general capabilities.
 
 ## Model-runtime direction
 
@@ -100,49 +100,66 @@ After that seam is established, the existing `ModelClient` can be decomposed inc
 
 ### Runtime lifetimes
 
-The model-runtime boundary must preserve two distinct lifetimes that already exist in the Codex implementation:
+The model-runtime boundary must preserve the distinct ownership roles already present in Codex without assuming that every object temporarily held by a turn runtime has a turn-only lifetime.
 
 ```text
 Harness Session
     |
     v
-ModelRuntime                    session-scoped
+ModelRuntime                         session-scoped
     |
-    `-- begin_turn / prepare_turn
+    |-- session recovery/shared resources
+    |-- reusable opaque backend cache
+    |
+    `-- begin_turn()
             |
             v
-       ModelTurnRuntime         turn-scoped opaque execution handle
+       ModelTurnRuntime              fresh handle per harness turn
+            |
+            |-- fresh turn-affinity state
+            `-- exclusive checkout of reusable opaque backend state
+                    |
+                    `-- Drop returns reusable portion to ModelRuntime
 ```
-
-The session-scoped runtime may retain reusable backend resources and recovery state across turns. The turn-scoped runtime owns provider-private execution state that must not leak between harness turns.
 
 For the initial OpenAI/Codex adapter, this maps approximately to:
 
 ```text
 ModelRuntime
     `-- existing ModelClient
+         +-- session-scoped provider/auth/recovery state
+         `-- cached reusable WebsocketSession
+              +-- WebSocket connection
+              +-- last request
+              +-- last response/continuation cache
+              `-- incremental-request bookkeeping
 
 ModelTurnRuntime
     `-- existing ModelClientSession
-         +-- x-codex-turn-state
-         +-- websocket connection/request state
-         +-- previous_response_id/incremental continuation state
-         `-- turn-local transport state
+         +-- fresh x-codex-turn-state
+         +-- checked-out WebsocketSession
+         `-- turn execution ownership
+              |
+              `-- Drop returns reusable WebsocketSession to ModelClient
 ```
 
-The kernel must not introduce generic fields such as `turn_state: String` or `previous_response_id`. The generic capability is that a model backend may hold opaque session-scoped and turn-scoped execution state; the representation remains private to the adapter.
+`x-codex-turn-state` is genuinely fresh per turn and must never leak into the next harness turn. By contrast, `previous_response_id`, the previous request/response cache, incremental request bookkeeping, and the WebSocket connection are implementation-private state whose useful lifetime may cross a harness-turn boundary. They can be temporarily owned by `ModelTurnRuntime` without becoming canonical turn-private Tachyon state.
 
-A fresh turn runtime is created for each harness turn. The same turn runtime is reused for sampling, tool follow-ups, retries, and inline/remote compaction inside that turn. Provider-private turn state must not be reused across different harness turns.
+The kernel must not introduce generic fields such as `turn_state: String`, `previous_response_id`, or a generic WebSocket cache. The generic capability is that a backend may own opaque session-scoped state, fresh turn-affinity state, and reusable resources that can be checked out by a turn handle and returned when that handle is dropped.
 
-Session-scoped reusable resources may survive turn teardown. For the initial adapter, the existing behavior where `ModelClientSession::Drop` returns reusable WebSocket state to `ModelClient` must be preserved.
+A fresh `ModelTurnRuntime` is created for each harness turn. The same handle is intended to be reused for sampling, tool follow-ups, retries, and inline/remote compaction inside that turn. Fresh turn-affinity state must not be reused across different harness turns, while reusable backend state may survive through the session runtime according to adapter-private rules.
 
-### Runtime preparation and prewarm
+For the initial adapter, the existing `ModelClientSession::Drop` behavior must be preserved. It returns the reusable `WebsocketSession` as a whole, not merely its connection, to the session-scoped `ModelClient` cache.
 
-Prewarming is a general optional runtime capability, while the concrete Responses WebSocket warmup protocol is OpenAI-specific.
+### Runtime preparation
 
-The initial seam must preserve startup prewarm ownership transfer: a runtime resource prepared before the first regular turn can be consumed by that turn without exposing WebSocket objects, `previous_response_id`, or other provider-private state to the agent loop.
+Runtime preparation is a general optional capability. Responses WebSocket prewarming is one OpenAI-specific realization of that capability.
 
-Generic APIs must not be named after Responses/WebSocket implementation details. A future provider may implement runtime preparation differently or as a no-op.
+A backend may optionally prepare resources or opaque execution state before the first model request. The operation may be implemented differently by another backend or may be a no-op.
+
+The current OpenAI/Codex path sends a Responses WebSocket `generate=false` warmup and transfers the prepared execution handle to the first regular turn. That concrete protocol and its `previous_response_id`/incremental reuse behavior remain adapter-private.
+
+Generic APIs must not be named after Responses/WebSocket implementation details.
 
 ### Remote compaction
 
@@ -163,11 +180,11 @@ Harness Compaction Manager
                      `-- /responses/compact + private turn state
 ```
 
-### Retry and fallback
+### Retry and recovery
 
 Retry scheduling, budgets, and user-visible recovery lifecycle are reusable harness concerns. The concrete mechanism used to recover a model request may remain provider/route/transport-specific.
 
-The initial seam preserves existing retry and WebSocket-to-HTTP fallback behavior rather than redesigning it. A later extraction step can separate harness retry policy from provider transport-recovery mechanisms.
+The initial migration preserves existing retry and WebSocket-to-HTTP fallback behavior rather than making "switch fallback transport" a stable generic runtime contract. A later extraction step can introduce a provider-neutral recovery capability while leaving concrete route/transport changes in adapters.
 
 ## Long-term model execution shape
 
@@ -207,22 +224,45 @@ The initial model-runtime seam is allowed to carry existing `Prompt`, `ResponseI
 
 Wire types must not become the stable kernel IR.
 
-## Initial model-runtime seam scope
+## Initial model-runtime migration phase
 
-The first model-runtime implementation step is deliberately narrower than the long-term model architecture.
+The initial migration is deliberately split so lifetime/API review is separate from behavior-preserving call-site rewiring.
+
+### Step A — seam definition
+
+This is the scope of the first Model Runtime PR.
 
 In scope:
 
 - introduce a Tachyon-owned model-runtime boundary
-- represent session-scoped runtime lifetime separately from a turn-scoped runtime handle
-- keep existing `ModelClient` and `ModelClientSession` behavior behind the initial Codex/OpenAI adapter
-- make the agent sampling path depend on the runtime boundary rather than the concrete model client/session
-- preserve one turn-runtime handle across sampling, tool follow-up, retry, and compaction within a turn
-- preserve startup prewarm and session-scoped reusable transport state
+- represent the session-scoped runtime separately from a fresh per-turn runtime handle
+- keep the existing `ModelClient` and `ModelClientSession` as the implementation behind the initial Codex/OpenAI adapter
+- expose only the narrow operations needed to validate the model-execution shape
+- document which state is fresh per turn versus opaque reusable backend state
 - keep provider-private continuation, sticky-routing, WebSocket, auth-header, and request state below the runtime boundary
-- preserve current remote compaction and transport fallback behavior without exposing their OpenAI-specific state
+- mark current Responses-shaped request/event types as migration-only
 
-Explicitly out of scope for the first seam:
+Not in scope for Step A:
+
+- rewiring `session/turn.rs`
+- startup-prewarm ownership migration
+- retry call-site migration
+- remote-compaction call-site migration
+- defining a generic recovery API
+
+### Step B — call-site migration
+
+The following PR should wire existing Codex behavior through the reviewed seam without changing behavior:
+
+- make the agent sampling path depend on `ModelRuntime` / `ModelTurnRuntime` rather than concrete `ModelClientSession`
+- preserve one turn-runtime handle across sampling, tool follow-up, retry, and inline compaction within a turn
+- preserve startup preparation and ownership transfer into the first regular turn
+- preserve cross-turn reusable backend cache semantics
+- migrate retry/recovery without exposing a concrete WebSocket-to-HTTP mechanism as the final generic contract
+- migrate remote compaction without exposing `x-codex-turn-state` through the Tachyon API
+- preserve standalone compaction's independently owned runtime lifetime where required
+
+Explicitly out of scope for the initial migration phase:
 
 - stable canonical `ModelRequest` / `ModelEvent` design
 - removal of every `ResponseItem` / `ResponseEvent` dependency
@@ -234,7 +274,7 @@ Explicitly out of scope for the first seam:
 - complete removal of existing provider metadata/capability references from `TurnContext`
 - cleanup of all OpenAI product integration
 
-The first seam must not add new provider-private execution state above the runtime boundary. Existing provider metadata references that are not execution state may be deferred to later extraction steps.
+The initial migration must not add new provider-private execution state above the runtime boundary. Existing provider metadata references that are not execution state may be deferred to later extraction steps.
 
 ## Dependency direction
 
@@ -267,15 +307,16 @@ During migration, temporary dependencies on existing `codex-*` crates are allowe
 The current planned order is:
 
 1. Establish a reproducible baseline and regression expectations.
-2. Introduce the initial model-runtime seam without changing behavior.
-3. Introduce provider-neutral model request/event representations.
-4. Separate provider, protocol, route, auth, endpoint, transport, and runtime state.
-5. Neutralize tool-call encoding while retaining Codex's mature tool runtime.
-6. Move the agent loop behind kernel-owned model/tool interfaces.
-7. Neutralize context/history/compaction and persistence surfaces.
-8. Consolidate execution, permissions, sandboxing, and extension boundaries.
-9. Remove remaining Codex/OpenAI product dependencies from kernel crates.
-10. Extract the standalone Tachyon workspace structure.
+2. Define and review the initial model-runtime seam without changing call sites.
+3. Migrate sampling, preparation, retry, and compaction call sites through the model-runtime seam while preserving behavior.
+4. Introduce provider-neutral model request/event representations.
+5. Separate provider, protocol, route, auth, endpoint, transport, and runtime state.
+6. Neutralize tool-call encoding while retaining Codex's mature tool runtime.
+7. Move the agent loop behind kernel-owned model/tool interfaces.
+8. Neutralize context/history/compaction and persistence surfaces.
+9. Consolidate execution, permissions, sandboxing, and extension boundaries.
+10. Remove remaining Codex/OpenAI product dependencies from kernel crates.
+11. Extract the standalone Tachyon workspace structure.
 
 ## Development workflow
 
