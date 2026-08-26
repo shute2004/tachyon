@@ -256,7 +256,7 @@ fn completion_maps_generic_usage_while_codex_context_keeps_provider_identity() {
         output_tokens: 20,
         reasoning_output_tokens: 5,
         total_tokens: 120,
-        codex_rollout_budget_units: Some(json!(7)),
+        codex_rollout_budget_units: Some(serde_json::Number::from(7)),
     };
 
     let mapped = mapper.map(ResponseEvent::Completed {
@@ -283,7 +283,7 @@ fn completion_maps_generic_usage_while_codex_context_keeps_provider_identity() {
             assert_eq!(
                 token_usage
                     .and_then(|usage| usage.codex_rollout_budget_units),
-                Some(json!(7))
+                Some(serde_json::Number::from(7))
             );
         }
         other => panic!("unexpected mapped completion: {other:?}"),

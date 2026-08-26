@@ -83,6 +83,7 @@ pub(crate) enum CodexModelRuntimeSideEvent {
     },
     OutputTextDelta(String),
     ToolCallInputDelta {
+        #[allow(dead_code)]
         item_id: String,
         call_id: Option<String>,
         delta: String,

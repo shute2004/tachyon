@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client_common::Prompt;
-use crate::client_common::ResponseEvent;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -25,7 +24,12 @@ use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
+use crate::model_runtime::CodexModelEventContext;
+use crate::model_runtime::CodexModelRuntimeSideEvent;
+use crate::model_runtime::ModelRuntimeEvent;
 use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::ir::ModelEvent;
+use crate::model_runtime::ir::ModelReasoningDeltaKind;
 use crate::model_runtime::retry::ModelStreamRequest;
 use crate::model_runtime::retry::ModelStreamRetryState;
 use crate::model_runtime::retry::handle_retryable_turn_runtime_error;
@@ -2315,9 +2319,20 @@ async fn try_run_sampling_request(
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
 
+        let event = turn_runtime.map_stream_event(event);
+
         match event {
-            ResponseEvent::Created => {}
-            ResponseEvent::OutputItemDone(mut item) => {
+            ModelRuntimeEvent::Model {
+                event: ModelEvent::Started,
+                ..
+            } => {}
+            ModelRuntimeEvent::Model {
+                event: ModelEvent::OutputItemCompleted(_),
+                codex: Some(CodexModelEventContext::OutputItemCompleted(mut item)),
+            }
+            | ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::OutputItemCompleted(mut item),
+            ) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2428,7 +2443,13 @@ async fn try_run_sampling_request(
                     });
                 }
             }
-            ResponseEvent::OutputItemAdded(mut item) => {
+            ModelRuntimeEvent::Model {
+                event: ModelEvent::OutputItemStarted(_),
+                codex: Some(CodexModelEventContext::OutputItemAdded(mut item)),
+            }
+            | ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::OutputItemAdded(mut item),
+            ) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 if let ResponseItem::CustomToolCall {
                     call_id,
@@ -2506,7 +2527,9 @@ async fn try_run_sampling_request(
                     active_item_is_streaming_to_client = stream_item_to_client;
                 }
             }
-            ResponseEvent::ServerModel(server_model) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ServerModel(server_model),
+            ) => {
                 if !turn_context
                     .server_model_warning_emitted
                     .load(Ordering::Relaxed)
@@ -2519,7 +2542,9 @@ async fn try_run_sampling_request(
                         .store(true, Ordering::Relaxed);
                 }
             }
-            ResponseEvent::ModelVerifications(verifications) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ModelVerifications(verifications),
+            ) => {
                 if !turn_context
                     .model_verification_emitted
                     .swap(true, Ordering::Relaxed)
@@ -2528,44 +2553,71 @@ async fn try_run_sampling_request(
                         .await;
                 }
             }
-            ResponseEvent::TurnModerationMetadata(metadata) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::TurnModerationMetadata(metadata),
+            ) => {
                 sess.emit_turn_moderation_metadata(&turn_context, metadata)
                     .await;
             }
-            ResponseEvent::SafetyBuffering(buffering) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::SafetyBuffering {
+                    use_cases,
+                    reasons,
+                    show_buffering_ui,
+                    faster_model,
+                },
+            ) => {
                 sess.send_event(
                     &turn_context,
                     EventMsg::SafetyBuffering(SafetyBufferingEvent {
                         model: step_context.settings.model_info.slug.clone(),
-                        use_cases: buffering.use_cases,
-                        reasons: buffering.reasons,
-                        show_buffering_ui: buffering.show_buffering_ui,
-                        faster_model: buffering.faster_model,
+                        use_cases,
+                        reasons,
+                        show_buffering_ui,
+                        faster_model,
                     }),
                 )
                 .await;
             }
-            ResponseEvent::ServerReasoningIncluded(included) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ServerReasoningIncluded(included),
+            ) => {
                 sess.set_server_reasoning_included(included).await;
             }
-            ResponseEvent::RateLimits(snapshot) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::RateLimits(snapshot),
+            ) => {
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.
                 sess.record_rate_limits_info(snapshot).await;
                 should_emit_token_count = true;
             }
-            ResponseEvent::ModelsEtag(etag) => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ModelsEtag(etag),
+            ) => {
                 // Update internal state with latest models etag
                 sess.services
                     .models_manager
                     .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
                     .await;
             }
-            ResponseEvent::Completed {
-                response_id,
-                token_usage,
-                end_turn,
-            } => {
+            ModelRuntimeEvent::Model {
+                event: ModelEvent::Completed(crate::model_runtime::ir::ModelCompletion {
+                    end_turn,
+                    ..
+                }),
+                codex: Some(CodexModelEventContext::Completed {
+                    response_id,
+                    token_usage,
+                }),
+            }
+            | ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::Completed {
+                    response_id,
+                    token_usage,
+                    end_turn,
+                },
+            ) => {
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -2607,7 +2659,13 @@ async fn try_run_sampling_request(
                     last_agent_message,
                 });
             }
-            ResponseEvent::OutputTextDelta(delta) => {
+            ModelRuntimeEvent::Model {
+                event: ModelEvent::TextDelta { delta, .. },
+                ..
+            }
+            | ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::OutputTextDelta(delta),
+            ) => {
                 // In review child threads, suppress assistant text deltas; the
                 // UI will show a selection popup from the final ReviewOutput.
                 if let Some(active) = active_item.as_ref() {
@@ -2639,11 +2697,37 @@ async fn try_run_sampling_request(
                     error_or_panic("OutputTextDelta without active item".to_string());
                 }
             }
-            ResponseEvent::ToolCallInputDelta {
-                item_id: _,
-                call_id,
-                delta,
+            ModelRuntimeEvent::Model {
+                event:
+                    ModelEvent::ToolCallInputDelta {
+                        call_id,
+                        delta,
+                        ..
+                    },
+                ..
             } => {
+                let Some((active_call_id, consumer)) =
+                    active_tool_argument_diff_consumer.as_mut()
+                else {
+                    continue;
+                };
+                let call_id = call_id.0;
+                if call_id.as_str() != active_call_id.as_str() {
+                    continue;
+                }
+                if let Some(event) =
+                    consumer.consume_diff(turn_context.as_ref(), call_id, &delta)
+                {
+                    sess.send_event(&turn_context, event).await;
+                }
+            }
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ToolCallInputDelta {
+                    item_id: _,
+                    call_id,
+                    delta,
+                },
+            ) => {
                 let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
                 else {
                     continue;
@@ -2657,10 +2741,38 @@ async fn try_run_sampling_request(
                     sess.send_event(&turn_context, event).await;
                 }
             }
-            ResponseEvent::ReasoningSummaryDelta {
-                delta,
-                summary_index,
+            ModelRuntimeEvent::Model {
+                event:
+                    ModelEvent::ReasoningDelta {
+                        item_id,
+                        kind: ModelReasoningDeltaKind::Summary,
+                        delta,
+                        section_index,
+                    },
+                ..
             } => {
+                if uses_sequential_cutoff_reasoning_summaries {
+                    continue;
+                }
+                if !active_item_is_streaming_to_client {
+                    continue;
+                }
+                let event = ReasoningContentDeltaEvent {
+                    thread_id: sess.thread_id.to_string(),
+                    turn_id: turn_context.sub_id.clone(),
+                    item_id: item_id.0,
+                    delta,
+                    summary_index: section_index.map(i64::from).unwrap_or_default(),
+                };
+                sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
+                    .await;
+            }
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ReasoningSummaryDelta {
+                    delta,
+                    summary_index,
+                },
+            ) => {
                 if uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2681,7 +2793,31 @@ async fn try_run_sampling_request(
                     error_or_panic("ReasoningSummaryDelta without active item".to_string());
                 }
             }
-            ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+            ModelRuntimeEvent::Model {
+                event:
+                    ModelEvent::ReasoningSectionStarted {
+                        item_id,
+                        kind: ModelReasoningDeltaKind::Summary,
+                        section_index,
+                    },
+                ..
+            } => {
+                if uses_sequential_cutoff_reasoning_summaries {
+                    continue;
+                }
+                if !active_item_is_streaming_to_client {
+                    continue;
+                }
+                let event =
+                    EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
+                        item_id: item_id.0,
+                        summary_index: i64::from(section_index),
+                    });
+                sess.send_event(&turn_context, event).await;
+            }
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ReasoningSummaryPartAdded { summary_index },
+            ) => {
                 if uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2699,11 +2835,13 @@ async fn try_run_sampling_request(
                     error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
                 }
             }
-            ResponseEvent::ReasoningSummaryDone {
-                item_id,
-                text,
-                summary_index,
-            } => {
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ReasoningSummaryDone {
+                    item_id,
+                    text,
+                    summary_index,
+                },
+            ) => {
                 if !uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2733,10 +2871,35 @@ async fn try_run_sampling_request(
                 sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
                     .await;
             }
-            ResponseEvent::ReasoningContentDelta {
-                delta,
-                content_index,
+            ModelRuntimeEvent::Model {
+                event:
+                    ModelEvent::ReasoningDelta {
+                        item_id,
+                        kind: ModelReasoningDeltaKind::Content,
+                        delta,
+                        section_index,
+                    },
+                ..
             } => {
+                if !active_item_is_streaming_to_client {
+                    continue;
+                }
+                let event = ReasoningRawContentDeltaEvent {
+                    thread_id: sess.thread_id.to_string(),
+                    turn_id: turn_context.sub_id.clone(),
+                    item_id: item_id.0,
+                    delta,
+                    content_index: section_index.map(i64::from).unwrap_or_default(),
+                };
+                sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
+                    .await;
+            }
+            ModelRuntimeEvent::Compatibility(
+                CodexModelRuntimeSideEvent::ReasoningContentDelta {
+                    delta,
+                    content_index,
+                },
+            ) => {
                 if let Some(active) = active_item.as_ref() {
                     if !active_item_is_streaming_to_client {
                         continue;
@@ -2753,6 +2916,14 @@ async fn try_run_sampling_request(
                 } else {
                     error_or_panic("ReasoningRawContentDelta without active item".to_string());
                 }
+            }
+            ModelRuntimeEvent::Model { event, codex } => {
+                break Err(CodexErr::Stream(
+                    format!(
+                        "invalid transitional model event context: event={event:?}, codex={codex:?}"
+                    )
+                    .into(),
+                ));
             }
         }
     };
