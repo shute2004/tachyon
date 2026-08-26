@@ -18,7 +18,6 @@ use crate::model_runtime::ir::ModelToolCallId;
 use crate::model_runtime::ir::ModelToolInput;
 use crate::model_runtime::ir::ModelToolInputKind;
 use crate::model_runtime::ir::ModelUsage;
-use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
@@ -122,16 +121,6 @@ enum ActiveCanonicalItem {
     },
 }
 
-impl ActiveCanonicalItem {
-    fn item_id(&self) -> &ModelItemId {
-        match self {
-            Self::Message { item_id }
-            | Self::ToolCall { item_id, .. }
-            | Self::Reasoning { item_id } => item_id,
-        }
-    }
-}
-
 /// Stateful mapper for one turn-scoped Codex model runtime.
 ///
 /// Stream correlation state is reset by `ResponseEvent::Created`, which occurs for each upstream
@@ -157,14 +146,20 @@ impl CodexEventMapper {
                 end_turn,
             } => {
                 self.active = None;
-                let Some(usage) = token_usage.as_ref().map(model_usage).transpose() else {
-                    return ModelRuntimeEvent::Compatibility(
-                        CodexModelRuntimeSideEvent::Completed {
-                            response_id,
-                            token_usage,
-                            end_turn,
-                        },
-                    );
+                let usage = match token_usage.as_ref() {
+                    Some(usage) => {
+                        let Some(usage) = model_usage(usage) else {
+                            return ModelRuntimeEvent::Compatibility(
+                                CodexModelRuntimeSideEvent::Completed {
+                                    response_id,
+                                    token_usage,
+                                    end_turn,
+                                },
+                            );
+                        };
+                        Some(usage)
+                    }
+                    None => None,
                 };
                 ModelRuntimeEvent::Model {
                     event: ModelEvent::Completed(ModelCompletion { usage, end_turn }),
