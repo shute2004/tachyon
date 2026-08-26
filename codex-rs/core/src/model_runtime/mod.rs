@@ -4,11 +4,13 @@
 //! implementation is still backed by Codex/OpenAI behavior, which is isolated in
 //! `codex_adapter` while the extraction is in progress.
 //!
-//! Canonical provider-neutral request/event vocabulary lives in `ir`. The C2 migration path now
-//! routes representable regular sampling requests through `ModelRequest` while retaining an
-//! explicit legacy fallback for Codex/Responses-only request shapes.
+//! Canonical provider-neutral request/event vocabulary lives in `ir`. C2 routes representable
+//! regular sampling requests through `ModelRequest`; C3 maps representable stream events into
+//! `ModelEvent` while retaining an explicit compatibility side channel for Codex/Responses-only
+//! event semantics and product/backend notifications.
 
 mod codex_adapter;
+mod codex_event;
 mod codex_request;
 pub mod ir;
 pub(crate) mod retry;
@@ -16,10 +18,14 @@ pub(crate) mod retry;
 use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_adapter::CodexModelRuntimeAdapter;
 use codex_adapter::CodexModelTurnRuntimeAdapter;
+pub(crate) use codex_event::CodexModelEventContext;
+pub(crate) use codex_event::CodexModelRuntimeSideEvent;
+pub(crate) use codex_event::ModelRuntimeEvent;
 use codex_otel::SessionTelemetry;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::Result;
@@ -159,6 +165,14 @@ impl ModelTurnRuntime {
                     .await
             }
         }
+    }
+
+    /// Converts one current Codex/OpenAI stream event into the C3 runtime event boundary.
+    ///
+    /// Generic model semantics become `ModelEvent`; provider/product data and unsupported model
+    /// shapes remain on the explicit compatibility side channel until their ownership is resolved.
+    pub(crate) fn map_stream_event(&mut self, event: ResponseEvent) -> ModelRuntimeEvent {
+        self.adapter.map_stream_event(event)
     }
 
     /// Optionally prepares backend resources or opaque execution state before regular inference.
