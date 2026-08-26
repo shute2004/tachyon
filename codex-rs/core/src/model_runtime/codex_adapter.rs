@@ -10,6 +10,8 @@ use crate::model_runtime::codex_event::ModelRuntimeEvent;
 use crate::model_runtime::codex_request::prompt_from_model_request;
 use crate::model_runtime::ir::ModelRequest;
 use crate::model_runtime::route::ModelProtocol;
+use crate::model_runtime::route::ModelProviderId;
+use crate::model_runtime::route::ModelRoute;
 use crate::model_runtime::route::ModelTransport;
 use crate::model_runtime::route::UnresolvedModelRoute;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -26,13 +28,48 @@ use codex_rollout_trace::InferenceTraceContext;
 const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
 const OPENAI_RESPONSES_PROTOCOL_ID: &str = "openai.responses";
 
-fn codex_route(websocket_enabled: bool) -> UnresolvedModelRoute {
+fn unresolved_codex_route(websocket_enabled: bool) -> UnresolvedModelRoute {
     let transport = if websocket_enabled {
         ModelTransport::WebSocket
     } else {
         ModelTransport::Http
     };
     UnresolvedModelRoute::new(ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID), transport)
+}
+
+fn codex_route(provider_id: ModelProviderId, websocket_enabled: bool) -> ModelRoute {
+    let transport = if websocket_enabled {
+        ModelTransport::WebSocket
+    } else {
+        ModelTransport::Http
+    };
+    ModelRoute::new(
+        provider_id,
+        ModelProtocol::new(OPENAI_RESPONSES_PROTOCOL_ID),
+        transport,
+    )
+}
+
+#[derive(Debug, Clone)]
+enum CodexTurnRoute {
+    Resolved(ModelRoute),
+    Unresolved(UnresolvedModelRoute),
+}
+
+impl CodexTurnRoute {
+    fn protocol(&self) -> &ModelProtocol {
+        match self {
+            Self::Resolved(route) => route.protocol(),
+            Self::Unresolved(route) => route.protocol(),
+        }
+    }
+
+    fn transport(&self) -> ModelTransport {
+        match self {
+            Self::Resolved(route) => route.transport(),
+            Self::Unresolved(route) => route.transport(),
+        }
+    }
 }
 
 /// Transitional adapter over the current Codex session-scoped model client.
@@ -47,11 +84,18 @@ impl CodexModelRuntimeAdapter {
     }
 
     pub(super) fn begin_turn(&self) -> CodexModelTurnRuntimeAdapter {
-        CodexModelTurnRuntimeAdapter::new(self.client.clone())
+        CodexModelTurnRuntimeAdapter::new(self.client.clone(), None)
+    }
+
+    pub(super) fn begin_turn_for_provider(
+        &self,
+        provider_id: ModelProviderId,
+    ) -> CodexModelTurnRuntimeAdapter {
+        CodexModelTurnRuntimeAdapter::new(self.client.clone(), Some(provider_id))
     }
 
     fn current_route(&self) -> UnresolvedModelRoute {
-        codex_route(self.client.responses_websocket_enabled())
+        unresolved_codex_route(self.client.responses_websocket_enabled())
     }
 
     pub(super) fn startup_preparation_uses_turn_runtime(&self) -> bool {
@@ -66,22 +110,32 @@ impl CodexModelRuntimeAdapter {
 /// Transitional adapter over the current Codex turn-scoped model execution state.
 pub(super) struct CodexModelTurnRuntimeAdapter {
     client: ModelClient,
+    provider_id: Option<ModelProviderId>,
     session: ModelClientSession,
     event_mapper: CodexEventMapper,
 }
 
 impl CodexModelTurnRuntimeAdapter {
-    fn new(client: ModelClient) -> Self {
+    fn new(client: ModelClient, provider_id: Option<ModelProviderId>) -> Self {
         let session = client.new_session();
         Self {
             client,
+            provider_id,
             session,
             event_mapper: CodexEventMapper::default(),
         }
     }
 
-    fn current_route(&self) -> UnresolvedModelRoute {
-        codex_route(self.client.responses_websocket_enabled())
+    fn current_route(&self) -> CodexTurnRoute {
+        match &self.provider_id {
+            Some(provider_id) => CodexTurnRoute::Resolved(codex_route(
+                provider_id.clone(),
+                self.client.responses_websocket_enabled(),
+            )),
+            None => CodexTurnRoute::Unresolved(unresolved_codex_route(
+                self.client.responses_websocket_enabled(),
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

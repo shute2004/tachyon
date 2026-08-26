@@ -8,9 +8,9 @@
 //! regular sampling requests through `ModelRequest`; C3 maps representable stream events into
 //! `ModelEvent` while retaining an explicit compatibility side channel for Codex/Responses-only
 //! event semantics and product/backend notifications. D1 moved protocol/transport selection into
-//! the model-runtime adapter. D2 introduces provider identity as an independent route dimension;
-//! the current Codex bridge leaves it unresolved until the configured provider registry key can be
-//! bound at a safely extracted construction boundary.
+//! the model-runtime adapter. D2 introduced provider identity as an independent route dimension.
+//! D3 binds configured provider identity through an explicit provider-bound turn entry point while
+//! retaining a migration-only unresolved entry point for call sites that have not been converted.
 
 mod codex_adapter;
 mod codex_event;
@@ -39,6 +39,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 use ir::ModelRequest;
+use route::ModelProviderId;
 
 /// Transitional C2 bridge: project the current Codex prompt into canonical request semantics when
 /// doing so is lossless. Unsupported provider-specific history/state stays on the legacy path.
@@ -64,10 +65,23 @@ impl ModelRuntime {
         }
     }
 
-    /// Creates a fresh execution handle for one harness turn.
+    /// Migration-only entry point for call sites that have not yet retained provider identity at
+    /// turn construction time.
     pub fn begin_turn(&self) -> ModelTurnRuntime {
         ModelTurnRuntime {
             adapter: self.adapter.begin_turn(),
+        }
+    }
+
+    /// Creates a fresh execution handle for one harness turn bound to the selected provider.
+    ///
+    /// The provider identity is opaque to the runtime and remains independent from protocol,
+    /// endpoint, authentication, and transport selection.
+    pub fn begin_turn_for_provider(&self, provider_id: impl Into<String>) -> ModelTurnRuntime {
+        ModelTurnRuntime {
+            adapter: self
+                .adapter
+                .begin_turn_for_provider(ModelProviderId::new(provider_id.into())),
         }
     }
 
