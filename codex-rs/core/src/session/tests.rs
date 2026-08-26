@@ -568,9 +568,12 @@ async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_start
     );
     let (_tx, startup_prewarm_rx) = tokio::sync::oneshot::channel::<()>();
     let model_runtime = sess.services.model_runtime();
+    let model_provider_id = tc.config.model_provider_id.clone();
     let handle = tokio::spawn(async move {
         let _ = startup_prewarm_rx.await;
-        Ok::<_, codex_protocol::error::CodexErr>(model_runtime.begin_turn())
+        Ok::<_, codex_protocol::error::CodexErr>(
+            model_runtime.begin_turn_for_provider(model_provider_id),
+        )
     });
 
     sess.set_session_startup_prewarm(
@@ -642,9 +645,12 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let (_tx, startup_prewarm_rx) = tokio::sync::oneshot::channel::<()>();
     let model_runtime = sess.services.model_runtime();
+    let model_provider_id = tc.config.model_provider_id.clone();
     let handle = tokio::spawn(async move {
         let _ = startup_prewarm_rx.await;
-        Ok::<_, codex_protocol::error::CodexErr>(model_runtime.begin_turn())
+        Ok::<_, codex_protocol::error::CodexErr>(
+            model_runtime.begin_turn_for_provider(model_provider_id),
+        )
     });
 
     sess.set_session_startup_prewarm(

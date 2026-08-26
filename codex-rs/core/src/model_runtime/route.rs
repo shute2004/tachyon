@@ -4,10 +4,9 @@
 //! provider identity as a distinct route dimension without promoting `ModelProviderInfo` into
 //! Tachyon's generic contract.
 //!
-//! The transitional Codex bridge does not currently retain the configured provider registry key at
-//! the model-runtime construction boundary. It therefore uses a crate-private unresolved route
-//! selection rather than fabricating an identity from display names, endpoints, or authentication
-//! details or making missing provider identity part of Tachyon's public route contract.
+//! Turn-scoped execution always binds configured provider identity. Session-scoped startup
+//! capability checks remain adapter-private and inspect transport capability directly, so Tachyon
+//! does not represent a provider-less model route.
 //!
 //! Provider and protocol identities are independent opaque values. A provider may expose multiple
 //! protocols, and multiple providers may expose the same protocol. Concrete protocol identifiers
@@ -95,34 +94,6 @@ impl ModelRoute {
     }
 
     pub fn transport(&self) -> ModelTransport {
-        self.transport
-    }
-}
-
-/// Migration-only route selection used while the Codex bridge has not yet retained its configured
-/// provider registry identity at the model-runtime construction boundary.
-///
-/// Keeping this type crate-private prevents extraction state from becoming part of Tachyon's
-/// provider-neutral route contract.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct UnresolvedModelRoute {
-    protocol: ModelProtocol,
-    transport: ModelTransport,
-}
-
-impl UnresolvedModelRoute {
-    pub(crate) fn new(protocol: ModelProtocol, transport: ModelTransport) -> Self {
-        Self {
-            protocol,
-            transport,
-        }
-    }
-
-    pub(crate) fn protocol(&self) -> &ModelProtocol {
-        &self.protocol
-    }
-
-    pub(crate) fn transport(&self) -> ModelTransport {
         self.transport
     }
 }
