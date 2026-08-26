@@ -208,6 +208,33 @@ fn provider_web_search_tool_stays_on_legacy_path() {
 }
 
 #[test]
+fn tool_search_output_stays_on_legacy_path_until_discovery_result_ir_exists() {
+    let prompt = prompt_with(
+        vec![ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some("call-search-1".to_string()),
+            status: "completed".to_string(),
+            execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+            tools: vec![json!({
+                "type": "function",
+                "name": "discovered_tool",
+                "description": "A Responses-shaped discovered tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                },
+                "strict": false
+            })],
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        Vec::new(),
+    );
+
+    assert_eq!(try_model_request_from_prompt(&prompt), None);
+}
+
+#[test]
 fn function_call_and_text_result_round_trip_preserves_argument_bytes_and_metadata() {
     let metadata = InternalChatMessageMetadataPassthrough {
         turn_id: Some("turn-tool".to_string()),

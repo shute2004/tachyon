@@ -226,20 +226,12 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
             content: model_tool_result_content(output)?,
             is_error: output.success == Some(false),
         })),
-        ResponseItem::ToolSearchOutput {
-            call_id: Some(call_id),
-            execution,
-            tools,
-            ..
-        } if execution == TOOL_SEARCH_CLIENT_EXECUTION => {
-            Some(ModelInputItem::ToolResult(ModelToolResult {
-                call_id: ModelToolCallId(call_id.clone()),
-                content: vec![ModelToolResultContent::Json(Value::Array(tools.clone()))],
-                is_error: false,
-            }))
-        }
-        // Reasoning/encrypted continuation, local shell, built-in provider tools, compaction, agent
-        // messaging, and provider-generated compatibility items stay on the explicit legacy path.
+        // Reasoning/encrypted continuation, discovery-result payloads, local shell, built-in
+        // provider tools, compaction, agent messaging, and provider-generated compatibility items
+        // stay on the explicit legacy path. In particular, ToolSearchOutput currently contains
+        // Responses-shaped serialized tool declarations; C2 must not carry them through generic
+        // ModelToolResultContent::Json until a provider-neutral discovery-result representation
+        // exists.
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::AgentMessage { .. }
