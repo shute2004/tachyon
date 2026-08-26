@@ -31,10 +31,6 @@ impl CodexModelRuntimeAdapter {
     pub(super) fn has_turn_preparation(&self) -> bool {
         self.client.responses_websocket_enabled()
     }
-
-    pub(super) async fn prepare_session(&self) -> Result<()> {
-        self.client.prewarm_auth().await
-    }
 }
 
 /// Transitional adapter over the current Codex turn-scoped model execution state.
