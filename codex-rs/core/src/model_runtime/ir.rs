@@ -152,6 +152,9 @@ pub enum ModelToolResultContent {
         source: ModelMediaSource,
         detail: Option<ModelImageDetail>,
     },
+    Audio {
+        source: ModelMediaSource,
+    },
 }
 
 /// Desired output contract for one model request.
@@ -238,10 +241,10 @@ pub struct ModelCompletion {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelUsage {
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
-    pub reasoning_output_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
     /// Provider-reported total when available. It is not recomputed because providers may account
     /// for additional token classes that are not represented by the fields above.
     pub total_tokens: Option<u64>,
