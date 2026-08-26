@@ -169,7 +169,6 @@ pub enum ModelOutputFormat {
     #[default]
     Text,
     JsonSchema {
-        name: Option<String>,
         schema: Value,
         strict: bool,
     },
