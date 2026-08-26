@@ -19,6 +19,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::model_runtime::ModelTurnRuntime;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -46,9 +47,18 @@ use tokio_util::sync::CancellationToken;
 mod request;
 use request::RemoteCompactAttempt;
 use request::run_remote_compact_attempt;
+use request::run_remote_compact_attempt_with_turn_runtime;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
+
+#[derive(Clone)]
+enum RemoteCompactExecution<'a> {
+    /// Transitional inline path used until the main harness turn owns `ModelTurnRuntime`.
+    LegacyTurnState(Option<Arc<OnceLock<String>>>),
+    /// Runtime-owned path used by migrated request boundaries.
+    TurnRuntime(&'a ModelTurnRuntime),
+}
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -69,7 +79,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
-        Some(turn_state),
+        RemoteCompactExecution::LegacyTurnState(Some(turn_state)),
         initial_context_injection,
         compaction_metadata,
     )
@@ -81,7 +91,8 @@ pub(crate) async fn run_remote_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
 ) -> CodexResult<()> {
-    // Standalone compaction is its own request boundary, so it captures a fresh step.
+    // Standalone compaction is its own request boundary, so it captures a fresh step and a fresh
+    // model turn runtime while still reusing session-scoped backend resources through ModelRuntime.
     let step_context = sess
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await?;
@@ -100,11 +111,12 @@ pub(crate) async fn run_remote_compact_task(
         CompactionImplementation::ResponsesCompact,
         CompactionPhase::StandaloneTurn,
     );
+    let turn_runtime = sess.services.model_runtime().begin_turn();
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
-        /*turn_state*/ None,
+        RemoteCompactExecution::TurnRuntime(&turn_runtime),
         InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
@@ -116,7 +128,7 @@ async fn run_remote_compact_task_inner(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    turn_state: Option<Arc<OnceLock<String>>>,
+    execution: RemoteCompactExecution<'_>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
@@ -158,7 +170,7 @@ async fn run_remote_compact_task_inner(
         sess,
         step_context,
         fallback_step_context,
-        turn_state,
+        execution,
         initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
@@ -193,7 +205,7 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    turn_state: Option<Arc<OnceLock<String>>>,
+    execution: RemoteCompactExecution<'_>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -212,15 +224,30 @@ async fn run_remote_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
-    let attempt = run_remote_compact_attempt(
-        sess,
-        step_context,
-        turn_state.clone(),
-        &compaction_trace,
-        compaction_metadata,
-        analytics_details,
-    )
-    .await;
+    let attempt = match &execution {
+        RemoteCompactExecution::LegacyTurnState(turn_state) => {
+            run_remote_compact_attempt(
+                sess,
+                step_context,
+                turn_state.clone(),
+                &compaction_trace,
+                compaction_metadata,
+                analytics_details,
+            )
+            .await
+        }
+        RemoteCompactExecution::TurnRuntime(turn_runtime) => {
+            run_remote_compact_attempt_with_turn_runtime(
+                sess,
+                step_context,
+                turn_runtime,
+                &compaction_trace,
+                compaction_metadata,
+                analytics_details,
+            )
+            .await
+        }
+    };
     let (attempt, compaction_turn_context) = match attempt {
         Ok(attempt) => (attempt, turn_context),
         Err(error) => {
@@ -238,15 +265,30 @@ async fn run_remote_compact_task_inner_impl(
                     fallback_turn_context.model_info().slug.as_str(),
                     fallback_turn_context.provider.info().name.as_str(),
                 );
-            let fallback_result = run_remote_compact_attempt(
-                sess,
-                fallback_step_context,
-                turn_state,
-                &fallback_compaction_trace,
-                compaction_metadata,
-                analytics_details,
-            )
-            .await;
+            let fallback_result = match &execution {
+                RemoteCompactExecution::LegacyTurnState(turn_state) => {
+                    run_remote_compact_attempt(
+                        sess,
+                        fallback_step_context,
+                        turn_state.clone(),
+                        &fallback_compaction_trace,
+                        compaction_metadata,
+                        analytics_details,
+                    )
+                    .await
+                }
+                RemoteCompactExecution::TurnRuntime(turn_runtime) => {
+                    run_remote_compact_attempt_with_turn_runtime(
+                        sess,
+                        fallback_step_context,
+                        turn_runtime,
+                        &fallback_compaction_trace,
+                        compaction_metadata,
+                        analytics_details,
+                    )
+                    .await
+                }
+            };
             record_model_fallback(
                 &sess.services.session_telemetry,
                 turn_context.model_info().slug.as_str(),
