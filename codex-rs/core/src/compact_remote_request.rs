@@ -5,6 +5,7 @@ use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::model_runtime::ModelTurnRuntime;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -20,10 +21,55 @@ pub(super) struct RemoteCompactAttempt {
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
 }
 
+enum RemoteCompactExecution<'a> {
+    /// Transitional path used by call sites that have not moved behind `ModelTurnRuntime` yet.
+    LegacyTurnState(Option<Arc<OnceLock<String>>>),
+    /// Preferred migration path. Provider-private turn affinity stays inside the runtime.
+    Runtime(&'a ModelTurnRuntime),
+}
+
 pub(super) async fn run_remote_compact_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    compaction_trace: &CompactionTraceContext,
+    compaction_metadata: CompactionTurnMetadata,
+    analytics_details: &mut CompactionAnalyticsDetails,
+) -> CodexResult<RemoteCompactAttempt> {
+    run_remote_compact_attempt_inner(
+        sess,
+        step_context,
+        RemoteCompactExecution::LegacyTurnState(turn_state),
+        compaction_trace,
+        compaction_metadata,
+        analytics_details,
+    )
+    .await
+}
+
+pub(super) async fn run_remote_compact_attempt_with_runtime(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    model_runtime: &ModelTurnRuntime,
+    compaction_trace: &CompactionTraceContext,
+    compaction_metadata: CompactionTurnMetadata,
+    analytics_details: &mut CompactionAnalyticsDetails,
+) -> CodexResult<RemoteCompactAttempt> {
+    run_remote_compact_attempt_inner(
+        sess,
+        step_context,
+        RemoteCompactExecution::Runtime(model_runtime),
+        compaction_trace,
+        compaction_metadata,
+        analytics_details,
+    )
+    .await
+}
+
+async fn run_remote_compact_attempt_inner(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    execution: RemoteCompactExecution<'_>,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -75,27 +121,43 @@ pub(super) async fn run_remote_compact_attempt(
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
-    let new_history = sess
-        .services
-        .model_client
-        .compact_conversation_history(
-            &prompt,
-            turn_context.model_info(),
-            turn_state,
-            CompactConversationRequestSettings {
-                effort: turn_context.reasoning_effort().cloned(),
-                summary: turn_context.reasoning_summary(),
-                service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
-                    None
-                } else {
-                    turn_context.config.service_tier.clone()
-                },
-            },
-            &turn_context.session_telemetry,
-            compaction_trace,
-            &responses_metadata,
-        )
-        .await?;
+    let settings = CompactConversationRequestSettings {
+        effort: turn_context.reasoning_effort().cloned(),
+        summary: turn_context.reasoning_summary(),
+        service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
+            None
+        } else {
+            turn_context.config.service_tier.clone()
+        },
+    };
+    let new_history = match execution {
+        RemoteCompactExecution::LegacyTurnState(turn_state) => {
+            sess.services
+                .model_client
+                .compact_conversation_history(
+                    &prompt,
+                    turn_context.model_info(),
+                    turn_state,
+                    settings,
+                    &turn_context.session_telemetry,
+                    compaction_trace,
+                    &responses_metadata,
+                )
+                .await?
+        }
+        RemoteCompactExecution::Runtime(model_runtime) => {
+            model_runtime
+                .compact_conversation_history(
+                    &prompt,
+                    turn_context.model_info(),
+                    settings,
+                    &turn_context.session_telemetry,
+                    compaction_trace,
+                    &responses_metadata,
+                )
+                .await?
+        }
+    };
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,
