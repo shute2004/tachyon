@@ -7,7 +7,8 @@
 //!
 //! C1 introduced these definitions without changing production execution. C2 routes representable
 //! regular sampling requests through `ModelRequest` while unsupported Codex/Responses-only shapes
-//! remain on an explicit migration fallback. Canonical `ModelEvent` conversion follows separately.
+//! remain on an explicit migration fallback. C3 begins moving the stream consumer to canonical
+//! `ModelEvent` semantics while keeping unsupported/product events on a compatibility side channel.
 
 use std::sync::Arc;
 
@@ -266,6 +267,9 @@ pub enum ModelOutputItem {
     Reasoning {
         id: ModelItemId,
         summary: Vec<String>,
+        /// Plaintext reasoning content when the backend exposes it. Opaque/encrypted continuation
+        /// state remains adapter-private and is not represented here.
+        content: Vec<String>,
     },
 }
 
@@ -289,6 +293,13 @@ pub enum ModelEvent {
         kind: ModelReasoningDeltaKind,
         delta: String,
         section_index: Option<u32>,
+    },
+    /// Begins a new logical reasoning section. This is harness-significant stream structure rather
+    /// than a provider-specific summary-part wire event.
+    ReasoningSectionStarted {
+        item_id: ModelItemId,
+        kind: ModelReasoningDeltaKind,
+        section_index: u32,
     },
     Completed(ModelCompletion),
 }

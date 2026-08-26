@@ -104,9 +104,25 @@ ModelRuntime
           `-- inline compaction
 ```
 
-The project is now in Step C: introducing canonical provider-neutral model request/event data without promoting the existing OpenAI Responses shapes into Tachyon's stable kernel vocabulary.
+Step C establishes canonical provider-neutral model request/event data without promoting OpenAI Responses shapes into Tachyon's stable kernel vocabulary.
 
-The model-runtime source layout now includes the canonical IR nucleus and the request-side Codex conversion bridge:
+For regular sampling, both sides of the model-runtime boundary are now canonical where the current harness semantics can be represented without loss:
+
+```text
+Harness turn
+    |
+    +-- ModelRequest ----------------------------+
+    |                                            |
+    v                                            v
+ModelTurnRuntime                           Codex adapter
+    ^                                            |
+    |                                            v
+    +-- ModelEvent <---------------------- ResponseEvent
+```
+
+The Codex adapter still provides explicit migration paths for provider-specific or not-yet-extracted semantics. Request shapes that cannot round-trip through the canonical request IR remain on the legacy `Prompt` fallback. On the event side, product/backend notifications and unsupported output shapes remain on an explicit Codex compatibility side channel rather than being forced into `ModelEvent`.
+
+The model-runtime source layout now includes canonical request and event conversion bridges:
 
 ```text
 codex-rs/core/src/model_runtime/
@@ -115,14 +131,16 @@ codex-rs/core/src/model_runtime/
 ├── ir_tests.rs              # focused IR semantics tests
 ├── codex_request.rs         # transitional request conversion / lossless fallback boundary
 ├── codex_request_tests.rs   # focused request conversion tests
+├── codex_event.rs           # transitional event conversion / compatibility boundary
+├── codex_event_tests.rs     # focused event conversion tests
 ├── codex_adapter.rs         # transitional Codex/OpenAI implementation
 ├── retry.rs                 # model-stream retry policy
 └── retry_tests.rs           # retry policy tests
 ```
 
-For regular sampling, request shapes that can be represented without semantic loss are projected into canonical `ModelRequest` and converted back to the current Codex/Responses request representation only inside the adapter. Requests that still depend on unsupported provider-specific history or state remain on an explicit legacy `Prompt` fallback during migration. The event side still uses migration-only `ResponseEvent` / `ResponseItem` shapes; moving that boundary to canonical `ModelEvent` is the next Step C slice.
+Regular sampling no longer directly matches OpenAI/Codex `ResponseEvent` in the agent loop. Raw events are still available below the runtime boundary for current telemetry and migration-only Codex context, while provider-neutral model semantics are consumed as `ModelEvent`.
 
-Provider / Protocol / Endpoint / Auth / Transport decomposition follows after the execution IR is established.
+The next major model-runtime extraction is Provider / Protocol / Route decomposition: separating model identity and routing from provider, wire protocol, endpoint, authentication, transport, and optional provider-private runtime state. Remaining compatibility paths can then be reduced incrementally as their generic harness semantics are identified.
 
 See [`docs/tachyon/model-ir.md`](docs/tachyon/model-ir.md) for the canonical model IR boundary and migration order.
 
