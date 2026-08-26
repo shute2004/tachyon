@@ -104,21 +104,25 @@ ModelRuntime
           `-- inline compaction
 ```
 
-The project is now entering Step C: introducing canonical provider-neutral model request/event data without promoting the existing OpenAI Responses shapes into Tachyon's stable kernel vocabulary.
+The project is now in Step C: introducing canonical provider-neutral model request/event data without promoting the existing OpenAI Responses shapes into Tachyon's stable kernel vocabulary.
 
-The model-runtime source layout now includes the first canonical IR nucleus:
+The model-runtime source layout now includes the canonical IR nucleus and the request-side Codex conversion bridge:
 
 ```text
 codex-rs/core/src/model_runtime/
-├── mod.rs              # Tachyon-facing runtime boundary
-├── ir.rs               # canonical provider-neutral request/event vocabulary
-├── ir_tests.rs         # focused IR semantics tests
-├── codex_adapter.rs    # transitional Codex/OpenAI implementation
-├── retry.rs            # model-stream retry policy
-└── retry_tests.rs      # retry policy tests
+├── mod.rs                   # Tachyon-facing runtime boundary
+├── ir.rs                    # canonical provider-neutral request/event vocabulary
+├── ir_tests.rs              # focused IR semantics tests
+├── codex_request.rs         # transitional request conversion / lossless fallback boundary
+├── codex_request_tests.rs   # focused request conversion tests
+├── codex_adapter.rs         # transitional Codex/OpenAI implementation
+├── retry.rs                 # model-stream retry policy
+└── retry_tests.rs           # retry policy tests
 ```
 
-The production sampling path still uses migration-only `Prompt` / `ResponseItem` / `ResponseEvent` shapes while adapter conversions are introduced incrementally. Provider / Protocol / Endpoint / Auth / Transport decomposition follows after the execution IR is established.
+For regular sampling, request shapes that can be represented without semantic loss are projected into canonical `ModelRequest` and converted back to the current Codex/Responses request representation only inside the adapter. Requests that still depend on unsupported provider-specific history or state remain on an explicit legacy `Prompt` fallback during migration. The event side still uses migration-only `ResponseEvent` / `ResponseItem` shapes; moving that boundary to canonical `ModelEvent` is the next Step C slice.
+
+Provider / Protocol / Endpoint / Auth / Transport decomposition follows after the execution IR is established.
 
 See [`docs/tachyon/model-ir.md`](docs/tachyon/model-ir.md) for the canonical model IR boundary and migration order.
 
