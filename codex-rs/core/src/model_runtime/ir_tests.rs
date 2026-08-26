@@ -146,6 +146,42 @@ fn tool_results_keep_structured_output_out_of_message_content() {
 }
 
 #[test]
+fn completed_reasoning_preserves_plaintext_without_provider_continuation_state() {
+    let reasoning = ModelOutputItem::Reasoning {
+        id: ModelItemId("reasoning-1".to_string()),
+        summary: vec!["summary".to_string()],
+        content: vec!["plain reasoning".to_string()],
+    };
+
+    let ModelOutputItem::Reasoning {
+        summary, content, ..
+    } = reasoning
+    else {
+        panic!("expected reasoning item");
+    };
+    assert_eq!(summary, vec!["summary"]);
+    assert_eq!(content, vec!["plain reasoning"]);
+}
+
+#[test]
+fn reasoning_section_start_is_generic_stream_structure() {
+    let event = ModelEvent::ReasoningSectionStarted {
+        item_id: ModelItemId("reasoning-1".to_string()),
+        kind: ModelReasoningDeltaKind::Summary,
+        section_index: 2,
+    };
+
+    assert!(matches!(
+        event,
+        ModelEvent::ReasoningSectionStarted {
+            kind: ModelReasoningDeltaKind::Summary,
+            section_index: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn completion_carries_usage_without_provider_response_identity() {
     let completion = ModelCompletion {
         usage: Some(ModelUsage {
@@ -159,7 +195,10 @@ fn completion_carries_usage_without_provider_response_identity() {
         end_turn: Some(true),
     };
 
-    assert_eq!(completion.usage.as_ref().map(|usage| usage.output_tokens), Some(20));
+    assert_eq!(
+        completion.usage.as_ref().map(|usage| usage.output_tokens),
+        Some(20)
+    );
     assert_eq!(
         completion
             .usage
@@ -167,7 +206,10 @@ fn completion_carries_usage_without_provider_response_identity() {
             .and_then(|usage| usage.cache_write_input_tokens),
         None
     );
-    assert_eq!(completion.usage.as_ref().and_then(|usage| usage.total_tokens), Some(120));
+    assert_eq!(
+        completion.usage.as_ref().and_then(|usage| usage.total_tokens),
+        Some(120)
+    );
     assert_eq!(completion.end_turn, Some(true));
 }
 
