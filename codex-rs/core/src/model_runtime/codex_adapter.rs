@@ -13,6 +13,8 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 
+const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
+
 /// Transitional adapter over the current Codex session-scoped model client.
 #[derive(Debug, Clone)]
 pub(super) struct CodexModelRuntimeAdapter {
@@ -26,10 +28,6 @@ impl CodexModelRuntimeAdapter {
 
     pub(super) fn begin_turn(&self) -> CodexModelTurnRuntimeAdapter {
         CodexModelTurnRuntimeAdapter::new(self.client.clone())
-    }
-
-    pub(super) fn has_turn_preparation(&self) -> bool {
-        self.client.responses_websocket_enabled()
     }
 }
 
@@ -118,12 +116,17 @@ impl CodexModelTurnRuntimeAdapter {
             .await
     }
 
+    pub(super) fn suppress_first_retry_notification(&self) -> bool {
+        self.client.responses_websocket_enabled()
+    }
+
     pub(super) fn try_recover_after_stream_error(
         &mut self,
         session_telemetry: &SessionTelemetry,
         model_info: &ModelInfo,
-    ) -> bool {
+    ) -> Option<String> {
         self.session
             .try_switch_fallback_transport(session_telemetry, model_info)
+            .then(|| FALLBACK_TO_HTTP_WARNING.to_string())
     }
 }
