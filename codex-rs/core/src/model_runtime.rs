@@ -21,7 +21,6 @@ use crate::client_common::ResponseStream;
 use crate::responses_metadata::CodexResponsesMetadata;
 use codex_otel::SessionTelemetry;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::config_types::ServiceTier;
 use codex_protocol::error::Result;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
