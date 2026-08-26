@@ -100,7 +100,11 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let mut owned_turn_runtime = None;
     let turn_runtime = match turn_runtime {
         Some(turn_runtime) => turn_runtime,
-        None => owned_turn_runtime.insert(sess.services.model_runtime().begin_turn()),
+        None => owned_turn_runtime.insert(
+            sess.services
+                .model_runtime()
+                .begin_turn_for_provider(turn_context.config.model_provider_id.clone()),
+        ),
     };
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,
