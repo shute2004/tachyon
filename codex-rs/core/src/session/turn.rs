@@ -162,14 +162,19 @@ pub(crate) async fn run_turn(
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut turn_runtime =
-        prepared_turn_runtime.unwrap_or_else(|| sess.services.model_runtime().begin_turn());
+    let mut turn_runtime = prepared_turn_runtime
+        .unwrap_or_else(|| sess.services.model_runtime().begin_turn());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if let Err(err) =
-        run_pre_sampling_compact(&sess, &turn_context, &mut turn_runtime, &cancellation_token).await
+    if let Err(err) = run_pre_sampling_compact(
+        &sess,
+        &turn_context,
+        &mut turn_runtime,
+        &cancellation_token,
+    )
+    .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)

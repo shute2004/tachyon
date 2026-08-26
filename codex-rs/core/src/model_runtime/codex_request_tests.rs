@@ -245,7 +245,10 @@ fn function_call_and_text_result_round_trip_preserves_argument_bytes_and_metadat
         panic!("expected canonical tool call");
     };
     assert_eq!(call.call_id.0, "call-1");
-    assert_eq!(call.input, ModelToolInput::Json(json!({"path": "README.md"})));
+    assert_eq!(
+        call.input,
+        ModelToolInput::Json(json!({"path": "README.md"}))
+    );
 
     let rebuilt = prompt_from_model_request(&request, &prompt).expect("round trip");
     let ResponseItem::FunctionCall {
@@ -279,6 +282,67 @@ fn encrypted_tool_result_content_stays_on_legacy_path() {
             internal_chat_message_metadata_passthrough: None,
         }],
         Vec::new(),
+    );
+
+    assert_eq!(try_model_request_from_prompt(&prompt), None);
+}
+
+#[test]
+fn responses_encrypted_tool_schema_stays_on_legacy_path() {
+    let parameters: JsonSchema = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "secret": {
+                "type": "string",
+                "encrypted": true
+            }
+        },
+        "required": ["secret"],
+        "additionalProperties": false
+    }))
+    .expect("valid Responses schema");
+
+    let prompt = prompt_with(
+        Vec::new(),
+        vec![ToolSpec::Function(ResponsesApiTool {
+            name: "reviewed_secret_tool".to_string(),
+            description: "Uses a provider-private reviewed parameter".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters,
+            output_schema: None,
+        })],
+    );
+
+    assert_eq!(try_model_request_from_prompt(&prompt), None);
+}
+
+#[test]
+fn function_tool_output_schema_stays_on_legacy_path_until_ir_supports_it() {
+    let parameters: JsonSchema = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }))
+    .expect("valid schema");
+
+    let prompt = prompt_with(
+        Vec::new(),
+        vec![ToolSpec::Function(ResponsesApiTool {
+            name: "structured_result_tool".to_string(),
+            description: "Has a harness-owned output contract".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters,
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "result": {"type": "string"}
+                },
+                "required": ["result"],
+                "additionalProperties": false
+            })),
+        })],
     );
 
     assert_eq!(try_model_request_from_prompt(&prompt), None);

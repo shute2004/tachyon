@@ -82,13 +82,35 @@ pub(super) fn try_model_request_from_prompt(prompt: &Prompt) -> Option<ModelRequ
         },
     };
 
-    Some(ModelRequest {
+    let request = ModelRequest {
         instructions: prompt.base_instructions.text.clone(),
         input,
         tools,
         parallel_tool_calls: prompt.parallel_tool_calls,
         output,
-    })
+    };
+
+    // C2 is a behavior-preserving migration bridge. Only take the canonical
+    // path when converting back through the current Codex adapter reproduces
+    // the complete transitional Prompt exactly. Anything else stays on the
+    // legacy path instead of turning a migration mismatch into a user-facing
+    // InvalidRequest.
+    let rebuilt = prompt_from_model_request(&request, prompt).ok()?;
+    if !prompt_round_trip_matches(&rebuilt, prompt) {
+        return None;
+    }
+
+    Some(request)
+}
+
+fn prompt_round_trip_matches(rebuilt: &Prompt, original: &Prompt) -> bool {
+    rebuilt.input == original.input
+        && rebuilt.tools.as_ref() == original.tools.as_ref()
+        && rebuilt.parallel_tool_calls == original.parallel_tool_calls
+        && rebuilt.base_instructions == original.base_instructions
+        && rebuilt.output_schema == original.output_schema
+        && rebuilt.output_schema_strict == original.output_schema_strict
+        && rebuilt.cyber_access_program == original.cyber_access_program
 }
 
 /// Reconstructs the current Codex prompt from canonical semantics while using the legacy prompt
@@ -525,6 +547,50 @@ fn model_tool_result_content(
     }
 }
 
+fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bool {
+    if schema.encrypted.is_some() {
+        return true;
+    }
+
+    schema
+        .items
+        .as_deref()
+        .is_some_and(schema_has_responses_encrypted_marker)
+        || schema.properties.as_ref().is_some_and(|properties| {
+            properties
+                .values()
+                .any(schema_has_responses_encrypted_marker)
+        })
+        || schema
+            .additional_properties
+            .as_ref()
+            .is_some_and(|additional| match additional {
+                codex_tools::AdditionalProperties::Boolean(_) => false,
+                codex_tools::AdditionalProperties::Schema(schema) => {
+                    schema_has_responses_encrypted_marker(schema)
+                }
+            })
+        || schema.any_of.as_ref().is_some_and(|schemas| {
+            schemas.iter().any(schema_has_responses_encrypted_marker)
+        })
+        || schema.one_of.as_ref().is_some_and(|schemas| {
+            schemas.iter().any(schema_has_responses_encrypted_marker)
+        })
+        || schema.all_of.as_ref().is_some_and(|schemas| {
+            schemas.iter().any(schema_has_responses_encrypted_marker)
+        })
+        || schema.defs.as_ref().is_some_and(|schemas| {
+            schemas
+                .values()
+                .any(schema_has_responses_encrypted_marker)
+        })
+        || schema.definitions.as_ref().is_some_and(|schemas| {
+            schemas
+                .values()
+                .any(schema_has_responses_encrypted_marker)
+        })
+}
+
 fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
     let mut model_tools = Vec::new();
     for tool in tools {
@@ -571,6 +637,9 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                 description,
                 parameters,
             } if execution == TOOL_SEARCH_CLIENT_EXECUTION => {
+                if schema_has_responses_encrypted_marker(parameters) {
+                    return None;
+                }
                 model_tools.push(ModelToolSpec::Function {
                     namespace: None,
                     name: TOOL_SEARCH_NAME.to_string(),
@@ -592,6 +661,13 @@ fn model_function_tool(
     tool: &ResponsesApiTool,
     purpose: ModelToolPurpose,
 ) -> Option<ModelToolSpec> {
+    // `JsonSchema::encrypted` is a Responses-only reviewed-parameter marker,
+    // not JSON Schema or provider-neutral model semantics. Keep such tool
+    // declarations on the legacy request path during C2.
+    if schema_has_responses_encrypted_marker(&tool.parameters) {
+        return None;
+    }
+
     Some(ModelToolSpec::Function {
         namespace,
         name: tool.name.clone(),
