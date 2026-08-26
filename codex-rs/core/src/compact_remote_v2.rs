@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::Prompt;
 use crate::ResponseStream;
-use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
@@ -21,11 +20,12 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::retry::ModelStreamRequest;
+use crate::model_runtime::retry::ModelStreamRetryState;
+use crate::model_runtime::retry::handle_retryable_turn_runtime_error;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
-use crate::responses_retry::ResponsesStreamRequest;
-use crate::responses_retry::ResponsesStreamRetryState;
-use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -83,7 +83,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -98,7 +98,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
-        Some(client_session),
+        Some(turn_runtime),
         initial_context_injection,
         compaction_metadata,
     )
@@ -132,7 +132,7 @@ pub(crate) async fn run_remote_compact_task(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
-        /*client_session*/ None,
+        /*turn_runtime*/ None,
         InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
@@ -143,7 +143,7 @@ async fn run_remote_compact_task_inner(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    client_session: Option<&mut ModelClientSession>,
+    turn_runtime: Option<&mut ModelTurnRuntime>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
@@ -185,7 +185,7 @@ async fn run_remote_compact_task_inner(
         sess,
         step_context,
         fallback_step_context,
-        client_session,
+        turn_runtime,
         initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
@@ -223,7 +223,7 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    mut client_session: Option<&mut ModelClientSession>,
+    mut turn_runtime: Option<&mut ModelTurnRuntime>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -244,7 +244,7 @@ async fn run_remote_compact_task_inner_impl(
     let attempt = run_remote_compact_v2_attempt(
         sess,
         step_context,
-        client_session.as_deref_mut(),
+        turn_runtime.as_deref_mut(),
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -270,7 +270,7 @@ async fn run_remote_compact_task_inner_impl(
             let fallback_result = run_remote_compact_v2_attempt(
                 sess,
                 fallback_step_context,
-                client_session,
+                turn_runtime,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
@@ -366,7 +366,7 @@ struct RemoteCompactionV2Output {
 async fn run_remote_compaction_request_v2(
     sess: &Session,
     turn_context: &TurnContext,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
 ) -> CodexResult<RemoteCompactionV2Output> {
@@ -375,9 +375,9 @@ async fn run_remote_compaction_request_v2(
         .info()
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
-    let mut retry_state = ResponsesStreamRetryState::default();
+    let mut retry_state = ModelStreamRetryState::default();
     loop {
-        let result = match client_session
+        let result = match turn_runtime
             .stream(
                 prompt,
                 turn_context.model_info(),
@@ -398,14 +398,15 @@ async fn run_remote_compaction_request_v2(
             Ok(compaction_output) => return Ok(compaction_output),
             Err(err) if !err.is_retryable() => return Err(err),
             Err(err) => {
-                handle_retryable_response_stream_error(
+                handle_retryable_turn_runtime_error(
                     &mut retry_state,
                     max_retries,
                     err,
-                    client_session,
+                    turn_runtime,
                     sess,
                     turn_context,
-                    ResponsesStreamRequest::RemoteCompactionV2,
+                    ModelStreamRequest::RemoteCompactionV2,
+                    /*allow_unbounded_connection_retry*/ false,
                 )
                 .await?;
             }
