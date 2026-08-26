@@ -162,19 +162,14 @@ pub(crate) async fn run_turn(
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut turn_runtime = prepared_turn_runtime
-        .unwrap_or_else(|| sess.services.model_runtime().begin_turn());
+    let mut turn_runtime =
+        prepared_turn_runtime.unwrap_or_else(|| sess.services.model_runtime().begin_turn());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if let Err(err) = run_pre_sampling_compact(
-        &sess,
-        &turn_context,
-        &mut turn_runtime,
-        &cancellation_token,
-    )
-    .await
+    if let Err(err) =
+        run_pre_sampling_compact(&sess, &turn_context, &mut turn_runtime, &cancellation_token).await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
@@ -1401,6 +1396,7 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        let model_request = crate::model_runtime::try_model_request_from_prompt(&prompt);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1410,6 +1406,7 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            model_request.as_ref(),
             cancellation_token.child_token(),
         )
         .await
@@ -2202,6 +2199,7 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    model_request: Option<&crate::model_runtime::ir::ModelRequest>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -2225,7 +2223,8 @@ async fn try_run_sampling_request(
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
     let mut stream = turn_runtime
-        .stream(
+        .stream_migrating_request(
+            model_request,
             prompt,
             &step_context.settings.model_info,
             &step_context.session_telemetry,

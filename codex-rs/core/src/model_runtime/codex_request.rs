@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -15,8 +17,6 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::error::CodexErr;
-use codex_protocol::error::Result;
 use codex_tools::FreeformTool;
 use codex_tools::FreeformToolFormat;
 use codex_tools::ResponsesApiNamespace;
@@ -198,9 +198,7 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
             ..
         }
         | ResponseItem::CustomToolCallOutput {
-            call_id,
-            output,
-            ..
+            call_id, output, ..
         } => Some(ModelInputItem::ToolResult(ModelToolResult {
             call_id: ModelToolCallId(call_id.clone()),
             content: model_tool_result_content(output)?,
@@ -267,8 +265,8 @@ fn response_item_from_model_input(
                 role,
                 content,
                 phase: message.phase.map(response_message_phase),
-                internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
-                    .clone(),
+                internal_chat_message_metadata_passthrough:
+                    internal_chat_message_metadata_passthrough.clone(),
             })
         }
         (
@@ -291,7 +289,9 @@ fn response_item_from_model_input(
             // because serde_json would choose different whitespace.
             let arguments = match serde_json::from_str::<Value>(arguments) {
                 Ok(original) if &original == value => arguments.clone(),
-                _ => serde_json::to_string(value).map_err(|err| invalid_request(err.to_string()))?,
+                _ => {
+                    serde_json::to_string(value).map_err(|err| invalid_request(err.to_string()))?
+                }
             };
             Ok(ResponseItem::FunctionCall {
                 id: id.clone(),
@@ -300,8 +300,8 @@ fn response_item_from_model_input(
                 arguments,
                 encrypted_function_args: encrypted_function_args.clone(),
                 call_id: call.call_id.0.clone(),
-                internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
-                    .clone(),
+                internal_chat_message_metadata_passthrough:
+                    internal_chat_message_metadata_passthrough.clone(),
             })
         }
         (
@@ -325,8 +325,8 @@ fn response_item_from_model_input(
                 name: call.name.clone(),
                 namespace: call.namespace.clone(),
                 input: input.clone(),
-                internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
-                    .clone(),
+                internal_chat_message_metadata_passthrough:
+                    internal_chat_message_metadata_passthrough.clone(),
             })
         }
         (
@@ -354,12 +354,15 @@ fn response_item_from_model_input(
                 status: status.clone(),
                 execution: execution.clone(),
                 arguments: arguments.clone(),
-                internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
-                    .clone(),
+                internal_chat_message_metadata_passthrough:
+                    internal_chat_message_metadata_passthrough.clone(),
             })
         }
         (ModelInputItem::ToolResult(result), legacy @ ResponseItem::FunctionCallOutput { .. })
-        | (ModelInputItem::ToolResult(result), legacy @ ResponseItem::CustomToolCallOutput { .. })
+        | (
+            ModelInputItem::ToolResult(result),
+            legacy @ ResponseItem::CustomToolCallOutput { .. },
+        )
         | (ModelInputItem::ToolResult(result), legacy @ ResponseItem::ToolSearchOutput { .. }) => {
             // For C2 the canonical request is produced immediately from this same template. Validate
             // that the generic semantics are unchanged, then keep the exact provider-private
@@ -436,7 +439,10 @@ fn model_content_from_response(content: &ContentItem, role: &str) -> Option<Mode
     }
 }
 
-fn response_content_from_model(content: &ModelContent, legacy: &ContentItem) -> Result<ContentItem> {
+fn response_content_from_model(
+    content: &ModelContent,
+    legacy: &ContentItem,
+) -> Result<ContentItem> {
     match (content, legacy) {
         (ModelContent::Text(text), ContentItem::InputText { .. }) => {
             Ok(ContentItem::InputText { text: text.clone() })
@@ -489,9 +495,13 @@ fn codex_media_source(source: &ModelMediaSource) -> Result<String> {
     }
 }
 
-fn model_tool_result_content(output: &FunctionCallOutputPayload) -> Option<Vec<ModelToolResultContent>> {
+fn model_tool_result_content(
+    output: &FunctionCallOutputPayload,
+) -> Option<Vec<ModelToolResultContent>> {
     match &output.body {
-        FunctionCallOutputBody::Text(text) => Some(vec![ModelToolResultContent::Text(text.clone())]),
+        FunctionCallOutputBody::Text(text) => {
+            Some(vec![ModelToolResultContent::Text(text.clone())])
+        }
         FunctionCallOutputBody::ContentItems(items) => items
             .iter()
             .map(|item| match item {
@@ -520,10 +530,18 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
     for tool in tools {
         match tool {
             ToolSpec::Function(tool) => {
-                model_tools.push(model_function_tool(None, tool, ModelToolPurpose::Invocation)?);
+                model_tools.push(model_function_tool(
+                    None,
+                    tool,
+                    ModelToolPurpose::Invocation,
+                )?);
             }
             ToolSpec::Freeform(tool) => {
-                model_tools.push(model_freeform_tool(None, tool, ModelToolPurpose::Invocation)?);
+                model_tools.push(model_freeform_tool(
+                    None,
+                    tool,
+                    ModelToolPurpose::Invocation,
+                )?);
             }
             ToolSpec::Namespace(namespace) => {
                 if namespace.description != default_namespace_description(&namespace.name) {
@@ -531,20 +549,20 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                 }
                 for tool in &namespace.tools {
                     match tool {
-                        ResponsesApiNamespaceTool::Function(tool) => model_tools.push(
-                            model_function_tool(
+                        ResponsesApiNamespaceTool::Function(tool) => {
+                            model_tools.push(model_function_tool(
                                 Some(namespace.name.clone()),
                                 tool,
                                 ModelToolPurpose::Invocation,
-                            )?,
-                        ),
-                        ResponsesApiNamespaceTool::Custom(tool) => model_tools.push(
-                            model_freeform_tool(
+                            )?)
+                        }
+                        ResponsesApiNamespaceTool::Custom(tool) => {
+                            model_tools.push(model_freeform_tool(
                                 Some(namespace.name.clone()),
                                 tool,
                                 ModelToolPurpose::Invocation,
-                            )?,
-                        ),
+                            )?)
+                        }
                     }
                 }
             }
@@ -646,11 +664,15 @@ fn codex_namespace_tool_from_model(tool: &ModelToolSpec) -> Result<ResponsesApiN
         ModelToolSpec::Function {
             purpose: ModelToolPurpose::Invocation,
             ..
-        } => Ok(ResponsesApiNamespaceTool::Function(codex_function_tool(tool)?)),
+        } => Ok(ResponsesApiNamespaceTool::Function(codex_function_tool(
+            tool,
+        )?)),
         ModelToolSpec::Freeform {
             purpose: ModelToolPurpose::Invocation,
             ..
-        } => Ok(ResponsesApiNamespaceTool::Custom(codex_freeform_tool(tool)?)),
+        } => Ok(ResponsesApiNamespaceTool::Custom(codex_freeform_tool(
+            tool,
+        )?)),
         ModelToolSpec::Function { .. } | ModelToolSpec::Freeform { .. } => Err(invalid_request(
             "discovery tools cannot be nested in a Codex tool namespace",
         )),
@@ -758,8 +780,8 @@ fn codex_defer_loading(availability: ModelToolAvailability) -> Option<bool> {
     }
 }
 
-fn invalid_request(message: impl Into<String>) -> CodexErr {
-    CodexErr::InvalidRequest(message.into())
+fn invalid_request(message: impl Into<String>) -> codex_protocol::error::CodexErr {
+    CodexErrorDetails::InvalidRequest(message.into()).into()
 }
 
 #[cfg(test)]
