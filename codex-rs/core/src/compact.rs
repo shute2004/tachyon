@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
-use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
@@ -11,6 +10,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::model_runtime::ModelTurnRuntime;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -262,10 +262,9 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
-    let mut client_session = sess.services.model_client.new_session();
-    // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
-    // request tracking)
-    // survives retries within this compact turn.
+    let mut turn_runtime = sess.services.model_runtime().begin_turn();
+    // Reuse one turn runtime so fresh turn-affinity state and any checked-out reusable backend
+    // resources survive retries within this compact turn.
     let responses_metadata = sess
         .responses_metadata(
             turn_context.as_ref(),
@@ -287,7 +286,7 @@ async fn run_compact_task_inner_impl(
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),
-            &mut client_session,
+            &mut turn_runtime,
             &responses_metadata,
             &prompt,
         )
@@ -735,11 +734,11 @@ fn build_compacted_history_with_limit(
 async fn drain_to_completed(
     sess: &Session,
     turn_context: &TurnContext,
-    client_session: &mut ModelClientSession,
+    turn_runtime: &mut ModelTurnRuntime,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
 ) -> CodexResult<()> {
-    let mut stream = client_session
+    let mut stream = turn_runtime
         .stream(
             prompt,
             turn_context.model_info(),
