@@ -5,8 +5,9 @@
 //! `ResponseEvent` types. Provider/product metadata and provider-private continuation state stay
 //! below the model-runtime boundary and must not be added here merely to preserve one wire format.
 //!
-//! The first IR slice is definition-only: existing Codex call sites continue to use the migration
-//! compatibility types until the adapter conversions are wired in focused follow-up changes.
+//! C1 introduced these definitions without changing production execution. C2 routes representable
+//! regular sampling requests through `ModelRequest` while unsupported Codex/Responses-only shapes
+//! remain on an explicit migration fallback. Canonical `ModelEvent` conversion follows separately.
 
 use std::sync::Arc;
 
@@ -92,10 +93,7 @@ pub enum ModelContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelMediaSource {
     Uri(String),
-    Bytes {
-        media_type: String,
-        data: Arc<[u8]>,
-    },
+    Bytes { media_type: String, data: Arc<[u8]> },
 }
 
 /// Optional image-fidelity hint. Adapters may reject or approximate unsupported hints.
@@ -155,10 +153,7 @@ pub enum ModelFreeformInputFormat {
     /// Unconstrained free-form text.
     Text,
     /// Text constrained by a grammar understood by the target model backend.
-    Grammar {
-        syntax: String,
-        definition: String,
-    },
+    Grammar { syntax: String, definition: String },
 }
 
 /// Correlation identifier for one logical tool call.

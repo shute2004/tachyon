@@ -1401,6 +1401,7 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        let model_request = crate::model_runtime::try_model_request_from_prompt(&prompt);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1410,6 +1411,7 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            model_request.as_ref(),
             cancellation_token.child_token(),
         )
         .await
@@ -2202,6 +2204,7 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    model_request: Option<&crate::model_runtime::ir::ModelRequest>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -2225,7 +2228,8 @@ async fn try_run_sampling_request(
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
     let mut stream = turn_runtime
-        .stream(
+        .stream_migrating_request(
+            model_request,
             prompt,
             &step_context.settings.model_info,
             &step_context.session_telemetry,
