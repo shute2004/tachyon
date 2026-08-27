@@ -31,6 +31,7 @@ use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
@@ -200,7 +201,7 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
 async fn transparent_image_preserves_output_metadata_and_persisted_history() -> Result<()> {
     let call_id = "transparent-image-run-1";
     let server = responses::start_mock_server().await;
-    mount_image_response_with_background(&server, "transparent").await;
+    mount_authenticated_transparent_image_response(&server).await;
     responses::mount_sse_sequence(
         &server,
         vec![
@@ -939,6 +940,24 @@ async fn mount_image_response_with_background(server: &MockServer, background: &
                 .set_body_json(json!({
                     "created": 1,
                     "background": background,
+                    "data": [{"b64_json": RESULT}],
+                })),
+        )
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+async fn mount_authenticated_transparent_image_response(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/api/codex/images/generations"))
+        .and(header("authorization", "Bearer access-chatgpt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-codex-imagegen-request-id", "req-imagegen-123")
+                .set_body_json(json!({
+                    "created": 1,
+                    "background": "transparent",
                     "data": [{"b64_json": RESULT}],
                 })),
         )
