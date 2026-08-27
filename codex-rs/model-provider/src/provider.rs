@@ -222,23 +222,27 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         codex_api::map_api_error(error)
     }
 
-    /// Returns provider configuration adapted for the API client.
-    fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
+    /// Resolves the provider deployment used by low-level API clients.
+    ///
+    /// Implementations may resolve provider-private deployment state late.
+    /// Protocol operation paths remain owned by endpoint clients.
+    fn api_deployment(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<codex_api::ApiDeployment>> {
         Box::pin(async move {
             let auth = self.auth().await;
-            let mut provider = self
+            Ok(self
                 .info()
-                .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))?;
-            enforce_managed_residency(&mut provider);
-            Ok(provider)
+                .to_api_deployment(auth.as_ref().map(CodexAuth::auth_mode)))
         })
     }
 
-    /// Returns the provider base URL that will be used at request time.
-    fn runtime_base_url(
-        &self,
-    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<Option<String>>> {
-        Box::pin(async { Ok(self.info().base_url.clone()) })
+    /// Returns provider configuration adapted for the API client.
+    fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
+        Box::pin(async move {
+            let deployment = self.api_deployment().await?;
+            self.info().to_api_provider_with_deployment(deployment)
+        })
     }
 
     /// Returns the auth provider used to attach request credentials.
@@ -366,6 +370,15 @@ impl ConfiguredModelProvider {
 impl ModelProvider for ConfiguredModelProvider {
     fn info(&self) -> &ModelProviderInfo {
         &self.info
+    }
+
+    fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
+        Box::pin(async move {
+            let deployment = self.api_deployment().await?;
+            let mut provider = self.info.to_api_provider_with_deployment(deployment)?;
+            enforce_managed_residency(&mut provider);
+            Ok(provider)
+        })
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -749,7 +762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_provider_runtime_base_url_uses_configured_base_url() {
+    async fn configured_provider_api_deployment_uses_configured_base_url() {
         let provider = create_model_provider(
             provider_for("https://example.test/v1".to_string()),
             /*auth_manager*/ None,
@@ -757,10 +770,11 @@ mod tests {
 
         assert_eq!(
             provider
-                .runtime_base_url()
+                .api_deployment()
                 .await
-                .expect("runtime base URL should resolve"),
-            Some("https://example.test/v1".to_string())
+                .expect("API deployment should resolve")
+                .base_url,
+            "https://example.test/v1"
         );
     }
 

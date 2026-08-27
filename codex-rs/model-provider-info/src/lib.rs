@@ -289,7 +289,10 @@ impl ModelProviderInfo {
         Ok(headers)
     }
 
-    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+    /// Resolves the deployment used by low-level API clients.
+    ///
+    /// Protocol operation paths remain owned by endpoint clients.
+    pub fn to_api_deployment(&self, auth_mode: Option<AuthMode>) -> codex_api::ApiDeployment {
         let default_base_url = if matches!(
             auth_mode,
             Some(
@@ -309,6 +312,22 @@ impl ModelProviderInfo {
             .clone()
             .unwrap_or_else(|| default_base_url.to_string());
 
+        codex_api::ApiDeployment {
+            base_url,
+            query_params: self.query_params.clone().map(|params| {
+                params
+                    .into_iter()
+                    .map(|(name, value)| (name, value.into_inner()))
+                    .collect()
+            }),
+        }
+    }
+
+    /// Builds low-level provider state around an already resolved deployment.
+    pub fn to_api_provider_with_deployment(
+        &self,
+        deployment: codex_api::ApiDeployment,
+    ) -> CodexResult<ApiProvider> {
         let headers = self.build_header_map()?;
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
@@ -320,21 +339,18 @@ impl ModelProviderInfo {
 
         Ok(ApiProvider {
             name: self.name.clone(),
-            deployment: codex_api::ApiDeployment {
-                base_url,
-                query_params: self.query_params.clone().map(|params| {
-                    params
-                        .into_iter()
-                        .map(|(name, value)| (name, value.into_inner()))
-                        .collect()
-                }),
-            },
+            deployment,
             provider_headers: headers,
             request_policy: codex_api::RequestExecutionPolicy {
                 retry,
                 stream_idle_timeout: self.stream_idle_timeout(),
             },
         })
+    }
+
+    pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
+        let deployment = self.to_api_deployment(auth_mode);
+        self.to_api_provider_with_deployment(deployment)
     }
 
     /// If `env_key` is Some, returns the API key for this provider if present

@@ -72,6 +72,26 @@ query_params = { api-version = "2025-04-01-preview" }
 }
 
 #[test]
+fn api_deployment_preserves_configured_query_params() {
+    let provider_toml = r#"
+name = "Azure"
+base_url = "https://xxxxx.openai.azure.com/openai"
+query_params = { api-version = "2025-04-01-preview" }
+        "#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    let deployment = provider.to_api_deployment(/*auth_mode*/ None);
+
+    assert_eq!(deployment.base_url, "https://xxxxx.openai.azure.com/openai");
+    assert_eq!(
+        deployment.query_params,
+        Some(maplit::hashmap! {
+            "api-version".to_string() => "2025-04-01-preview".to_string(),
+        })
+    );
+}
+
+#[test]
 fn test_deserialize_example_model_provider_toml() {
     let azure_provider_toml = r#"
 name = "Example"
