@@ -143,6 +143,7 @@ impl SessionConfiguration {
     pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
             allow_login_shell: self.allow_login_shell,
+            workspace_roots: Vec::new(),
             permission_profile: self.permission_profile_state.snapshot(),
             shell_environment_policy: self.shell_environment_policy.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
@@ -166,6 +167,21 @@ impl SessionConfiguration {
         let workspace_roots = ThreadEnvironments::primary_workspace_roots_for(environments);
         self.permission_profile()
             .materialize_project_roots_with_workspace_roots(&workspace_roots)
+    }
+
+    fn effective_permission_profile(
+        &self,
+        environments: &[TurnEnvironmentSelection],
+    ) -> PermissionProfile {
+        ThreadEnvironments::primary_config_for(environments)
+            .map(|config| {
+                config
+                    .permission_profile
+                    .permission_profile()
+                    .clone()
+                    .materialize_project_roots_with_path_uris(&config.workspace_roots)
+            })
+            .unwrap_or_else(|| self.materialized_permission_profile(environments))
     }
 
     pub(super) fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
@@ -228,10 +244,7 @@ impl SessionConfiguration {
             service_tier: self.step_settings.service_tier.clone(),
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
-            permission_profile: permission_profile
-                .permission_profile()
-                .clone()
-                .materialize_project_roots_with_workspace_roots(&workspace_roots),
+            permission_profile: self.effective_permission_profile(&environment_selections),
             active_permission_profile: permission_profile.active_permission_profile(),
             environments: TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
@@ -293,13 +306,11 @@ impl SessionConfiguration {
             approvals_reviewer: Some(self.step_settings.approvals_reviewer),
             permission_profile: Some(self.permission_profile()),
             active_permission_profile: self.active_permission_profile(),
+            windows_sandbox_level: Some(self.windows_sandbox_level),
             summary: self.step_settings.reasoning_summary,
             service_tier: Some(self.step_settings.service_tier.clone()),
             collaboration_mode: Some(self.step_settings.collaboration_mode.clone()),
             personality: self.step_settings.personality,
-            // TODO(anp): Include the runtime Windows sandbox override in restored settings.
-            // This omission predates TurnEnvironment::sandbox_context; rebuilding FromThread
-            // environments falls back to Config instead of retaining that override.
             ..Default::default()
         }
     }
@@ -317,13 +328,7 @@ impl SessionConfiguration {
         &self,
         environments: &[TurnEnvironmentSelection],
     ) -> StepSettingsConstraints<'_> {
-        let permission_profile = ThreadEnvironments::primary_config_for(environments)
-            .map(|config| config.permission_profile.permission_profile())
-            .unwrap_or_else(|| self.permission_profile_state.permission_profile())
-            .clone()
-            .materialize_project_roots_with_workspace_roots(
-                &ThreadEnvironments::primary_workspace_roots_for(environments),
-            );
+        let permission_profile = self.effective_permission_profile(environments);
         StepSettingsConstraints {
             requirements: self
                 .original_config_do_not_use
