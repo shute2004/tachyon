@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_api::ApiError;
-use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_api::TransportError;
 use codex_login::AuthManager;
@@ -144,12 +143,6 @@ impl AmazonBedrockModelProvider {
             | auth::BedrockAuthSource::EnvAwsCredentials
             | auth::BedrockAuthSource::AwsSdk => None,
         }
-    }
-
-    async fn api_provider(&self) -> Result<Provider> {
-        let mut api_provider_info = self.info.clone();
-        api_provider_info.base_url = self.runtime_base_url().await?;
-        api_provider_info.to_api_provider(/*auth_mode*/ None)
     }
 
     async fn runtime_base_url(&self) -> Result<Option<String>> {
@@ -288,12 +281,14 @@ impl ModelProvider for AmazonBedrockModelProvider {
         error::map_api_error(error)
     }
 
-    fn api_provider(&self) -> ModelProviderFuture<'_, Result<Provider>> {
-        Box::pin(AmazonBedrockModelProvider::api_provider(self))
-    }
-
-    fn runtime_base_url(&self) -> ModelProviderFuture<'_, Result<Option<String>>> {
-        Box::pin(AmazonBedrockModelProvider::runtime_base_url(self))
+    fn api_deployment(&self) -> ModelProviderFuture<'_, Result<codex_api::ApiDeployment>> {
+        Box::pin(async move {
+            let mut deployment = self.info.to_api_deployment(/*auth_mode*/ None);
+            if let Some(base_url) = self.runtime_base_url().await? {
+                deployment.base_url = base_url;
+            }
+            Ok(deployment)
+        })
     }
 
     fn api_auth(&self) -> ModelProviderFuture<'_, Result<SharedAuthProvider>> {
@@ -370,6 +365,34 @@ mod tests {
         assert_eq!(
             api_provider.deployment.base_url,
             "https://bedrock-mantle.eu-central-1.api.aws/openai/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_provider_uses_late_resolved_bedrock_deployment() {
+        let mut provider_info = command_auth_provider(/*base_url*/ None);
+        provider_info.aws = Some(ModelProviderAwsAuthInfo {
+            profile: None,
+            region: Some("us-west-2".to_string()),
+            auth_refresh: None,
+        });
+        let provider = AmazonBedrockModelProvider::new(provider_info, /*auth_manager*/ None);
+
+        let api_provider = provider
+            .api_provider()
+            .await
+            .expect("Bedrock API provider should resolve");
+
+        assert_eq!(
+            api_provider.deployment.base_url,
+            "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+        );
+        assert_eq!(
+            api_provider
+                .provider_headers
+                .get("x-amzn-mantle-client-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("codex")
         );
     }
 
