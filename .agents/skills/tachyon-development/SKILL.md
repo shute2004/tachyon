@@ -5,6 +5,9 @@ description: Use when developing, refactoring, validating, reviewing, or merging
 
 # Tachyon Development
 
+> Added: 2026-08-27  
+> Last reviewed: 2026-08-27
+
 Use this skill for work in `shute2004/tachyon`.
 
 ## Core workflow
@@ -18,6 +21,7 @@ Use this skill for work in `shute2004/tachyon`.
 7. For branch, PR, merge, and independent-review workflow, read `references/git-pr-workflow.md`.
 8. For ModelRuntime, Provider/Protocol/Route, Endpoint/Auth, compaction, retry, or provider-private state work, read `references/architecture-extraction.md`.
 9. If development reveals a non-obvious rule that a fresh agent would likely miss, consider updating this skill or recording a candidate in Notion. Do not add skill content mechanically after every task.
+10. Check the freshness metadata and change history of any Skill/reference guidance you rely on. If it is old relative to current code, verify the relevant implementation before treating it as authoritative.
 
 ## Architectural invariants currently established
 
@@ -36,3 +40,8 @@ A migration PR should make clear:
 - which provider-specific mechanisms remain behind the adapter;
 - what is deliberately deferred;
 - which focused checks were run and whether any warning or baseline failure remains.
+
+## Change history
+
+- 2026-08-27 — Added the initial Tachyon development workflow and established current ModelRuntime/ModelTurnRuntime invariants.
+- 2026-08-27 — Added explicit Skill freshness checks to the core workflow.
