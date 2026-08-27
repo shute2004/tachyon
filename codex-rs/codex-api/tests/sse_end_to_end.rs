@@ -59,17 +59,21 @@ impl AuthProvider for NoAuth {
 fn provider(name: &str) -> Provider {
     Provider {
         name: name.to_string(),
-        base_url: "https://example.com/v1".to_string(),
-        query_params: None,
-        headers: HeaderMap::new(),
-        retry: codex_api::RetryConfig {
-            max_attempts: 1,
-            base_delay: Duration::from_millis(1),
-            retry_429: false,
-            retry_5xx: false,
-            retry_transport: true,
+        deployment: codex_api::ApiDeployment {
+            base_url: "https://example.com/v1".to_string(),
+            query_params: None,
         },
-        stream_idle_timeout: Duration::from_millis(50),
+        headers: HeaderMap::new(),
+        request_policy: codex_api::RequestExecutionPolicy {
+            retry: codex_api::RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: true,
+            },
+            stream_idle_timeout: Duration::from_millis(50),
+        },
     }
 }
 

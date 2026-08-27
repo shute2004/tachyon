@@ -795,8 +795,8 @@ impl RealtimeWebsocketClient {
         default_headers: HeaderMap,
     ) -> Result<RealtimeWebsocketConnection, ApiError> {
         let ws_url = websocket_url_from_api_url(
-            self.provider.base_url.as_str(),
-            self.provider.query_params.as_ref(),
+            self.provider.deployment.base_url.as_str(),
+            self.provider.deployment.query_params.as_ref(),
             config.model.as_deref(),
             config.event_parser,
             config.session_mode,
@@ -863,7 +863,7 @@ impl RealtimeWebsocketClient {
         // The WebRTC call already exists; this loop only retries joining its sideband control
         // socket. Once joined, the returned connection is the same reader/writer state that the
         // ordinary websocket start path uses.
-        for attempt in 0..=self.provider.retry.max_attempts {
+        for attempt in 0..=self.provider.request_policy.retry.max_attempts {
             let result = self
                 .connect_webrtc_sideband_once(
                     config.clone(),
@@ -877,8 +877,8 @@ impl RealtimeWebsocketClient {
             match result {
                 Ok(connection) => return Ok(connection),
                 Err(err) if webrtc_sideband_session_ended(&err) => return Err(err),
-                Err(err) if attempt < self.provider.retry.max_attempts => {
-                    let delay = backoff(self.provider.retry.base_delay, attempt + 1);
+                Err(err) if attempt < self.provider.request_policy.retry.max_attempts => {
+                    let delay = backoff(self.provider.request_policy.retry.base_delay, attempt + 1);
                     warn!(
                         attempt = attempt + 1,
                         call_id,
@@ -2163,17 +2163,21 @@ mod tests {
     fn webrtc_frameless_sideband_ignores_provider_base_url() {
         let client = RealtimeWebsocketClient::new(Provider {
             name: "chatgpt".to_string(),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            query_params: None,
-            headers: HeaderMap::new(),
-            retry: RetryConfig {
-                max_attempts: 0,
-                base_delay: Duration::ZERO,
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+                query_params: None,
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: RetryConfig {
+                    max_attempts: 0,
+                    base_delay: Duration::ZERO,
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         });
 
         let url = client
@@ -2359,17 +2363,21 @@ mod tests {
 
         let provider = Provider {
             name: "test".to_string(),
-            base_url: format!("http://{addr}"),
-            query_params: Some(HashMap::new()),
-            headers: HeaderMap::new(),
-            retry: crate::provider::RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::from_millis(1),
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: format!("http://{addr}"),
+                query_params: Some(HashMap::new()),
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: crate::provider::RetryConfig {
+                    max_attempts: 1,
+                    base_delay: Duration::from_millis(1),
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -2685,17 +2693,21 @@ mod tests {
 
         let provider = Provider {
             name: "test".to_string(),
-            base_url: format!("http://{addr}"),
-            query_params: Some(HashMap::new()),
-            headers: HeaderMap::new(),
-            retry: crate::provider::RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::from_millis(1),
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: format!("http://{addr}"),
+                query_params: Some(HashMap::new()),
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: crate::provider::RetryConfig {
+                    max_attempts: 1,
+                    base_delay: Duration::from_millis(1),
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -2812,17 +2824,21 @@ mod tests {
 
         let provider = Provider {
             name: "test".to_string(),
-            base_url: format!("http://{addr}"),
-            query_params: Some(HashMap::new()),
-            headers: HeaderMap::new(),
-            retry: crate::provider::RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::from_millis(1),
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: format!("http://{addr}"),
+                query_params: Some(HashMap::new()),
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: crate::provider::RetryConfig {
+                    max_attempts: 1,
+                    base_delay: Duration::from_millis(1),
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -2918,17 +2934,21 @@ mod tests {
 
         let provider = Provider {
             name: "test".to_string(),
-            base_url: format!("http://{addr}"),
-            query_params: Some(HashMap::new()),
-            headers: HeaderMap::new(),
-            retry: crate::provider::RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::from_millis(1),
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: format!("http://{addr}"),
+                query_params: Some(HashMap::new()),
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: crate::provider::RetryConfig {
+                    max_attempts: 1,
+                    base_delay: Duration::from_millis(1),
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client
@@ -3010,17 +3030,21 @@ mod tests {
 
         let provider = Provider {
             name: "test".to_string(),
-            base_url: format!("http://{addr}"),
-            query_params: Some(HashMap::new()),
-            headers: HeaderMap::new(),
-            retry: crate::provider::RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::from_millis(1),
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
+            deployment: crate::provider::ApiDeployment {
+                base_url: format!("http://{addr}"),
+                query_params: Some(HashMap::new()),
             },
-            stream_idle_timeout: Duration::from_secs(5),
+            headers: HeaderMap::new(),
+            request_policy: crate::provider::RequestExecutionPolicy {
+                retry: crate::provider::RetryConfig {
+                    max_attempts: 1,
+                    base_delay: Duration::from_millis(1),
+                    retry_429: false,
+                    retry_5xx: false,
+                    retry_transport: false,
+                },
+                stream_idle_timeout: Duration::from_secs(5),
+            },
         };
         let client = RealtimeWebsocketClient::new(provider);
         let connection = client

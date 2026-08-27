@@ -2389,7 +2389,7 @@ async fn websocket_reachability_check(
             );
         }
     };
-    match api_provider.websocket_url_for_path("responses") {
+    match api_provider.deployment.websocket_url_for_path("responses") {
         Ok(url) => {
             details.push(format!("endpoint: {url}"));
             if let Some(host) = url.host_str()

@@ -35,21 +35,17 @@ impl RetryConfig {
     }
 }
 
-/// HTTP endpoint configuration used to talk to a concrete API deployment.
+/// Resolved deployment information used to construct provider request targets.
 ///
-/// Encapsulates base URL, default headers, query params, retry policy, and
-/// stream idle timeout, plus helper methods for building requests.
+/// This contains the provider deployment base URL plus query parameters that apply to every
+/// operation against that deployment. Protocol operation paths remain owned by endpoint clients.
 #[derive(Debug, Clone)]
-pub struct Provider {
-    pub name: String,
+pub struct ApiDeployment {
     pub base_url: String,
     pub query_params: Option<HashMap<String, String>>,
-    pub headers: HeaderMap,
-    pub retry: RetryConfig,
-    pub stream_idle_timeout: Duration,
 }
 
-impl Provider {
+impl ApiDeployment {
     pub fn url_for_path(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
         let path = path.trim_start_matches('/');
@@ -74,17 +70,6 @@ impl Provider {
         url
     }
 
-    pub fn build_request(&self, method: Method, path: &str) -> Request {
-        Request {
-            method,
-            url: self.url_for_path(path),
-            headers: self.headers.clone(),
-            body: None,
-            compression: RequestCompression::None,
-            timeout: None,
-        }
-    }
-
     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
         let mut url = Url::parse(&self.url_for_path(path))?;
 
@@ -96,6 +81,38 @@ impl Provider {
         };
         let _ = url.set_scheme(scheme);
         Ok(url)
+    }
+}
+
+/// Request/stream execution policy for a resolved provider setup.
+#[derive(Debug, Clone)]
+pub struct RequestExecutionPolicy {
+    pub retry: RetryConfig,
+    pub stream_idle_timeout: Duration,
+}
+
+/// Resolved low-level provider setup consumed by API clients.
+///
+/// Endpoint/deployment location and request execution policy are separate subobjects. Default
+/// headers remain transitional request decoration until their ownership is extracted independently.
+#[derive(Debug, Clone)]
+pub struct Provider {
+    pub name: String,
+    pub deployment: ApiDeployment,
+    pub headers: HeaderMap,
+    pub request_policy: RequestExecutionPolicy,
+}
+
+impl Provider {
+    pub fn build_request(&self, method: Method, path: &str) -> Request {
+        Request {
+            method,
+            url: self.deployment.url_for_path(path),
+            headers: self.headers.clone(),
+            body: None,
+            compression: RequestCompression::None,
+            timeout: None,
+        }
     }
 }
 
@@ -125,6 +142,38 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_builds_operation_url_with_query_defaults() {
+        let deployment = ApiDeployment {
+            base_url: "https://example.com/v1/".to_string(),
+            query_params: Some(HashMap::from([(
+                "api-version".to_string(),
+                "2025-04-01-preview".to_string(),
+            )])),
+        };
+
+        assert_eq!(
+            deployment.url_for_path("/responses"),
+            "https://example.com/v1/responses?api-version=2025-04-01-preview"
+        );
+    }
+
+    #[test]
+    fn deployment_converts_http_scheme_for_websocket_operation() {
+        let deployment = ApiDeployment {
+            base_url: "https://example.com/v1".to_string(),
+            query_params: None,
+        };
+
+        assert_eq!(
+            deployment
+                .websocket_url_for_path("responses")
+                .expect("websocket URL should build")
+                .as_str(),
+            "wss://example.com/v1/responses"
+        );
+    }
 
     #[test]
     fn detects_azure_responses_base_urls() {

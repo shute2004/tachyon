@@ -657,6 +657,7 @@ impl ModelClient {
         add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
         let compact_request_timeout = client_setup
             .api_provider
+            .request_policy
             .stream_idle_timeout
             .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
         let client =
@@ -1048,7 +1049,7 @@ impl ModelClient {
         api_provider: &ApiProvider,
         endpoint: &str,
     ) -> Result<ReqwestTransport> {
-        let request_url = api_provider.url_for_path(endpoint);
+        let request_url = api_provider.deployment.url_for_path(endpoint);
         let client = create_client_for_route(
             &self.http_client_factory,
             &request_url,

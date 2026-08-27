@@ -1189,12 +1189,12 @@ async fn prepare_realtime_start(
     let mut api_provider = provider.to_api_provider(Some(AuthMode::ApiKey))?;
     let realtime_sideband_base_url = config.experimental_realtime_ws_base_url.clone();
     if let Some(realtime_ws_base_url) = &realtime_sideband_base_url {
-        api_provider.base_url = realtime_ws_base_url.clone();
+        api_provider.deployment.base_url = realtime_ws_base_url.clone();
     }
     let realtime_call_api_provider =
         if let Some(realtime_call_base_url) = &config.experimental_realtime_webrtc_call_base_url {
             let mut api_provider = provider.to_api_provider(Some(AuthMode::ApiKey))?;
-            api_provider.base_url = realtime_call_base_url.clone();
+            api_provider.deployment.base_url = realtime_call_base_url.clone();
             Some(api_provider)
         } else {
             None
