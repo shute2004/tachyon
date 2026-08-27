@@ -355,6 +355,76 @@ async fn system_time_source_adds_current_time_reminder() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_metadata_registers_clock_tools_without_current_time_reminder() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info
+                .experimental_supported_tools
+                .push("clock".to_string());
+        })
+        .with_config(|config| {
+            config.include_environment_context = false;
+            let _ = config.features.disable(Feature::CurrentTimeReminder);
+            config.current_time_reminder = None;
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("what time is it?").await?;
+
+    let request = responses.single_request();
+    assert!(request.tool_by_name("clock", "curr_time").is_some());
+    assert!(request.tool_by_name("clock", "sleep").is_some());
+    assert!(current_time_reminders(&request).is_empty());
+    assert!(!request.has_content_kinds(&["current_time.reminder"]));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clock_tools_remain_absent_without_model_metadata() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info
+                .experimental_supported_tools
+                .retain(|tool| tool != "clock");
+        })
+        .with_config(|config| {
+            config.include_environment_context = false;
+            let _ = config.features.disable(Feature::CurrentTimeReminder);
+            config.current_time_reminder = None;
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("what time is it?").await?;
+
+    let request = responses.single_request();
+    assert!(request.tool_by_name("clock", "curr_time").is_none());
+    assert!(request.tool_by_name("clock", "sleep").is_none());
+    assert!(current_time_reminders(&request).is_empty());
+    assert!(!request.has_content_kinds(&["current_time.reminder"]));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn current_time_reminder_is_refreshed_after_compaction() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

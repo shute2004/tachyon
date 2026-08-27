@@ -1080,6 +1080,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         {
             registry.add(SleepHandler);
         }
+    } else if turn_context
+        .model_info()
+        .experimental_supported_tools
+        .iter()
+        .any(|tool| tool == "clock")
+    {
+        registry.add(CurrentTimeHandler);
+        registry.add(SleepHandler);
     }
 
     if tool_suggest_enabled(turn_context)
