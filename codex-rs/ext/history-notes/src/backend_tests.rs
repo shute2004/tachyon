@@ -10,6 +10,7 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
@@ -102,10 +103,11 @@ async fn marks_encrypted_history_and_notes_arguments_without_changing_the_json_b
             json!({"path": "notes.md", "text": "encrypted-text"}),
         ),
     ];
-    for (route, _) in &cases {
+    for (route, arguments) in &cases {
         Mock::given(method("POST"))
             .and(path(format!("/backend-api/codex/alpha/{route}")))
             .and(header(ENCRYPTED_TOOL_ARGUMENTS_HEADER, "true"))
+            .and(body_partial_json(arguments.clone()))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
             .expect(1)
             .mount(&server)
