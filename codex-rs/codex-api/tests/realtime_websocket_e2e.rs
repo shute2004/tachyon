@@ -65,7 +65,7 @@ fn test_provider(base_url: String) -> Provider {
             base_url,
             query_params: Some(HashMap::new()),
         },
-        headers: HeaderMap::new(),
+        provider_headers: HeaderMap::new(),
         request_policy: codex_api::RequestExecutionPolicy {
             retry: RetryConfig {
                 max_attempts: 1,

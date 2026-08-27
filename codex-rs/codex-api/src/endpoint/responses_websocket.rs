@@ -392,8 +392,11 @@ impl ResponsesWebsocketClient {
             .websocket_url_for_path("responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
-        let mut headers =
-            merge_request_headers(&self.provider.headers, extra_headers, default_headers);
+        let mut headers = merge_request_headers(
+            &self.provider.provider_headers,
+            extra_headers,
+            default_headers,
+        );
         self.auth.add_auth_headers(&mut headers);
 
         let (stream, _status, server_reasoning_included, server_model) =
@@ -427,8 +430,11 @@ impl ResponsesWebsocketClient {
             .websocket_url_for_path("responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
-        let mut headers =
-            merge_request_headers(&self.provider.headers, extra_headers, default_headers);
+        let mut headers = merge_request_headers(
+            &self.provider.provider_headers,
+            extra_headers,
+            default_headers,
+        );
         self.auth.add_auth_headers(&mut headers);
 
         let (mut stream, status, reasoning_included, server_model) = connect_websocket(

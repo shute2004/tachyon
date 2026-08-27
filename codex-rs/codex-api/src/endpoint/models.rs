@@ -147,7 +147,7 @@ mod tests {
                 base_url: base_url.to_string(),
                 query_params: None,
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: RetryConfig {
                     max_attempts: 1,

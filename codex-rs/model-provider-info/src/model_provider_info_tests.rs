@@ -334,7 +334,7 @@ fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
 
     assert_eq!(
         api_provider
-            .headers
+            .provider_headers
             .get(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER)
             .and_then(|value| value.to_str().ok()),
         Some(AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE)
