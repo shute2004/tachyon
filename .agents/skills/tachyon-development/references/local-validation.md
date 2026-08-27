@@ -1,7 +1,7 @@
 # Local validation
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 11:38 JST
+> Last reviewed: 2026-08-27 13:46 JST
 
 Use this reference when asking for or interpreting local checks in Tachyon.
 
@@ -54,8 +54,27 @@ For structural type/member migrations, do not make the exhaustive audit depend o
 
 Use the compiler as a second safety net rather than as a substitute for the source audit. If compilation reveals a missed use site, broaden the audit pattern before rerunning so the migration converges by class of use site instead of one error at a time.
 
+## Build artifact cleanup
+
+The `codex-rs/target` directory can grow rapidly during repeated workspace checks, branch changes, and upstream-sync validation.
+
+At safe boundaries—after a build/test command has completed, between focused validation batches, or when disk pressure becomes material—check build-artifact size and available disk space. Prefer:
+
+```bash
+du -sh target 2>/dev/null
+df -h .
+cargo clean
+```
+
+Do not run `cargo clean` while another Cargo build or test is active.
+
+A `No space left on device (os error 28)` failure should first be treated as an environment/storage failure, not as evidence that the current code change is invalid. Clean generated artifacts, confirm free space, then rerun the interrupted validation.
+
+When free space is tight, avoid unnecessarily multiplying build artifacts across validation variants. It is acceptable to disable incremental compilation and debug information for correctness-oriented local checks when those settings are not what the change is testing, for example with `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, and `CARGO_PROFILE_TEST_DEBUG=0`.
+
 ## Change history
 
 - 2026-08-27 09:10 JST — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
 - 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
 - 2026-08-27 11:38 JST — Added workspace-wide member/API audit guidance after provider field migration exposed identifier- and method-chain-specific grep blind spots.
+- 2026-08-27 13:46 JST — Added build-artifact cleanup and low-disk validation guidance after repeated Rust builds exhausted local storage.
