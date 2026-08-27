@@ -9,6 +9,13 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
 #[test]
+fn decoded_path_bytes_preserves_non_utf8_uri_bytes() {
+    let path = PathUri::parse("file:///tmp/secret%FF.env").expect("valid file URI");
+
+    assert_eq!(path.decoded_path_bytes().as_ref(), b"/tmp/secret\xFF.env");
+}
+
+#[test]
 fn native_byte_joins_preserve_foreign_posix_filenames() {
     let base = PathUri::parse("file:///root/%FE/admin").unwrap();
     for (path, expected) in [

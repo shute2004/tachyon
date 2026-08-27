@@ -94,7 +94,12 @@ fn collect_existing_glob_matches(
         return Ok(());
     }
 
-    if matcher.is_read_denied(path) {
+    // A directory entry can be reached through a lexical alias (a symlink or
+    // junction), while the policy may target the resolved location. Resolve
+    // every candidate at enumeration time so changed links are observed and
+    // both spellings are checked before applying an ACL target.
+    let canonical_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if matcher.is_read_denied_with_canonical_path(path, &canonical_path) {
         push_absolute_path(paths, seen_paths, path.to_path_buf())?;
     }
 
@@ -108,7 +113,7 @@ fn collect_existing_glob_matches(
     // Canonical directory keys keep recursive scans from following a symlink or
     // junction cycle forever while preserving the original matched path for the
     // ACL layer.
-    let scan_key = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let scan_key = canonical_path;
     if !seen_scan_dirs.insert(scan_key) {
         return Ok(());
     }
@@ -209,11 +214,36 @@ mod tests {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
+    use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[cfg(unix)]
+    fn create_directory_link(target: &Path, alias: &Path) -> Result<(), String> {
+        std::os::unix::fs::symlink(target, alias).map_err(|error| error.to_string())
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &Path, alias: &Path) -> Result<(), String> {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .output()
+            .map_err(|error| format!("failed to run mklink /J: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "mklink /J failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ))
+        }
+    }
 
     fn unreadable_glob_entry(pattern: String) -> FileSystemSandboxEntry {
         FileSystemSandboxEntry {
@@ -423,5 +453,59 @@ mod tests {
             .collect();
 
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn public_resolver_matches_canonical_targets_through_directory_links_and_cycles() {
+        let tmp = TempDir::new().expect("tempdir");
+        let cwd = AbsolutePathBuf::from_absolute_path(tmp.path()).expect("cwd");
+        let walk = tmp.path().join("walk");
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&walk).expect("walk root");
+        std::fs::create_dir(&target).expect("link target");
+        std::fs::write(target.join("secret.env"), "secret").expect("secret");
+        std::fs::write(target.join("public.txt"), "public").expect("public");
+        let alias = walk.join("alias");
+        let cycle = target.join("cycle");
+        create_directory_link(&target, &alias).expect("directory alias");
+        create_directory_link(&walk, &cycle).expect("directory cycle");
+
+        let canonical_target = dunce::canonicalize(&target).expect("canonical target");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            unreadable_glob_entry(
+                canonical_target
+                    .join("**")
+                    .join("*.env")
+                    .display()
+                    .to_string(),
+            ),
+            // This harmless glob forces the public resolver to enumerate the
+            // lexical walk root, including its directory alias.
+            unreadable_glob_entry(
+                walk.join("**")
+                    .join("__codex_scan_probe_that_does_not_match__")
+                    .display()
+                    .to_string(),
+            ),
+        ]);
+        let actual: HashSet<PathBuf> = resolve_windows_deny_read_paths(&policy, &cwd)
+            .expect("resolve through directory alias and cycle")
+            .into_iter()
+            .map(AbsolutePathBuf::into_path_buf)
+            .collect();
+
+        let alias_secret = alias.join("secret.env");
+        let canonical_secret = canonical_target.join("secret.env");
+        assert!(
+            actual.contains(&alias_secret),
+            "missing lexical alias target"
+        );
+        assert!(
+            actual.contains(&canonical_secret),
+            "missing canonical target: {actual:?}"
+        );
+        assert!(!actual.contains(&alias.join("public.txt")));
+        assert!(!actual.contains(&canonical_target.join("public.txt")));
     }
 }
