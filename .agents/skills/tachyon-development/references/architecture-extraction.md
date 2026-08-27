@@ -1,5 +1,8 @@
 # Architecture extraction guidance
 
+> Added: 2026-08-27  
+> Last reviewed: 2026-08-27
+
 Use this reference for changes that move responsibilities out of Codex/OpenAI-specific implementation into Tachyon-owned model-runtime abstractions.
 
 ## Primary test
@@ -142,3 +145,8 @@ existing behavior
 For Endpoint extraction specifically, prefer internal decomposition of deployment location, request policy, request decoration, auth, and protocol operation before publishing a stable Tachyon-owned `ModelEndpoint` or `EndpointResolver`.
 
 Do not design the final abstraction farther ahead than the code can currently justify.
+
+## Change history
+
+- 2026-08-27 — Added the initial architecture-extraction invariants for ModelRuntime/ModelTurnRuntime, provider/protocol/route separation, and provider-private state.
+- 2026-08-27 — Added Endpoint guidance after cross-harness comparison and independent architecture review: first-class responsibility with provider-owned late resolution, Endpoint/operation separation, query/header/policy distinctions, and phased Endpoint/Auth dependency.
