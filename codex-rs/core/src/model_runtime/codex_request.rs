@@ -562,25 +562,26 @@ fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bo
                     schema_has_responses_encrypted_marker(schema)
                 }
             })
-        || schema.any_of.as_ref().is_some_and(|schemas| {
-            schemas.iter().any(schema_has_responses_encrypted_marker)
-        })
-        || schema.one_of.as_ref().is_some_and(|schemas| {
-            schemas.iter().any(schema_has_responses_encrypted_marker)
-        })
-        || schema.all_of.as_ref().is_some_and(|schemas| {
-            schemas.iter().any(schema_has_responses_encrypted_marker)
-        })
-        || schema.defs.as_ref().is_some_and(|schemas| {
-            schemas
-                .values()
-                .any(schema_has_responses_encrypted_marker)
-        })
-        || schema.definitions.as_ref().is_some_and(|schemas| {
-            schemas
-                .values()
-                .any(schema_has_responses_encrypted_marker)
-        })
+        || schema
+            .any_of
+            .as_ref()
+            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
+        || schema
+            .one_of
+            .as_ref()
+            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
+        || schema
+            .all_of
+            .as_ref()
+            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
+        || schema
+            .defs
+            .as_ref()
+            .is_some_and(|schemas| schemas.values().any(schema_has_responses_encrypted_marker))
+        || schema
+            .definitions
+            .as_ref()
+            .is_some_and(|schemas| schemas.values().any(schema_has_responses_encrypted_marker))
 }
 
 fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {

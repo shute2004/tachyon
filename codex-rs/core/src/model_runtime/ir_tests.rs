@@ -207,7 +207,10 @@ fn completion_carries_usage_without_provider_response_identity() {
         None
     );
     assert_eq!(
-        completion.usage.as_ref().and_then(|usage| usage.total_tokens),
+        completion
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.total_tokens),
         Some(120)
     );
     assert_eq!(completion.end_turn, Some(true));
