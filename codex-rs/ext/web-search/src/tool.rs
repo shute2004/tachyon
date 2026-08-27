@@ -92,20 +92,15 @@ impl WebSearchTool {
     async fn handle_call(&self, call: ToolCall) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let commands = parse_commands(&call)?;
         let command_action = command_action(&commands);
-        let provider = self
+        let request_setup = self
             .provider
-            .api_provider()
-            .await
-            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-        let auth = self
-            .provider
-            .api_auth()
+            .api_request_setup()
             .await
             .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
         let client = SearchClient::new(
             ReqwestTransport::from_http_client(create_client()),
-            provider,
-            auth,
+            request_setup.api_provider,
+            request_setup.resolved_auth.auth,
         );
         let request = SearchRequest {
             id: self.session_id.clone(),

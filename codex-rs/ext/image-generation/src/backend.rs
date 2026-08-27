@@ -60,20 +60,15 @@ impl CodexImagesBackend {
 
     /// Resolves the provider and auth required for the current image API request.
     async fn client(&self) -> Result<ImagesClient<ReqwestTransport>, ImageBackendError> {
-        let provider = self
+        let request_setup = self
             .provider
-            .api_provider()
-            .await
-            .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
-        let auth = self
-            .provider
-            .api_auth()
+            .api_request_setup()
             .await
             .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
         Ok(ImagesClient::new(
             ReqwestTransport::from_http_client(create_client()),
-            provider,
-            auth,
+            request_setup.api_provider,
+            request_setup.resolved_auth.auth,
         ))
     }
 

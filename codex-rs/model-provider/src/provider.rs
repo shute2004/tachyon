@@ -94,7 +94,7 @@ pub enum ProviderUnauthorizedRecovery {
     Recovered,
 }
 
-/// Low-level API provider configuration and scoped request authentication.
+/// Low-level API provider configuration and request authentication.
 ///
 /// This is a transitional provider-owned coordination bundle. Its fields are
 /// resolved through the existing provider methods and are not guaranteed to
@@ -267,6 +267,23 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
             let auth = self.auth().await;
             resolve_provider_auth_for_scope(self.auth_manager(), auth.as_ref(), self.info(), scope)
                 .await
+        })
+    }
+
+    /// Resolves low-level API configuration and unscoped request authentication.
+    ///
+    /// Provider resolution intentionally completes before auth resolution, preserving the
+    /// established provider-before-auth ordering and unchanged error propagation.
+    fn api_request_setup(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderApiRequestSetup>> {
+        Box::pin(async move {
+            let api_provider = self.api_provider().await?;
+            let resolved_auth = ResolvedProviderAuth::new(self.api_auth().await?);
+            Ok(ProviderApiRequestSetup {
+                api_provider,
+                resolved_auth,
+            })
         })
     }
 
@@ -775,6 +792,37 @@ mod tests {
                 .expect("API deployment should resolve")
                 .base_url,
             "https://example.test/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_request_setup_preserves_provider_and_auth() {
+        let mut provider_info = provider_for("https://example.test/v1".to_string());
+        provider_info.experimental_bearer_token = Some("provider-token".into());
+        let provider = create_model_provider(provider_info, /*auth_manager*/ None);
+
+        let request_setup = provider
+            .api_request_setup()
+            .await
+            .expect("request setup should resolve");
+
+        assert_eq!(
+            request_setup.api_provider.deployment.base_url,
+            "https://example.test/v1"
+        );
+        assert_eq!(
+            request_setup
+                .resolved_auth
+                .auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer provider-token"))
+        );
+        assert!(
+            request_setup
+                .resolved_auth
+                .agent_identity_telemetry
+                .is_none()
         );
     }
 
