@@ -263,6 +263,7 @@ pub struct RawFileSystemSandboxPolicy {
 pub struct FileSystemSandboxPolicyContext<'a> {
     pub cwd: &'a PathUri,
     pub workspace_roots: &'a [PathUri],
+    pub user_home_dir: Option<&'a PathUri>,
     pub temporary_directories: Option<&'a [PathUri]>,
 }
 
@@ -1762,10 +1763,12 @@ fn with_local_policy_context<T>(
     let cwd = AbsolutePathBuf::from_absolute_path(cwd).ok()?;
     let path = PathUri::from(resolve_candidate_path(path, cwd.as_path())?);
     let cwd = PathUri::from(cwd);
+    let user_home_dir = PathUri::from_host_native_path("~").ok();
     let temporary_directories = local_temporary_directories();
     let context = FileSystemSandboxPolicyContext {
         cwd: &cwd,
         workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: user_home_dir.as_ref(),
         temporary_directories: Some(&temporary_directories),
     };
     Some(evaluate(&path, &context))
@@ -2429,6 +2432,7 @@ mod tests {
         let context = FileSystemSandboxPolicyContext {
             cwd: &cwd,
             workspace_roots: &workspace_roots,
+            user_home_dir: None,
             temporary_directories: Some(&temporary_directories),
         };
         let policy = FileSystemSandboxPolicy::restricted(vec![
@@ -2508,6 +2512,7 @@ mod tests {
         let context = FileSystemSandboxPolicyContext {
             cwd: &cwd,
             workspace_roots: std::slice::from_ref(&cwd),
+            user_home_dir: None,
             temporary_directories: None,
         };
         let candidate = path("file:///workspace/private/secret/key");
@@ -2553,6 +2558,7 @@ mod tests {
         let context = FileSystemSandboxPolicyContext {
             cwd: &cwd,
             workspace_roots: &[],
+            user_home_dir: None,
             temporary_directories: None,
         };
         let policy = FileSystemSandboxPolicy::restricted(vec![
@@ -2583,6 +2589,7 @@ mod tests {
         let opaque_context = FileSystemSandboxPolicyContext {
             cwd: &opaque,
             workspace_roots: std::slice::from_ref(&opaque),
+            user_home_dir: None,
             temporary_directories: None,
         };
         let opaque_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
