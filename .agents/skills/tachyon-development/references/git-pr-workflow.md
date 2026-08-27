@@ -1,5 +1,8 @@
 # Git and pull-request workflow
 
+> Added: 2026-08-27  
+> Last reviewed: 2026-08-27
+
 Tachyon uses a trunk-based / GitHub-Flow-like workflow.
 
 ## Branch model
@@ -48,3 +51,7 @@ Treat branch deletion as part of PR completion.
 ## Repository-specific constraint
 
 GitHub Issues are currently disabled for `shute2004/tachyon`. Do not fail the workflow merely because an Issue cannot be created. In that case, use the branch and PR body as the explicit scope record.
+
+## Change history
+
+- 2026-08-27 — Added trunk-based branch model, focused PR scope, review-level guidance, squash-merge preference, and branch deletion as part of PR completion.

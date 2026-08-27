@@ -1,5 +1,8 @@
 # Terminal and patching workflow
 
+> Added: 2026-08-27  
+> Last reviewed: 2026-08-27
+
 Use this reference before giving interactive shell commands or constructing a local patch workflow.
 
 ## Interactive shell safety
@@ -35,3 +38,7 @@ Temporary helper files must not survive into the final PR diff. If helper commit
 Do not use `git reset --hard` casually. Use it only when the workflow has established that local uncommitted work does not need preservation, or when the user has explicitly accepted that reset.
 
 When rewriting a remote short-lived branch intentionally, prefer `git push --force-with-lease` rather than an unconditional force push.
+
+## Change history
+
+- 2026-08-27 — Added Zed interactive-shell safety, working-directory semantics, deterministic patching, and Git rewrite guidance from Tachyon development experience.
