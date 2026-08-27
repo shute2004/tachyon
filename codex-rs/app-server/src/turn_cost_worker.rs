@@ -414,24 +414,25 @@ impl WorkerRuntime {
                         return Ok(None);
                     }
                 }
-                let provider = model_provider
-                    .api_provider()
+                let request_setup = model_provider
+                    .api_request_setup()
                     .await
                     .map_err(|error| RequestError::Other(error.into()))?;
-                let auth = model_provider
-                    .api_auth()
-                    .await
-                    .map_err(|error| RequestError::Other(error.into()))?;
-                let endpoint = provider
+                let endpoint = request_setup
+                    .api_provider
                     .deployment
                     .url_for_path("analytics/codex/turn-costs");
                 let client = BackendClient::new(
-                    provider.deployment.base_url.clone(),
+                    request_setup.api_provider.deployment.base_url.clone(),
                     self.config.http_client_factory(),
                 )
-                .with_auth_provider(auth);
+                .with_auth_provider(request_setup.resolved_auth.auth);
                 client
-                    .query_api_key_turn_costs_at(&endpoint, turn_ids, &provider.provider_headers)
+                    .query_api_key_turn_costs_at(
+                        &endpoint,
+                        turn_ids,
+                        &request_setup.api_provider.provider_headers,
+                    )
                     .await
                     .map(Some)
             }
