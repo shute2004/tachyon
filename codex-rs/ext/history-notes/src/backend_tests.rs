@@ -3,6 +3,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_utils_output_truncation::TruncationPolicy;
 use http::HeaderMap;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
@@ -17,6 +18,7 @@ use wiremock::matchers::path;
 
 use super::ENCRYPTED_TOOL_ARGUMENTS_HEADER;
 use super::HistoryNotesBackend;
+use super::TOOL_OUTPUT_TRUNCATION_POLICY_HEADER;
 
 #[tokio::test]
 async fn routes_through_codex_backend_and_injects_trusted_session_agent_context() {
@@ -57,6 +59,7 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
                     "current_agent_name": "/root/spoofed",
                 }
             }),
+            TruncationPolicy::Bytes(1024),
         )
         .await
         .expect("History request should succeed");
@@ -64,6 +67,17 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
     assert_eq!(response, json!({"encrypted_output": "enc_payload"}));
     let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(requests.len(), 1);
+    let expected_truncation_policy =
+        serde_json::to_string(&TruncationPolicy::Bytes(1024)).expect("serialize truncation policy");
+    let expected_truncation_policy_header =
+        HeaderValue::from_bytes(expected_truncation_policy.as_bytes())
+            .expect("valid truncation policy header");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get(TOOL_OUTPUT_TRUNCATION_POLICY_HEADER),
+        Some(&expected_truncation_policy_header)
+    );
     assert!(
         requests[0]
             .headers
@@ -131,6 +145,7 @@ async fn marks_encrypted_history_and_notes_arguments_without_changing_the_json_b
                 "session-123",
                 "/root",
                 arguments.clone(),
+                TruncationPolicy::Bytes(1024),
             )
             .await
             .expect("encrypted argument request should succeed");
