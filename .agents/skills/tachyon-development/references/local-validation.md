@@ -1,5 +1,8 @@
 # Local validation
 
+> Added: 2026-08-27  
+> Last reviewed: 2026-08-27
+
 Use this reference when asking for or interpreting local checks in Tachyon.
 
 ## Rust toolchain selection
@@ -46,3 +49,7 @@ GitHub code search is useful for navigation but is not trusted as an exhaustive 
 Do not assume `rg` is installed. Standard `grep` is the portable default unless the user has shown that another tool exists.
 
 Prefer focused searches over large speculative edits, for example checking that removed APIs or intermediate states have zero remaining use sites before compiling.
+
+## Change history
+
+- 2026-08-27 — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
