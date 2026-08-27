@@ -1,7 +1,7 @@
 # Git and pull-request workflow
 
-> Added: 2026-08-27  
-> Last reviewed: 2026-08-27
+> Added: 2026-08-27 09:10 JST  
+> Last reviewed: 2026-08-27 10:31 JST
 
 Tachyon uses a trunk-based / GitHub-Flow-like workflow.
 
@@ -54,4 +54,5 @@ GitHub Issues are currently disabled for `shute2004/tachyon`. Do not fail the wo
 
 ## Change history
 
-- 2026-08-27 — Added trunk-based branch model, focused PR scope, review-level guidance, squash-merge preference, and branch deletion as part of PR completion.
+- 2026-08-27 09:10 JST — Added trunk-based branch model, focused PR scope, review-level guidance, squash-merge preference, and branch deletion as part of PR completion.
+- 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
