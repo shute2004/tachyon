@@ -387,6 +387,13 @@ mod tests {
             api_provider.deployment.base_url,
             "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
         );
+        assert_eq!(
+            api_provider
+                .provider_headers
+                .get("x-amzn-mantle-client-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("codex")
+        );
     }
 
     #[tokio::test]
