@@ -171,10 +171,12 @@ impl CodexEventMapper {
                 }
             }
             ResponseEvent::OutputTextDelta(delta) => match self.active.as_ref() {
-                Some(ActiveCanonicalItem::Message { item_id }) => model_event(ModelEvent::TextDelta {
-                    item_id: item_id.clone(),
-                    delta,
-                }),
+                Some(ActiveCanonicalItem::Message { item_id }) => {
+                    model_event(ModelEvent::TextDelta {
+                        item_id: item_id.clone(),
+                        delta,
+                    })
+                }
                 _ => ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::OutputTextDelta(
                     delta,
                 )),
@@ -294,21 +296,21 @@ impl CodexEventMapper {
                 item_id,
                 text,
                 summary_index,
-            } => ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ReasoningSummaryDone {
+            } => {
+                ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ReasoningSummaryDone {
                     item_id,
                     text,
                     summary_index,
-                },
-            ),
-            ResponseEvent::SafetyBuffering(buffering) => ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::SafetyBuffering {
+                })
+            }
+            ResponseEvent::SafetyBuffering(buffering) => {
+                ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::SafetyBuffering {
                     use_cases: buffering.use_cases,
                     reasons: buffering.reasons,
                     show_buffering_ui: buffering.show_buffering_ui,
                     faster_model: buffering.faster_model,
-                },
-            ),
+                })
+            }
             ResponseEvent::ServerModel(server_model) => ModelRuntimeEvent::Compatibility(
                 CodexModelRuntimeSideEvent::ServerModel(server_model),
             ),
@@ -321,12 +323,12 @@ impl CodexEventMapper {
             ResponseEvent::ServerReasoningIncluded(included) => ModelRuntimeEvent::Compatibility(
                 CodexModelRuntimeSideEvent::ServerReasoningIncluded(included),
             ),
-            ResponseEvent::RateLimits(snapshot) => ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::RateLimits(snapshot),
-            ),
-            ResponseEvent::ModelsEtag(etag) => ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ModelsEtag(etag),
-            ),
+            ResponseEvent::RateLimits(snapshot) => {
+                ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::RateLimits(snapshot))
+            }
+            ResponseEvent::ModelsEtag(etag) => {
+                ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ModelsEtag(etag))
+            }
         }
     }
 

@@ -149,9 +149,8 @@ where
         let delay = err.retry_delay().unwrap_or_else(|| backoff(retry_count));
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
-        let report_error = retry_count > 1
-            || cfg!(debug_assertions)
-            || !suppress_first_retry_notification;
+        let report_error =
+            retry_count > 1 || cfg!(debug_assertions) || !suppress_first_retry_notification;
         if report_error {
             sess.notify_stream_error(
                 turn_context,

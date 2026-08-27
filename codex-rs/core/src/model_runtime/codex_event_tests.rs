@@ -7,7 +7,11 @@ fn item_id(prefix: &str) -> ResponseItemId {
     ResponseItemId::with_suffix(prefix, "event-bridge")
 }
 
-fn assistant_message(id: Option<ResponseItemId>, phase: Option<MessagePhase>, text: &str) -> ResponseItem {
+fn assistant_message(
+    id: Option<ResponseItemId>,
+    phase: Option<MessagePhase>,
+    text: &str,
+) -> ResponseItem {
     ResponseItem::Message {
         id,
         role: "assistant".to_string(),
@@ -155,14 +159,16 @@ fn function_tool_call_uses_partial_start_and_complete_json_only_at_done() {
 fn client_tool_search_call_maps_to_generic_tool_call() {
     let mut mapper = CodexEventMapper::default();
 
-    let mapped = mapper.map(ResponseEvent::OutputItemDone(ResponseItem::ToolSearchCall {
-        id: Some(item_id("tsc")),
-        call_id: Some("search-1".to_string()),
-        status: Some("completed".to_string()),
-        execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
-        arguments: json!({"query": "filesystem"}),
-        internal_chat_message_metadata_passthrough: None,
-    }));
+    let mapped = mapper.map(ResponseEvent::OutputItemDone(
+        ResponseItem::ToolSearchCall {
+            id: Some(item_id("tsc")),
+            call_id: Some("search-1".to_string()),
+            status: Some("completed".to_string()),
+            execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+            arguments: json!({"query": "filesystem"}),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ));
 
     assert!(matches!(
         mapped,
@@ -281,8 +287,7 @@ fn completion_maps_generic_usage_while_codex_context_keeps_provider_identity() {
             assert_eq!(generic.cached_input_tokens, Some(60));
             assert_eq!(generic.reasoning_output_tokens, Some(5));
             assert_eq!(
-                token_usage
-                    .and_then(|usage| usage.codex_rollout_budget_units),
+                token_usage.and_then(|usage| usage.codex_rollout_budget_units),
                 Some(serde_json::Number::from(7))
             );
         }

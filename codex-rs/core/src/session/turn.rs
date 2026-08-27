@@ -175,13 +175,8 @@ pub(crate) async fn run_turn(
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if let Err(err) = run_pre_sampling_compact(
-        &sess,
-        &turn_context,
-        &mut turn_runtime,
-        &cancellation_token,
-    )
-    .await
+    if let Err(err) =
+        run_pre_sampling_compact(&sess, &turn_context, &mut turn_runtime, &cancellation_token).await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
@@ -2333,9 +2328,9 @@ async fn try_run_sampling_request(
                 event: ModelEvent::OutputItemCompleted(_),
                 codex: Some(CodexModelEventContext::OutputItemCompleted(mut item)),
             }
-            | ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::OutputItemCompleted(mut item),
-            ) => {
+            | ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::OutputItemCompleted(
+                mut item,
+            )) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2450,9 +2445,9 @@ async fn try_run_sampling_request(
                 event: ModelEvent::OutputItemStarted(_),
                 codex: Some(CodexModelEventContext::OutputItemAdded(mut item)),
             }
-            | ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::OutputItemAdded(mut item),
-            ) => {
+            | ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::OutputItemAdded(
+                mut item,
+            )) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 if let ResponseItem::CustomToolCall {
                     call_id,
@@ -2530,9 +2525,9 @@ async fn try_run_sampling_request(
                     active_item_is_streaming_to_client = stream_item_to_client;
                 }
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ServerModel(server_model),
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ServerModel(
+                server_model,
+            )) => {
                 if !turn_context
                     .server_model_warning_emitted
                     .load(Ordering::Relaxed)
@@ -2545,9 +2540,9 @@ async fn try_run_sampling_request(
                         .store(true, Ordering::Relaxed);
                 }
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ModelVerifications(verifications),
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ModelVerifications(
+                verifications,
+            )) => {
                 if !turn_context
                     .model_verification_emitted
                     .swap(true, Ordering::Relaxed)
@@ -2562,14 +2557,12 @@ async fn try_run_sampling_request(
                 sess.emit_turn_moderation_metadata(&turn_context, metadata)
                     .await;
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::SafetyBuffering {
-                    use_cases,
-                    reasons,
-                    show_buffering_ui,
-                    faster_model,
-                },
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::SafetyBuffering {
+                use_cases,
+                reasons,
+                show_buffering_ui,
+                faster_model,
+            }) => {
                 sess.send_event(
                     &turn_context,
                     EventMsg::SafetyBuffering(SafetyBufferingEvent {
@@ -2587,17 +2580,13 @@ async fn try_run_sampling_request(
             ) => {
                 sess.set_server_reasoning_included(included).await;
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::RateLimits(snapshot),
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::RateLimits(snapshot)) => {
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.
                 sess.record_rate_limits_info(snapshot).await;
                 should_emit_token_count = true;
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ModelsEtag(etag),
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ModelsEtag(etag)) => {
                 // Update internal state with latest models etag
                 sess.services
                     .models_manager
@@ -2605,22 +2594,21 @@ async fn try_run_sampling_request(
                     .await;
             }
             ModelRuntimeEvent::Model {
-                event: ModelEvent::Completed(crate::model_runtime::ir::ModelCompletion {
-                    end_turn,
-                    ..
-                }),
-                codex: Some(CodexModelEventContext::Completed {
-                    response_id,
-                    token_usage,
-                }),
+                event:
+                    ModelEvent::Completed(crate::model_runtime::ir::ModelCompletion {
+                        end_turn, ..
+                    }),
+                codex:
+                    Some(CodexModelEventContext::Completed {
+                        response_id,
+                        token_usage,
+                    }),
             }
-            | ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::Completed {
-                    response_id,
-                    token_usage,
-                    end_turn,
-                },
-            ) => {
+            | ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::Completed {
+                response_id,
+                token_usage,
+                end_turn,
+            }) => {
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -2666,9 +2654,9 @@ async fn try_run_sampling_request(
                 event: ModelEvent::TextDelta { delta, .. },
                 ..
             }
-            | ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::OutputTextDelta(delta),
-            ) => {
+            | ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::OutputTextDelta(
+                delta,
+            )) => {
                 // In review child threads, suppress assistant text deltas; the
                 // UI will show a selection popup from the final ReviewOutput.
                 if let Some(active) = active_item.as_ref() {
@@ -2701,16 +2689,10 @@ async fn try_run_sampling_request(
                 }
             }
             ModelRuntimeEvent::Model {
-                event:
-                    ModelEvent::ToolCallInputDelta {
-                        call_id,
-                        delta,
-                        ..
-                    },
+                event: ModelEvent::ToolCallInputDelta { call_id, delta, .. },
                 ..
             } => {
-                let Some((active_call_id, consumer)) =
-                    active_tool_argument_diff_consumer.as_mut()
+                let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
                 else {
                     continue;
                 };
@@ -2718,19 +2700,15 @@ async fn try_run_sampling_request(
                 if call_id.as_str() != active_call_id.as_str() {
                     continue;
                 }
-                if let Some(event) =
-                    consumer.consume_diff(turn_context.as_ref(), call_id, &delta)
-                {
+                if let Some(event) = consumer.consume_diff(turn_context.as_ref(), call_id, &delta) {
                     sess.send_event(&turn_context, event).await;
                 }
             }
-            ModelRuntimeEvent::Compatibility(
-                CodexModelRuntimeSideEvent::ToolCallInputDelta {
-                    item_id: _,
-                    call_id,
-                    delta,
-                },
-            ) => {
+            ModelRuntimeEvent::Compatibility(CodexModelRuntimeSideEvent::ToolCallInputDelta {
+                item_id: _,
+                call_id,
+                delta,
+            }) => {
                 let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
                 else {
                     continue;
@@ -2811,11 +2789,10 @@ async fn try_run_sampling_request(
                 if !active_item_is_streaming_to_client {
                     continue;
                 }
-                let event =
-                    EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
-                        item_id: item_id.0,
-                        summary_index: i64::from(section_index),
-                    });
+                let event = EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
+                    item_id: item_id.0,
+                    summary_index: i64::from(section_index),
+                });
                 sess.send_event(&turn_context, event).await;
             }
             ModelRuntimeEvent::Compatibility(
