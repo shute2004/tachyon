@@ -150,7 +150,7 @@ mod tests {
                 base_url: "https://example.com/api/codex".to_string(),
                 query_params: None,
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: RetryConfig {
                     max_attempts: 1,

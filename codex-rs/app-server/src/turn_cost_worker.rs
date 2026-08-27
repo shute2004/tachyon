@@ -401,7 +401,7 @@ impl WorkerRuntime {
                     self.config.http_client_factory(),
                 );
                 client
-                    .query_api_key_turn_costs(turn_ids, &provider.headers)
+                    .query_api_key_turn_costs(turn_ids, &provider.provider_headers)
                     .await
                     .map(Some)
             }
@@ -431,7 +431,7 @@ impl WorkerRuntime {
                 )
                 .with_auth_provider(auth);
                 client
-                    .query_api_key_turn_costs_at(&endpoint, turn_ids, &provider.headers)
+                    .query_api_key_turn_costs_at(&endpoint, turn_ids, &provider.provider_headers)
                     .await
                     .map(Some)
             }

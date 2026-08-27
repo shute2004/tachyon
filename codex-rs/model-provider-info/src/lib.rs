@@ -329,7 +329,7 @@ impl ModelProviderInfo {
                         .collect()
                 }),
             },
-            headers,
+            provider_headers: headers,
             request_policy: codex_api::RequestExecutionPolicy {
                 retry,
                 stream_idle_timeout: self.stream_idle_timeout(),

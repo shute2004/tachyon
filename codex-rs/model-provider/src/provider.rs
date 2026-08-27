@@ -37,7 +37,9 @@ pub(crate) fn enforce_managed_residency(provider: &mut Provider) {
         let value = match requirement {
             ResidencyRequirement::Us => HeaderValue::from_static("us"),
         };
-        provider.headers.insert(RESIDENCY_HEADER_NAME, value);
+        provider
+            .provider_headers
+            .insert(RESIDENCY_HEADER_NAME, value);
     }
 }
 

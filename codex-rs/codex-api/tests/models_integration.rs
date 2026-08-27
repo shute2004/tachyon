@@ -36,7 +36,7 @@ fn provider(base_url: &str) -> Provider {
             base_url: base_url.to_string(),
             query_params: None,
         },
-        headers: HeaderMap::new(),
+        provider_headers: HeaderMap::new(),
         request_policy: codex_api::RequestExecutionPolicy {
             retry: RetryConfig {
                 max_attempts: 1,

@@ -99,7 +99,7 @@ pub struct RequestExecutionPolicy {
 pub struct Provider {
     pub name: String,
     pub deployment: ApiDeployment,
-    pub headers: HeaderMap,
+    pub provider_headers: HeaderMap,
     pub request_policy: RequestExecutionPolicy,
 }
 
@@ -108,7 +108,7 @@ impl Provider {
         Request {
             method,
             url: self.deployment.url_for_path(path),
-            headers: self.headers.clone(),
+            headers: self.provider_headers.clone(),
             body: None,
             compression: RequestCompression::None,
             timeout: None,

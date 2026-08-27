@@ -142,7 +142,7 @@ fn provider(name: &str) -> Provider {
             base_url: "https://example.com/v1".to_string(),
             query_params: None,
         },
-        headers: HeaderMap::new(),
+        provider_headers: HeaderMap::new(),
         request_policy: codex_api::RequestExecutionPolicy {
             retry: codex_api::RetryConfig {
                 max_attempts: 1,

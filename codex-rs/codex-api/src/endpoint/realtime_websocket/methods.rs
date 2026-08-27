@@ -950,7 +950,7 @@ impl RealtimeWebsocketClient {
             .into_client_request()
             .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
         let headers = merge_request_headers(
-            &self.provider.headers,
+            &self.provider.provider_headers,
             with_session_id_header(extra_headers, config.session_id.as_deref())?,
             default_headers,
         );
@@ -2167,7 +2167,7 @@ mod tests {
                 base_url: "https://chatgpt.com/backend-api/codex".to_string(),
                 query_params: None,
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: RetryConfig {
                     max_attempts: 0,
@@ -2367,7 +2367,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 query_params: Some(HashMap::new()),
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: crate::provider::RetryConfig {
                     max_attempts: 1,
@@ -2697,7 +2697,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 query_params: Some(HashMap::new()),
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: crate::provider::RetryConfig {
                     max_attempts: 1,
@@ -2828,7 +2828,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 query_params: Some(HashMap::new()),
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: crate::provider::RetryConfig {
                     max_attempts: 1,
@@ -2938,7 +2938,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 query_params: Some(HashMap::new()),
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: crate::provider::RetryConfig {
                     max_attempts: 1,
@@ -3034,7 +3034,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 query_params: Some(HashMap::new()),
             },
-            headers: HeaderMap::new(),
+            provider_headers: HeaderMap::new(),
             request_policy: crate::provider::RequestExecutionPolicy {
                 retry: crate::provider::RetryConfig {
                     max_attempts: 1,
