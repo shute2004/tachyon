@@ -6,7 +6,7 @@ description: Use when developing, refactoring, validating, reviewing, or merging
 # Tachyon Development
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 10:31 JST
+> Last reviewed: 2026-08-27 13:46 JST
 
 Use this skill for work in `shute2004/tachyon`.
 
@@ -22,6 +22,21 @@ Use this skill for work in `shute2004/tachyon`.
 8. For ModelRuntime, Provider/Protocol/Route, Endpoint/Auth, compaction, retry, or provider-private state work, read `references/architecture-extraction.md`.
 9. If development reveals a non-obvious rule that a fresh agent would likely miss, consider updating this skill or recording a candidate in Notion. Do not add skill content mechanically after every task.
 10. Check the freshness metadata and change history of any Skill/reference guidance you rely on. If it is old relative to current code, verify the relevant implementation before treating it as authoritative.
+
+## Upstream Codex synchronization
+
+Upstream Codex synchronization is part of normal Tachyon maintenance, not an occasional catch-up task.
+
+Run an upstream audit whenever either condition is met, whichever happens first:
+
+- one Tachyon architecture PR is merged; or
+- the unaudited `openai/codex` upstream delta reaches roughly 15 commits.
+
+Classify upstream commits as `Direct port`, `Adapt port`, `Defer`, or `Ignore`. The goal is to keep the number of unaudited quality-relevant upstream commits near zero, not to mechanically mirror product/UI-only changes.
+
+Keep extraction work, upstream synchronization, and Tachyon-specific product or harness improvements as separate development concerns and preferably separate PRs. When an upstream change touches a Tachyon-diverged architecture boundary, preserve the upstream behavioral improvement but adapt it to the established Tachyon boundary instead of blindly cherry-picking the upstream structure.
+
+Track the last audited upstream commit separately as mutable project progress rather than hard-coding it into this Skill.
 
 ## Architectural invariants currently established
 
@@ -46,3 +61,4 @@ A migration PR should make clear:
 - 2026-08-27 09:10 JST — Added the initial Tachyon development workflow and established current ModelRuntime/ModelTurnRuntime invariants.
 - 2026-08-27 10:05 JST — Added explicit Skill freshness checks to the core workflow.
 - 2026-08-27 10:31 JST — Re-reviewed the full Skill and standardized freshness/change-history timestamps.
+- 2026-08-27 13:46 JST — Added high-frequency Codex upstream audit cadence and separation between extraction, upstream synchronization, and Tachyon-specific improvements.
