@@ -220,6 +220,20 @@ fn catalog_budget_uses_context_percentage_or_character_fallback() {
 #[test]
 fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
     let root = "/Users/test/.codex/plugins/cache/openai-curated/host-plugin/1.0.0/skills-with-a-long-shared-root";
+    let unaliased_catalog = SkillCatalog {
+        entries: [
+            ("alpha", "Alpha skill."),
+            ("beta", "Beta skill."),
+            ("gamma", "Gamma skill."),
+        ]
+        .into_iter()
+        .map(|(name, description)| {
+            entry(name, description, /*short_description*/ None)
+                .with_display_path(format!("{root}/{name}/SKILL.md"))
+        })
+        .collect(),
+        warnings: Vec::new(),
+    };
     let catalog = SkillCatalog {
         entries: [
             ("alpha", "Alpha skill."),
@@ -237,7 +251,7 @@ fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
     };
 
     let unaliased = available_skills_fragment(
-        &catalog,
+        &unaliased_catalog,
         /*include_skills_usage_instructions*/ true,
         SkillCatalogRenderPolicy::CoreCompatible,
         SkillMetadataBudget::Characters(usize::MAX),
@@ -310,7 +324,7 @@ fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
 }
 
 #[test]
-fn path_aliases_are_not_used_without_budget_pressure() {
+fn path_aliases_are_used_without_budget_pressure_when_they_reduce_prompt_size() {
     let root = "/Users/test/.codex/plugins/cache/openai-curated/example/hash/skills";
     let catalog = SkillCatalog {
         entries: vec![
@@ -332,11 +346,92 @@ fn path_aliases_are_not_used_without_budget_pressure() {
     )
     .expect("catalog should render");
 
-    assert!(!fragment.body().contains("### Skill roots"));
-    assert!(
-        fragment
-            .body()
-            .contains(&format!("(file: {root}/alpha/SKILL.md)"))
+    assert!(fragment.body().contains("### Skill roots"));
+    assert!(fragment.body().contains("(file: r0/alpha/SKILL.md)"));
+}
+
+#[test]
+fn aliased_metadata_overhead_cost_accounts_for_usage_instruction_deltas() {
+    let budget = SkillMetadataBudget::Characters(usize::MAX);
+    let root = format!("/{}", "x".repeat(150));
+    let host_root_lines = vec![format!("- `r0` = `{root}`")];
+    let common_usage_heading = "### How to use skills";
+
+    let fixed_prompt_cost = |prompt_kind, skill_root_lines: &[String], include_usage| {
+        let body = render_available_skills_body(prompt_kind, skill_root_lines, &[]);
+        let instructions_cost = if include_usage {
+            metadata_line_cost(budget, common_usage_heading)
+                .saturating_add(
+                    prompt_kind
+                        .alias_instructions()
+                        .map_or(0, |instructions| metadata_line_cost(budget, instructions)),
+                )
+                .saturating_add(metadata_line_cost(budget, prompt_kind.usage_instructions()))
+        } else {
+            0
+        };
+        budget.cost(&body).saturating_add(instructions_cost)
+    };
+
+    let expected_with_usage = fixed_prompt_cost(
+        SkillPromptKind::HostAliases,
+        &host_root_lines,
+        /*include_usage*/ true,
+    )
+    .saturating_sub(fixed_prompt_cost(
+        SkillPromptKind::Unaliased,
+        &[],
+        /*include_usage*/ true,
+    ));
+    assert_eq!(
+        aliased_metadata_overhead_cost(
+            budget,
+            SkillPromptKind::HostAliases,
+            &host_root_lines,
+            /*include_skills_usage_instructions*/ true,
+        ),
+        expected_with_usage
+    );
+
+    let expected_without_usage = fixed_prompt_cost(
+        SkillPromptKind::HostAliases,
+        &host_root_lines,
+        /*include_usage*/ false,
+    )
+    .saturating_sub(fixed_prompt_cost(
+        SkillPromptKind::Unaliased,
+        &[],
+        /*include_usage*/ false,
+    ));
+    assert_eq!(
+        aliased_metadata_overhead_cost(
+            budget,
+            SkillPromptKind::HostAliases,
+            &host_root_lines,
+            /*include_skills_usage_instructions*/ false,
+        ),
+        expected_without_usage
+    );
+
+    let resource_root_lines = vec!["- `e0` = `skill://executor/root`".to_string()];
+    let expected_resource = fixed_prompt_cost(
+        SkillPromptKind::ResourceAliases,
+        &resource_root_lines,
+        /*include_usage*/ true,
+    )
+    .saturating_sub(fixed_prompt_cost(
+        SkillPromptKind::Unaliased,
+        &[],
+        /*include_usage*/ true,
+    ));
+    assert_eq!(
+        aliased_metadata_overhead_cost(
+            budget,
+            SkillPromptKind::ResourceAliases,
+            &resource_root_lines,
+            /*include_skills_usage_instructions*/ true,
+        ),
+        expected_resource
     );
 }
 

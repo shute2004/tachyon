@@ -2247,12 +2247,12 @@ async fn production_turn_uses_configured_skill_catalog_token_budget() -> Result<
 async fn production_turn_keeps_full_host_only_catalog_when_it_fits() -> Result<()> {
     let (developer_texts, _) =
         rendered_catalogs(&HOST_CATALOG, &[], FULL_CATALOG_CONTEXT_WINDOW).await?;
-    let host_lines = developer_texts
-        .iter()
-        .flat_map(|text| skill_lines(text, "host"))
-        .collect::<Vec<_>>();
+    let host_catalog = catalog_text(&developer_texts, "host");
+    let host_lines = skill_lines(host_catalog, "host");
 
     assert_full_descriptions(&host_lines, &HOST_CATALOG);
+    assert!(host_catalog.contains("### Skill roots"));
+    assert!(host_catalog.contains("(file: r0/host-alpha/SKILL.md)"));
 
     Ok(())
 }
@@ -2836,11 +2836,15 @@ async fn production_turn_keeps_full_host_and_executor_catalogs_when_they_fit() -
         FULL_CATALOG_CONTEXT_WINDOW,
     )
     .await?;
-    let host_lines = skill_lines(catalog_text(&developer_texts, "host"), "host");
-    let executor_lines = skill_lines(catalog_text(&developer_texts, "exec"), "exec");
+    let host_catalog = catalog_text(&developer_texts, "host");
+    let executor_catalog = catalog_text(&developer_texts, "exec");
+    let host_lines = skill_lines(host_catalog, "host");
+    let executor_lines = skill_lines(executor_catalog, "exec");
 
     assert_full_descriptions(&host_lines, &HOST_CATALOG);
     assert_full_descriptions(&executor_lines, &EXECUTOR_CATALOG);
+    assert!(host_catalog.contains("### Skill roots"));
+    assert!(host_catalog.contains("(file: r0/host-alpha/SKILL.md)"));
 
     Ok(())
 }

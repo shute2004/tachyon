@@ -515,22 +515,18 @@ pub(crate) fn render_available_skills(
         SkillPromptKind::Unaliased,
         policy,
     );
-    let selected =
-        if absolute.report.omitted_count == 0 && absolute.report.truncated_description_chars == 0 {
-            absolute
-        } else if let Some(aliased) =
-            build_aliased_catalog(&entries, policy, budget, include_skills_usage_instructions)
-            && aliased_render_is_better(
-                &aliased,
-                &absolute,
-                budget,
-                include_skills_usage_instructions,
-            )
-        {
-            aliased
-        } else {
-            absolute
-        };
+    let selected = if let Some(aliased) =
+        build_aliased_catalog(&entries, policy, budget, include_skills_usage_instructions)
+        && aliased_render_is_better(
+            &aliased,
+            &absolute,
+            budget,
+            include_skills_usage_instructions,
+        ) {
+        aliased
+    } else {
+        absolute
+    };
 
     Some(AvailableSkillsRender {
         prompt_kind: selected.prompt_kind,
@@ -607,53 +603,51 @@ pub(crate) fn render_combined_available_skills(
     );
 
     let mut selected = absolute;
-    if !combined_catalog_fully_rendered(&selected) {
-        let host_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::unaliased(&executor_entries, extension_policy),
-            CatalogLines::unaliased(&orchestrator_entries, extension_policy),
-            CatalogLines::aliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let executor_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::aliased(&executor_entries, extension_policy),
-            CatalogLines::unaliased(&orchestrator_entries, extension_policy),
-            CatalogLines::unaliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let orchestrator_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::unaliased(&executor_entries, extension_policy),
-            CatalogLines::aliased(&orchestrator_entries, extension_policy),
-            CatalogLines::unaliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let all_source_aliases = build_aliased_combined_catalog(
-            CatalogLines::aliased(&executor_entries, extension_policy),
-            CatalogLines::aliased(&orchestrator_entries, extension_policy),
-            CatalogLines::aliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
+    let host_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::unaliased(&executor_entries, extension_policy),
+        CatalogLines::unaliased(&orchestrator_entries, extension_policy),
+        CatalogLines::aliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let executor_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::aliased(&executor_entries, extension_policy),
+        CatalogLines::unaliased(&orchestrator_entries, extension_policy),
+        CatalogLines::unaliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let orchestrator_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::unaliased(&executor_entries, extension_policy),
+        CatalogLines::aliased(&orchestrator_entries, extension_policy),
+        CatalogLines::unaliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let all_source_aliases = build_aliased_combined_catalog(
+        CatalogLines::aliased(&executor_entries, extension_policy),
+        CatalogLines::aliased(&orchestrator_entries, extension_policy),
+        CatalogLines::aliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
 
-        for candidate in [
-            host_only_aliases,
-            executor_only_aliases,
-            orchestrator_only_aliases,
-            all_source_aliases,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if combined_render_is_better(
-                &candidate,
-                &selected,
-                budget,
-                include_skills_usage_instructions,
-            ) {
-                selected = candidate;
-            }
+    for candidate in [
+        host_only_aliases,
+        executor_only_aliases,
+        orchestrator_only_aliases,
+        all_source_aliases,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if combined_render_is_better(
+            &candidate,
+            &selected,
+            budget,
+            include_skills_usage_instructions,
+        ) {
+            selected = candidate;
         }
     }
 
@@ -840,14 +834,6 @@ fn build_aliased_combined_catalog(
         host,
         adjusted_budget,
     ))
-}
-
-fn combined_catalog_fully_rendered(rendered: &CombinedAvailableSkillsRender) -> bool {
-    [&rendered.executor, &rendered.orchestrator, &rendered.host]
-        .into_iter()
-        .all(|catalog| {
-            catalog.report.omitted_count == 0 && catalog.report.truncated_description_chars == 0
-        })
 }
 
 fn combined_render_is_better(
@@ -1105,21 +1091,24 @@ fn aliased_metadata_overhead_cost(
     include_skills_usage_instructions: bool,
 ) -> usize {
     let empty_skill_lines: &[String] = &[];
-    let absolute_body =
-        render_available_skills_body(SkillPromptKind::Unaliased, &[], empty_skill_lines);
-    let aliased_body =
-        render_available_skills_body(prompt_kind, skill_root_lines, empty_skill_lines);
-    let alias_instruction_cost = if include_skills_usage_instructions {
-        prompt_kind
-            .alias_instructions()
-            .map_or(0, |instructions| metadata_line_cost(budget, instructions))
-    } else {
-        0
+    let fixed_prompt_cost = |prompt_kind, skill_root_lines| {
+        let body = render_available_skills_body(prompt_kind, skill_root_lines, empty_skill_lines);
+        let instructions_cost = if include_skills_usage_instructions {
+            metadata_line_cost(budget, "### How to use skills")
+                .saturating_add(
+                    prompt_kind
+                        .alias_instructions()
+                        .map_or(0, |instructions| metadata_line_cost(budget, instructions)),
+                )
+                .saturating_add(metadata_line_cost(budget, prompt_kind.usage_instructions()))
+        } else {
+            0
+        };
+        budget.cost(&body).saturating_add(instructions_cost)
     };
-    budget
-        .cost(&aliased_body)
-        .saturating_add(alias_instruction_cost)
-        .saturating_sub(budget.cost(&absolute_body))
+
+    fixed_prompt_cost(prompt_kind, skill_root_lines)
+        .saturating_sub(fixed_prompt_cost(SkillPromptKind::Unaliased, &[]))
 }
 
 fn aliased_render_is_better(
