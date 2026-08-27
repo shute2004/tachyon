@@ -7,6 +7,7 @@ use crate::responses_metadata::TurnToolNamespacesInfo;
 use crate::responses_metadata::TurnToolSource;
 use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::router::ToolRouter;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
@@ -15,7 +16,18 @@ use codex_tools::ToolSpec;
 
 const TOOL_SEARCH_FUNCTION_NAME: &str = "tool_search_tool";
 
-pub(super) fn collect_tool_namespaces_info(
+pub(crate) fn collect_tool_namespaces_info_for_router(
+    router: &ToolRouter,
+) -> TurnToolNamespacesInfo {
+    let model_visible_specs = router.model_visible_specs();
+    collect_tool_namespaces_info(
+        router.registry(),
+        router.code_mode_tool_names(),
+        model_visible_specs.as_ref(),
+    )
+}
+
+fn collect_tool_namespaces_info(
     registry: &ToolRegistry,
     code_mode_tool_names: &BTreeMap<String, ToolName>,
     model_visible_specs: &[ToolSpec],
