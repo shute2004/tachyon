@@ -1001,11 +1001,10 @@ impl ModelClient {
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
         let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
+        let request_setup = self
             .state
             .provider
-            .api_auth_for_scope(ProviderAuthScope {
+            .api_request_setup_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
@@ -1013,9 +1012,9 @@ impl ModelClient {
             .await?;
         Ok(CurrentClientSetup {
             auth,
-            api_provider,
-            api_auth: resolved_auth.auth,
-            agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
+            api_provider: request_setup.api_provider,
+            api_auth: request_setup.resolved_auth.auth,
+            agent_identity_telemetry: request_setup.resolved_auth.agent_identity_telemetry,
         })
     }
 

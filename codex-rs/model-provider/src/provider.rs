@@ -94,6 +94,16 @@ pub enum ProviderUnauthorizedRecovery {
     Recovered,
 }
 
+/// Low-level API provider configuration and scoped request authentication.
+///
+/// This is a transitional provider-owned coordination bundle. Its fields are
+/// resolved through the existing provider methods and are not guaranteed to
+/// represent one atomic endpoint/auth snapshot or a generic request attempt.
+pub struct ProviderApiRequestSetup {
+    pub api_provider: Provider,
+    pub resolved_auth: ResolvedProviderAuth,
+}
+
 /// Error returned when a provider cannot construct its app-visible account state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAccountError {
@@ -253,6 +263,24 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
             let auth = self.auth().await;
             resolve_provider_auth_for_scope(self.auth_manager(), auth.as_ref(), self.info(), scope)
                 .await
+        })
+    }
+
+    /// Returns low-level API configuration and scoped authentication for a request path.
+    ///
+    /// This preserves the existing independent provider and auth resolution
+    /// semantics while moving their coordination behind the provider boundary.
+    fn api_request_setup_for_scope(
+        &self,
+        scope: ProviderAuthScope,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderApiRequestSetup>> {
+        Box::pin(async move {
+            let api_provider = self.api_provider().await?;
+            let resolved_auth = self.api_auth_for_scope(scope).await?;
+            Ok(ProviderApiRequestSetup {
+                api_provider,
+                resolved_auth,
+            })
         })
     }
 
