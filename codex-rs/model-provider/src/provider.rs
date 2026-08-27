@@ -94,7 +94,7 @@ pub enum ProviderUnauthorizedRecovery {
     Recovered,
 }
 
-/// Low-level API provider configuration and scoped request authentication.
+/// Low-level API provider configuration and request authentication.
 ///
 /// This is a transitional provider-owned coordination bundle. Its fields are
 /// resolved through the existing provider methods and are not guaranteed to
@@ -267,6 +267,23 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
             let auth = self.auth().await;
             resolve_provider_auth_for_scope(self.auth_manager(), auth.as_ref(), self.info(), scope)
                 .await
+        })
+    }
+
+    /// Resolves low-level API configuration and unscoped request authentication.
+    ///
+    /// Provider resolution intentionally completes before auth resolution, preserving the
+    /// established provider-before-auth ordering and unchanged error propagation.
+    fn api_request_setup(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderApiRequestSetup>> {
+        Box::pin(async move {
+            let api_provider = self.api_provider().await?;
+            let resolved_auth = ResolvedProviderAuth::new(self.api_auth().await?);
+            Ok(ProviderApiRequestSetup {
+                api_provider,
+                resolved_auth,
+            })
         })
     }
 
@@ -546,6 +563,7 @@ impl ModelProvider for ConfiguredModelProvider {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
+    use std::sync::Mutex;
 
     use codex_http_client::HttpClientFactory;
     use codex_http_client::OutboundProxyPolicy;
@@ -618,6 +636,95 @@ mod tests {
             supports_websockets: false,
             supports_standalone_web_search: false,
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SetupFailure {
+        None,
+        Provider,
+        Auth,
+    }
+
+    #[derive(Debug)]
+    struct RecordingModelProvider {
+        inner: SharedModelProvider,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        failure: SetupFailure,
+    }
+
+    impl ModelProvider for RecordingModelProvider {
+        fn info(&self) -> &ModelProviderInfo {
+            self.inner.info()
+        }
+
+        fn auth_manager(&self) -> Option<Arc<AuthManager>> {
+            self.inner.auth_manager()
+        }
+
+        fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
+            self.inner.auth()
+        }
+
+        fn account_state(&self) -> ProviderAccountResult {
+            self.inner.account_state()
+        }
+
+        fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
+            let calls = Arc::clone(&self.calls);
+            let inner = Arc::clone(&self.inner);
+            let failure = self.failure;
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("provider");
+                if failure == SetupFailure::Provider {
+                    return Err(CodexErr::Stream("provider setup failed".to_string()));
+                }
+                inner.api_provider().await
+            })
+        }
+
+        fn api_auth(
+            &self,
+        ) -> ModelProviderFuture<'_, codex_protocol::error::Result<SharedAuthProvider>> {
+            let calls = Arc::clone(&self.calls);
+            let inner = Arc::clone(&self.inner);
+            let failure = self.failure;
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("auth");
+                if failure == SetupFailure::Auth {
+                    return Err(CodexErr::Stream("auth setup failed".to_string()));
+                }
+                inner.api_auth().await
+            })
+        }
+
+        fn models_manager(
+            &self,
+            codex_home: PathBuf,
+            config_model_catalog: Option<ModelsResponse>,
+        ) -> SharedModelsManager {
+            self.inner.models_manager(codex_home, config_model_catalog)
+        }
+    }
+
+    fn recording_provider(
+        failure: SetupFailure,
+    ) -> (SharedModelProvider, Arc<Mutex<Vec<&'static str>>>) {
+        let calls = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let provider: SharedModelProvider = Arc::new(RecordingModelProvider {
+            inner: create_model_provider(
+                provider_for("https://example.test/v1".to_string()),
+                /*auth_manager*/ None,
+            ),
+            calls: Arc::clone(&calls),
+            failure,
+        });
+        (provider, calls)
     }
 
     fn remote_model(slug: &str) -> ModelInfo {
@@ -775,6 +882,98 @@ mod tests {
                 .expect("API deployment should resolve")
                 .base_url,
             "https://example.test/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_request_setup_preserves_provider_and_auth() {
+        let mut provider_info = provider_for("https://example.test/v1".to_string());
+        provider_info.experimental_bearer_token = Some("provider-token".into());
+        let provider = create_model_provider(provider_info, /*auth_manager*/ None);
+
+        let request_setup = provider
+            .api_request_setup()
+            .await
+            .expect("request setup should resolve");
+
+        assert_eq!(
+            request_setup.api_provider.deployment.base_url,
+            "https://example.test/v1"
+        );
+        assert_eq!(
+            request_setup
+                .resolved_auth
+                .auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer provider-token"))
+        );
+        assert!(
+            request_setup
+                .resolved_auth
+                .agent_identity_telemetry
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_request_setup_resolves_provider_before_auth_on_success() {
+        let (provider, calls) = recording_provider(SetupFailure::None);
+
+        provider
+            .api_request_setup()
+            .await
+            .expect("request setup should resolve");
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider", "auth"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_request_setup_skips_auth_after_provider_error() {
+        let (provider, calls) = recording_provider(SetupFailure::Provider);
+
+        let error = match provider.api_request_setup().await {
+            Ok(_) => panic!("provider failure should stop request setup"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error.details(),
+            codex_protocol::error::CodexErrorDetails::Stream(message)
+                if message == "provider setup failed"
+        ));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_request_setup_preserves_auth_error_after_provider() {
+        let (provider, calls) = recording_provider(SetupFailure::Auth);
+
+        let error = match provider.api_request_setup().await {
+            Ok(_) => panic!("auth failure should stop request setup"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error.details(),
+            codex_protocol::error::CodexErrorDetails::Stream(message)
+                if message == "auth setup failed"
+        ));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider", "auth"]
         );
     }
 
