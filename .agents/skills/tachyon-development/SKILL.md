@@ -5,8 +5,8 @@ description: Use when developing, refactoring, validating, reviewing, or merging
 
 # Tachyon Development
 
-> Added: 2026-08-27  
-> Last reviewed: 2026-08-27
+> Added: 2026-08-27 09:10 JST  
+> Last reviewed: 2026-08-27 10:31 JST
 
 Use this skill for work in `shute2004/tachyon`.
 
@@ -43,5 +43,6 @@ A migration PR should make clear:
 
 ## Change history
 
-- 2026-08-27 — Added the initial Tachyon development workflow and established current ModelRuntime/ModelTurnRuntime invariants.
-- 2026-08-27 — Added explicit Skill freshness checks to the core workflow.
+- 2026-08-27 09:10 JST — Added the initial Tachyon development workflow and established current ModelRuntime/ModelTurnRuntime invariants.
+- 2026-08-27 10:05 JST — Added explicit Skill freshness checks to the core workflow.
+- 2026-08-27 10:31 JST — Re-reviewed the full Skill and standardized freshness/change-history timestamps.
