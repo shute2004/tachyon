@@ -1,7 +1,7 @@
 # Local validation
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 10:31 JST
+> Last reviewed: 2026-08-27 11:38 JST
 
 Use this reference when asking for or interpreting local checks in Tachyon.
 
@@ -50,7 +50,12 @@ Do not assume `rg` is installed. Standard `grep` is the portable default unless 
 
 Prefer focused searches over large speculative edits, for example checking that removed APIs or intermediate states have zero remaining use sites before compiling.
 
+For structural type/member migrations, do not make the exhaustive audit depend on the variable names or call shapes you expect to find. Searches such as `api_provider.base_url` or `provider().base_url` can miss the same member behind another identifier, helper, or method chain. Search the moved member/API itself workspace-wide, exclude generated/build directories such as `target`, and then classify each hit by the actual type/ownership context.
+
+Use the compiler as a second safety net rather than as a substitute for the source audit. If compilation reveals a missed use site, broaden the audit pattern before rerunning so the migration converges by class of use site instead of one error at a time.
+
 ## Change history
 
 - 2026-08-27 09:10 JST — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
 - 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
+- 2026-08-27 11:38 JST — Added workspace-wide member/API audit guidance after provider field migration exposed identifier- and method-chain-specific grep blind spots.
