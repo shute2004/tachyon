@@ -388,6 +388,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketConnection, ApiError> {
         let ws_url = self
             .provider
+            .deployment
             .websocket_url_for_path("responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
@@ -399,7 +400,7 @@ impl ResponsesWebsocketClient {
             connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
         Ok(ResponsesWebsocketConnection::new(
             stream,
-            self.provider.stream_idle_timeout,
+            self.provider.request_policy.stream_idle_timeout,
             server_reasoning_included,
             server_model,
             telemetry,
@@ -422,6 +423,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketProbe, ApiError> {
         let ws_url = self
             .provider
+            .deployment
             .websocket_url_for_path("responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 

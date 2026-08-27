@@ -138,17 +138,21 @@ impl AuthProvider for StaticAuth {
 fn provider(name: &str) -> Provider {
     Provider {
         name: name.to_string(),
-        base_url: "https://example.com/v1".to_string(),
-        query_params: None,
-        headers: HeaderMap::new(),
-        retry: codex_api::RetryConfig {
-            max_attempts: 1,
-            base_delay: Duration::from_millis(1),
-            retry_429: false,
-            retry_5xx: false,
-            retry_transport: true,
+        deployment: codex_api::ApiDeployment {
+            base_url: "https://example.com/v1".to_string(),
+            query_params: None,
         },
-        stream_idle_timeout: Duration::from_millis(10),
+        headers: HeaderMap::new(),
+        request_policy: codex_api::RequestExecutionPolicy {
+            retry: codex_api::RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: true,
+            },
+            stream_idle_timeout: Duration::from_millis(10),
+        },
     }
 }
 
@@ -403,7 +407,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
     let transport = FlakyTransport::new();
 
     let mut provider = provider("openai");
-    provider.retry.max_attempts = 2;
+    provider.request_policy.retry.max_attempts = 2;
 
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
@@ -463,7 +467,7 @@ async fn streaming_client_retries_on_transient_auth_error() -> Result<()> {
     let auth = FailsOnceAuth::transient();
 
     let mut provider = provider("openai");
-    provider.retry.max_attempts = 2;
+    provider.request_policy.retry.max_attempts = 2;
 
     let client = ResponsesClient::new(transport, provider, Arc::new(auth.clone()));
     let body = serde_json::json!({ "model": "gpt-test" });
@@ -488,7 +492,7 @@ async fn streaming_client_does_not_retry_auth_build_error() -> Result<()> {
     let auth = FailsOnceAuth::build();
 
     let mut provider = provider("openai");
-    provider.retry.max_attempts = 2;
+    provider.request_policy.retry.max_attempts = 2;
 
     let client = ResponsesClient::new(transport, provider, Arc::new(auth.clone()));
     let body = serde_json::json!({ "model": "gpt-test" });

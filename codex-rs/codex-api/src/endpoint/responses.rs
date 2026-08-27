@@ -156,7 +156,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
 
         Ok(spawn_response_stream(
             stream_response,
-            self.session.provider().stream_idle_timeout,
+            self.session.provider().request_policy.stream_idle_timeout,
             self.sse_telemetry.clone(),
             turn_state,
         ))

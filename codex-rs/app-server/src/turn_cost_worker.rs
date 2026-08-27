@@ -422,9 +422,11 @@ impl WorkerRuntime {
                     .api_auth()
                     .await
                     .map_err(|error| RequestError::Other(error.into()))?;
-                let endpoint = provider.url_for_path("analytics/codex/turn-costs");
+                let endpoint = provider
+                    .deployment
+                    .url_for_path("analytics/codex/turn-costs");
                 let client = BackendClient::new(
-                    provider.base_url.clone(),
+                    provider.deployment.base_url.clone(),
                     self.config.http_client_factory(),
                 )
                 .with_auth_provider(auth);

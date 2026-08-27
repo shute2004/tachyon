@@ -142,7 +142,7 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
         .to_api_provider(Some(AuthMode::PersonalAccessToken))
         .expect("OpenAI provider should build API provider");
 
-    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+    assert_eq!(api_provider.deployment.base_url, CHATGPT_CODEX_BASE_URL);
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn test_header_auth_uses_chatgpt_codex_base_url() {
         .to_api_provider(Some(AuthMode::Headers))
         .expect("OpenAI provider should build API provider");
 
-    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+    assert_eq!(api_provider.deployment.base_url, CHATGPT_CODEX_BASE_URL);
 }
 
 #[test]

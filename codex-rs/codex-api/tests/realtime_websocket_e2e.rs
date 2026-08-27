@@ -61,17 +61,21 @@ where
 fn test_provider(base_url: String) -> Provider {
     Provider {
         name: "test".to_string(),
-        base_url,
-        query_params: Some(HashMap::new()),
-        headers: HeaderMap::new(),
-        retry: RetryConfig {
-            max_attempts: 1,
-            base_delay: Duration::from_millis(1),
-            retry_429: false,
-            retry_5xx: false,
-            retry_transport: false,
+        deployment: codex_api::ApiDeployment {
+            base_url,
+            query_params: Some(HashMap::new()),
         },
-        stream_idle_timeout: Duration::from_secs(5),
+        headers: HeaderMap::new(),
+        request_policy: codex_api::RequestExecutionPolicy {
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(5),
+        },
     }
 }
 
@@ -243,8 +247,8 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
     });
 
     let mut provider = test_provider(format!("http://{addr}"));
-    provider.retry.max_attempts = 1;
-    provider.retry.base_delay = Duration::from_millis(100);
+    provider.request_policy.retry.max_attempts = 1;
+    provider.request_policy.retry.base_delay = Duration::from_millis(100);
 
     let client = RealtimeWebsocketClient::new(provider)
         .with_webrtc_sideband_base_url(format!("http://{addr}"));

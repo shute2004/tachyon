@@ -368,7 +368,7 @@ mod tests {
             .expect("api provider should build");
 
         assert_eq!(
-            api_provider.base_url,
+            api_provider.deployment.base_url,
             "https://bedrock-mantle.eu-central-1.api.aws/openai/v1"
         );
     }

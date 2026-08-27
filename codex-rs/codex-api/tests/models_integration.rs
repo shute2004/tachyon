@@ -32,17 +32,21 @@ impl AuthProvider for DummyAuth {
 fn provider(base_url: &str) -> Provider {
     Provider {
         name: "test".to_string(),
-        base_url: base_url.to_string(),
-        query_params: None,
-        headers: HeaderMap::new(),
-        retry: RetryConfig {
-            max_attempts: 1,
-            base_delay: std::time::Duration::from_millis(1),
-            retry_429: false,
-            retry_5xx: true,
-            retry_transport: true,
+        deployment: codex_api::ApiDeployment {
+            base_url: base_url.to_string(),
+            query_params: None,
         },
-        stream_idle_timeout: std::time::Duration::from_secs(1),
+        headers: HeaderMap::new(),
+        request_policy: codex_api::RequestExecutionPolicy {
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: std::time::Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: true,
+                retry_transport: true,
+            },
+            stream_idle_timeout: std::time::Duration::from_secs(1),
+        },
     }
 }
 

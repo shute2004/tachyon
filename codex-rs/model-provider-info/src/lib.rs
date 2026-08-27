@@ -320,16 +320,20 @@ impl ModelProviderInfo {
 
         Ok(ApiProvider {
             name: self.name.clone(),
-            base_url,
-            query_params: self.query_params.clone().map(|params| {
-                params
-                    .into_iter()
-                    .map(|(name, value)| (name, value.into_inner()))
-                    .collect()
-            }),
+            deployment: codex_api::ApiDeployment {
+                base_url,
+                query_params: self.query_params.clone().map(|params| {
+                    params
+                        .into_iter()
+                        .map(|(name, value)| (name, value.into_inner()))
+                        .collect()
+                }),
+            },
             headers,
-            retry,
-            stream_idle_timeout: self.stream_idle_timeout(),
+            request_policy: codex_api::RequestExecutionPolicy {
+                retry,
+                stream_idle_timeout: self.stream_idle_timeout(),
+            },
         })
     }
 
