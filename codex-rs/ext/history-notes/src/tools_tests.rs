@@ -7,7 +7,21 @@ use codex_utils_output_truncation::TruncationPolicy;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
+use super::HistoryNotesAction;
 use super::HistoryNotesToolOutput;
+
+#[test]
+fn marks_sensitive_history_notes_arguments_encrypted() {
+    for (action, field) in [
+        (HistoryNotesAction::HistorySearchContents, "query"),
+        (HistoryNotesAction::NotesSearchContents, "query"),
+        (HistoryNotesAction::NotesAppendToFile, "text"),
+        (HistoryNotesAction::NotesWriteFile, "text"),
+    ] {
+        let parameters = action.parameters();
+        assert_eq!(parameters["properties"][field]["encrypted"], true);
+    }
+}
 
 #[test]
 fn preserves_encrypted_history_output() {

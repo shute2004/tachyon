@@ -10,10 +10,12 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+use super::ENCRYPTED_TOOL_ARGUMENTS_HEADER;
 use super::HistoryNotesBackend;
 
 #[tokio::test]
@@ -62,6 +64,12 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
     assert_eq!(response, json!({"encrypted_output": "enc_payload"}));
     let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .headers
+            .get(ENCRYPTED_TOOL_ARGUMENTS_HEADER)
+            .is_none()
+    );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&requests[0].body).expect("JSON body"),
         json!({
@@ -72,4 +80,59 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
             }
         })
     );
+}
+
+#[tokio::test]
+async fn marks_encrypted_history_and_notes_arguments_without_changing_the_json_body() {
+    let server = MockServer::start().await;
+    let cases = [
+        (
+            "history/v2/search_contents",
+            json!({"query": "encrypted-query"}),
+        ),
+        (
+            "notes/v2/search_contents",
+            json!({"query": "encrypted-query"}),
+        ),
+        (
+            "notes/v2/append_to_file",
+            json!({"path": "notes.md", "text": "encrypted-text"}),
+        ),
+        (
+            "notes/v2/write_file",
+            json!({"path": "notes.md", "text": "encrypted-text"}),
+        ),
+    ];
+    for (route, arguments) in &cases {
+        Mock::given(method("POST"))
+            .and(path(format!("/backend-api/codex/alpha/{route}")))
+            .and(header(ENCRYPTED_TOOL_ARGUMENTS_HEADER, "true"))
+            .and(body_partial_json(arguments.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::Headers(AuthHeaders::new(HeaderMap::new())));
+    let backend = HistoryNotesBackend::new(create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some(format!(
+            "{}/backend-api/codex",
+            server.uri()
+        ))),
+        Some(auth_manager),
+    ));
+
+    for (route, arguments) in cases {
+        backend
+            .call(
+                &format!("alpha/{route}"),
+                "session-123",
+                "/root",
+                arguments.clone(),
+            )
+            .await
+            .expect("encrypted argument request should succeed");
+    }
 }
