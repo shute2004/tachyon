@@ -1,7 +1,7 @@
 # Terminal and patching workflow
 
-> Added: 2026-08-27  
-> Last reviewed: 2026-08-27
+> Added: 2026-08-27 09:10 JST  
+> Last reviewed: 2026-08-27 10:31 JST
 
 Use this reference before giving interactive shell commands or constructing a local patch workflow.
 
@@ -54,5 +54,6 @@ When rewriting a remote short-lived branch intentionally, prefer `git push --for
 
 ## Change history
 
-- 2026-08-27 — Added Zed interactive-shell safety, working-directory semantics, deterministic patching, and Git rewrite guidance from Tachyon development experience.
-- 2026-08-27 — Added transactional-helper guidance after a provider-decomposition helper mutated earlier files before a later anchor validation failed.
+- 2026-08-27 09:10 JST — Added Zed interactive-shell safety, working-directory semantics, deterministic patching, and Git rewrite guidance from Tachyon development experience.
+- 2026-08-27 10:17 JST — Added transactional-helper guidance after a provider-decomposition helper mutated earlier files before a later anchor validation failed.
+- 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.

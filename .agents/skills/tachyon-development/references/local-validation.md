@@ -1,7 +1,7 @@
 # Local validation
 
-> Added: 2026-08-27  
-> Last reviewed: 2026-08-27
+> Added: 2026-08-27 09:10 JST  
+> Last reviewed: 2026-08-27 10:31 JST
 
 Use this reference when asking for or interpreting local checks in Tachyon.
 
@@ -52,4 +52,5 @@ Prefer focused searches over large speculative edits, for example checking that 
 
 ## Change history
 
-- 2026-08-27 — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
+- 2026-08-27 09:10 JST — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
+- 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.

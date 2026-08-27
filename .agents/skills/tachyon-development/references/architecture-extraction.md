@@ -1,7 +1,7 @@
 # Architecture extraction guidance
 
-> Added: 2026-08-27  
-> Last reviewed: 2026-08-27
+> Added: 2026-08-27 09:10 JST  
+> Last reviewed: 2026-08-27 10:31 JST
 
 Use this reference for changes that move responsibilities out of Codex/OpenAI-specific implementation into Tachyon-owned model-runtime abstractions.
 
@@ -148,5 +148,6 @@ Do not design the final abstraction farther ahead than the code can currently ju
 
 ## Change history
 
-- 2026-08-27 — Added the initial architecture-extraction invariants for ModelRuntime/ModelTurnRuntime, provider/protocol/route separation, and provider-private state.
-- 2026-08-27 — Added Endpoint guidance after cross-harness comparison and independent architecture review: first-class responsibility with provider-owned late resolution, Endpoint/operation separation, query/header/policy distinctions, and phased Endpoint/Auth dependency.
+- 2026-08-27 09:10 JST — Added the initial architecture-extraction invariants for ModelRuntime/ModelTurnRuntime, provider/protocol/route separation, and provider-private state.
+- 2026-08-27 09:56 JST — Added Endpoint guidance after cross-harness comparison and independent architecture review: first-class responsibility with provider-owned late resolution, Endpoint/operation separation, query/header/policy distinctions, and phased Endpoint/Auth dependency.
+- 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
