@@ -1,7 +1,7 @@
 # Local validation
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 13:46 JST
+> Last reviewed: 2026-08-27 14:12 JST
 
 Use this reference when asking for or interpreting local checks in Tachyon.
 
@@ -72,9 +72,21 @@ A `No space left on device (os error 28)` failure should first be treated as an 
 
 When free space is tight, avoid unnecessarily multiplying build artifacts across validation variants. It is acceptable to disable incremental compilation and debug information for correctness-oriented local checks when those settings are not what the change is testing, for example with `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, and `CARGO_PROFILE_TEST_DEBUG=0`.
 
+Heavy `codex-app-server`, `codex-core`, and broad integration validations can have a much larger transient disk peak than the final `target/` size because multiple `rustc` jobs create `.rmeta`, object, and archive files concurrently. Do not use the current `target/` size alone to decide whether a heavy validation is safe. On a constrained local disk, treat roughly 30 GiB of free space as a warning threshold rather than a guarantee. After a prior ENOSPC failure, clean at a safe boundary before the next heavy validation and cap Cargo parallelism, for example:
+
+```bash
+CARGO_INCREMENTAL=0 \
+CARGO_PROFILE_DEV_DEBUG=0 \
+CARGO_PROFILE_TEST_DEBUG=0 \
+cargo check -j 2 -p codex-app-server
+```
+
+Use the same `-j 2` limit for heavy `cargo test` commands when disk peak is the concern. If a clean target plus reduced parallelism still cannot fit locally, prefer CI or a larger build volume for that heavy integration check instead of repeatedly retrying a high-parallel local build.
+
 ## Change history
 
 - 2026-08-27 09:10 JST — Added Rust toolchain, formatter-baseline, warning, and source-audit guidance from Tachyon development experience.
 - 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
 - 2026-08-27 11:38 JST — Added workspace-wide member/API audit guidance after provider field migration exposed identifier- and method-chain-specific grep blind spots.
 - 2026-08-27 13:46 JST — Added build-artifact cleanup and low-disk validation guidance after repeated Rust builds exhausted local storage.
+- 2026-08-27 14:12 JST — Added transient build-peak and reduced-parallelism guidance after an app-server validation exhausted more than 23 GiB of free space despite incremental/debug reductions.
