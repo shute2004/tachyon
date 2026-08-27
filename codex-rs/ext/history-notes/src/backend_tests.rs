@@ -18,6 +18,7 @@ use wiremock::matchers::path;
 
 use super::ENCRYPTED_TOOL_ARGUMENTS_HEADER;
 use super::HistoryNotesBackend;
+use super::TOOL_OUTPUT_TRUNCATION_POLICY_HEADER;
 
 #[tokio::test]
 async fn routes_through_codex_backend_and_injects_trusted_session_agent_context() {
@@ -66,6 +67,17 @@ async fn routes_through_codex_backend_and_injects_trusted_session_agent_context(
     assert_eq!(response, json!({"encrypted_output": "enc_payload"}));
     let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(requests.len(), 1);
+    let expected_truncation_policy =
+        serde_json::to_string(&TruncationPolicy::Bytes(1024)).expect("serialize truncation policy");
+    let expected_truncation_policy_header =
+        HeaderValue::from_bytes(expected_truncation_policy.as_bytes())
+            .expect("valid truncation policy header");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get(TOOL_OUTPUT_TRUNCATION_POLICY_HEADER),
+        Some(&expected_truncation_policy_header)
+    );
     assert!(
         requests[0]
             .headers
