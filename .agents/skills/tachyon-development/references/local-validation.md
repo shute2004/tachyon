@@ -1,7 +1,7 @@
 # Local validation
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 14:12 JST
+> Last reviewed: 2026-08-28 04:05 JST
 
 Use this reference when asking for or interpreting local checks in Tachyon.
 
@@ -23,6 +23,19 @@ rustup show active-toolchain
 ```
 
 Do not solve an apparent MSRV failure by downgrading dependencies until the active toolchain has been verified.
+
+## Worktree identity before heavy validation
+
+Tachyon development may use multiple local worktrees for parallel tracks such as Architecture and Upstream Sync. Before a heavy `cargo check` or `cargo test`, verify that the terminal is inside the intended worktree and branch rather than relying on the prompt or a previous `cd`.
+
+Prefer a lightweight preflight such as:
+
+```bash
+pwd
+git status --short --branch
+```
+
+If a dedicated worktree is part of the current track's handoff or Skill guidance, confirm that the reported path matches it before starting the heavy Cargo command. A command accidentally run in another valid Tachyon worktree is an execution-location mistake; do not infer that the worktree separation design itself is invalid.
 
 ## Formatting
 
@@ -90,3 +103,4 @@ Use the same `-j 2` limit for heavy `cargo test` commands when disk peak is the 
 - 2026-08-27 11:38 JST — Added workspace-wide member/API audit guidance after provider field migration exposed identifier- and method-chain-specific grep blind spots.
 - 2026-08-27 13:46 JST — Added build-artifact cleanup and low-disk validation guidance after repeated Rust builds exhausted local storage.
 - 2026-08-27 14:12 JST — Added transient build-peak and reduced-parallelism guidance after an app-server validation exhausted more than 23 GiB of free space despite incremental/debug reductions.
+- 2026-08-28 04:05 JST — Added multi-worktree identity preflight guidance before heavy Cargo validation.
