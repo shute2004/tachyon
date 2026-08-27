@@ -1091,21 +1091,24 @@ fn aliased_metadata_overhead_cost(
     include_skills_usage_instructions: bool,
 ) -> usize {
     let empty_skill_lines: &[String] = &[];
-    let absolute_body =
-        render_available_skills_body(SkillPromptKind::Unaliased, &[], empty_skill_lines);
-    let aliased_body =
-        render_available_skills_body(prompt_kind, skill_root_lines, empty_skill_lines);
-    let alias_instruction_cost = if include_skills_usage_instructions {
-        prompt_kind
-            .alias_instructions()
-            .map_or(0, |instructions| metadata_line_cost(budget, instructions))
-    } else {
-        0
+    let fixed_prompt_cost = |prompt_kind, skill_root_lines| {
+        let body = render_available_skills_body(prompt_kind, skill_root_lines, empty_skill_lines);
+        let instructions_cost = if include_skills_usage_instructions {
+            metadata_line_cost(budget, "### How to use skills")
+                .saturating_add(
+                    prompt_kind
+                        .alias_instructions()
+                        .map_or(0, |instructions| metadata_line_cost(budget, instructions)),
+                )
+                .saturating_add(metadata_line_cost(budget, prompt_kind.usage_instructions()))
+        } else {
+            0
+        };
+        budget.cost(&body).saturating_add(instructions_cost)
     };
-    budget
-        .cost(&aliased_body)
-        .saturating_add(alias_instruction_cost)
-        .saturating_sub(budget.cost(&absolute_body))
+
+    fixed_prompt_cost(prompt_kind, skill_root_lines)
+        .saturating_sub(fixed_prompt_cost(SkillPromptKind::Unaliased, &[]))
 }
 
 fn aliased_render_is_better(
