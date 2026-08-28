@@ -1873,7 +1873,7 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
                 /*extension_metrics*/ None,
             )
             .await,
-        Some(ReviewDecision::Approved)
+        None
     );
 
     let turn_store = ExtensionData::new("turn-1");
