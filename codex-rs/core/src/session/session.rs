@@ -1403,11 +1403,12 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                 )
-                .with_prompt_cache_key_override(
+                .with_session_context(
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
                         session_configuration.parent_thread_id,
                     ),
+                    tx_event.clone(),
                 ),
                 executed_tool_calls,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
