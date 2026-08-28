@@ -21,6 +21,7 @@ use codex_features::Feature;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -41,6 +42,7 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use test_case::test_case;
 
 const FIRST_REMINDER: &str =
     "<current_time_reminder>It is 2026-06-17 17:34:15 UTC.</current_time_reminder>";
