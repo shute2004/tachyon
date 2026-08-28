@@ -20,7 +20,7 @@ Tachyon Kernel -----+-- Desktop
                     `-- Web / other hosts
 ```
 
-The kernel may be feature-rich. The goal is not a minimal SDK. The criterion is that kernel responsibilities are reusable across model providers and user-interface layers.
+The kernel may be feature-rich. The goal is not a minimal SDK. The criterion is that kernel responsibilities are reusable across model providers and user-interface layers. Here, "Kernel" means the reusable coding-agent runtime core, not an operating-system-style requirement to minimize functionality.
 
 Expected kernel responsibilities include:
 
@@ -32,6 +32,8 @@ Expected kernel responsibilities include:
 - persistence, resume, fork, and rollback semantics
 - MCP and extension lifecycle mechanisms
 - provider-neutral model execution interfaces and capability discovery
+
+See [`docs/tachyon/kernel-runtime.md`](docs/tachyon/kernel-runtime.md) for the kernel capability-retention, deletion, and host-boundary contract.
 
 ## What stays outside the kernel
 
