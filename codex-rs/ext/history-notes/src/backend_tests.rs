@@ -46,7 +46,7 @@ async fn reports_provider_resolution_error_before_auth_resolution() {
 
     assert_eq!(
         error,
-        "History backend provider could not be resolved: Fatal error: Amazon Bedrock does not support region `us-west-1`"
+        "Unable to perform operation: Could not resolve the backend provider."
     );
 }
 
@@ -77,7 +77,7 @@ async fn reports_auth_resolution_error_after_provider_resolution() {
 
     assert_eq!(
         error,
-        "History backend auth could not be resolved: unsupported operation: Bedrock API key auth is only supported by the Amazon Bedrock model provider"
+        "Unable to perform operation: Could not resolve backend authentication."
     );
 }
 
