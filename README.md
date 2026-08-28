@@ -1,81 +1,109 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Tachyon
 
----
+Tachyon is a model-agnostic, UI-independent runtime for building complete coding-agent harnesses.
 
-## Quickstart
+It is being extracted from the OpenAI Codex codebase so that mature agent behavior can be preserved while model-provider, product, and user-interface coupling is moved behind explicit boundaries.
 
-### Installing and running Codex CLI
+Tachyon calls this runtime the **Kernel**. The term does not mean an OS-style minimal core. Tachyon's Kernel is intended to retain the feature-rich execution capabilities that make a coding-agent harness useful; a CLI, TUI, desktop app, IDE integration, or other host should be able to attach to the Kernel without reimplementing the agent runtime.
 
-Run the following on Mac or Linux to install Codex CLI:
+```text
+                    +-- CLI
+                    +-- TUI
+Tachyon Kernel -----+-- Desktop
+                    +-- IDE
+                    `-- Web / other hosts
+```
+
+## What the Kernel owns
+
+Tachyon is intended to provide reusable coding-agent runtime capabilities such as:
+
+- thread, session, turn, and agent-loop lifecycle
+- context/history management and compaction
+- model execution and capability discovery
+- tool specification, routing, execution, and lifecycle
+- steering, cancellation, retry, and recovery orchestration
+- permissions, approvals, sandboxing, shell/process/patch execution
+- persistence, resume, fork, and rollback semantics
+- MCP and extension lifecycle mechanisms
+- provider-neutral command/event surfaces for hosts and frontends
+
+The criterion is **model/vendor/UI independence**, not minimum feature count.
+
+Provider-specific implementations can still realize general harness capabilities. Tachyon preserves those capabilities behind adapters rather than deleting mature behavior merely because the current implementation originated in OpenAI Codex.
+
+## What stays outside the Kernel
+
+The Kernel does not directly own:
+
+- CLI/TUI/Desktop/IDE/Web presentation
+- ChatGPT/OpenAI account and product integration
+- concrete provider authentication and endpoints
+- provider wire protocols such as OpenAI Responses or Anthropic Messages
+- OpenAI/Codex-specific headers, routing tokens, and compatibility behavior
+- product analytics, update, installation, and release concerns
+
+## Current status
+
+Tachyon is under active extraction. The repository is public and buildable, but the standalone external Kernel API and workspace layout are not yet considered stable.
+
+The current extraction has established a Tachyon-owned model-runtime boundary with separate session and turn lifetimes, and is progressively moving model request/event semantics through canonical provider-neutral IR while keeping unsupported provider-specific behavior on explicit adapter compatibility paths.
+
+The broader extraction order is:
+
+1. model-runtime seam and lifecycle
+2. canonical model request/event IR
+3. provider / protocol / route / auth / endpoint / transport separation
+4. provider-neutral tool-call boundaries while retaining the mature tool runtime
+5. agent loop behind Kernel-owned model/tool interfaces
+6. context/history/compaction and persistence boundaries
+7. execution, permissions, sandbox, and extension boundaries
+8. removal of remaining Codex/OpenAI product dependencies from Kernel crates
+9. standalone Tachyon workspace and external-use surfaces
+
+Behavior preservation comes before internal redesign.
+
+## Building the current workspace
+
+Tachyon is still hosted inside the Codex-derived Rust workspace. From the repository root:
 
 ```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+cd codex-rs
+cargo check -p codex-core
 ```
 
-Run the following on Windows to install Codex CLI:
+`codex-rs/` and `codex-*` package names are transitional extraction names, not the intended final Tachyon workspace naming.
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+## Architecture documents
+
+- [`TACHYON.md`](TACHYON.md) — project direction and current extraction state
+- [`docs/tachyon/architecture.md`](docs/tachyon/architecture.md) — ownership rules, dependency direction, and extraction order
+- [`docs/tachyon/model-ir.md`](docs/tachyon/model-ir.md) — canonical model request/event IR and migration boundary
+
+## Development approach
+
+Tachyon is not a clean-room rewrite. Development normally follows this sequence:
+
+```text
+mature Codex behavior
+        |
+        v
+introduce a Tachyon-owned boundary
+        |
+        v
+keep the existing implementation behind an adapter
+        |
+        v
+move harness call sites through the boundary
+        |
+        v
+decompose provider/product details
 ```
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+Focused migration changes should preserve existing behavior and explicitly distinguish reusable harness capability from provider/product implementation detail.
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
+## Origin and license
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
-
-Codex CLI can also be installed via the following package managers:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+Tachyon is derived from [OpenAI Codex](https://github.com/openai/codex) and preserves its Apache-2.0 licensing basis.
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
