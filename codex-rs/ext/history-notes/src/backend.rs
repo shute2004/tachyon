@@ -62,9 +62,10 @@ impl HistoryNotesBackend {
         let auth = setup.resolved_auth.auth;
 
         let mut request = provider.build_request(Method::POST, path);
-        let encoded_truncation_policy = serde_json::to_string(&truncation_policy).map_err(|_| {
-            format!("{OPERATION_ERROR_PREFIX} Could not encode the output truncation policy.")
-        })?;
+        let encoded_truncation_policy =
+            serde_json::to_string(&truncation_policy).map_err(|_| {
+                format!("{OPERATION_ERROR_PREFIX} Could not encode the output truncation policy.")
+            })?;
         request.headers.insert(
             TOOL_OUTPUT_TRUNCATION_POLICY_HEADER,
             HeaderValue::from_str(&encoded_truncation_policy).map_err(|_| {
