@@ -167,12 +167,13 @@ fn is_elevated_sandbox_compatible_powershell_path(path: &std::path::Path) -> boo
     !targets_inaccessible_windows_apps_powershell(path)
 }
 
-fn get_elevated_sandbox_compatible_powershell_path(
-    binary_name: &str,
+fn select_elevated_sandbox_compatible_powershell_path(
+    path_candidates: impl IntoIterator<Item = PathBuf>,
     fallback_paths: &[&str],
 ) -> Option<PathBuf> {
-    if let Ok(mut paths) = which::which_all(binary_name)
-        && let Some(path) = paths.find(|path| is_elevated_sandbox_compatible_powershell_path(path))
+    if let Some(path) = path_candidates
+        .into_iter()
+        .find(|path| is_elevated_sandbox_compatible_powershell_path(path))
     {
         return Some(path);
     }
@@ -187,6 +188,16 @@ fn get_elevated_sandbox_compatible_powershell_path(
     }
 
     None
+}
+
+fn get_elevated_sandbox_compatible_powershell_path(
+    binary_name: &str,
+    fallback_paths: &[&str],
+) -> Option<PathBuf> {
+    select_elevated_sandbox_compatible_powershell_path(
+        which::which_all(binary_name).ok().into_iter().flatten(),
+        fallback_paths,
+    )
 }
 
 fn get_shell_path(
@@ -411,7 +422,7 @@ mod tests {
         let portable = PathBuf::from(
             r"C:\Users\user\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe",
         );
-        let found = [
+        let path_candidates = [
             PathBuf::from(
                 r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe",
             ),
@@ -419,9 +430,8 @@ mod tests {
             PathBuf::from(r"C:\runtime\dependencies\bin\fallback\pwsh.cmd"),
             portable.clone(),
             PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
-        ]
-        .into_iter()
-        .find(|path| is_elevated_sandbox_compatible_powershell_path(path));
+        ];
+        let found = select_elevated_sandbox_compatible_powershell_path(path_candidates, &[]);
 
         assert_eq!(found, Some(portable));
     }
