@@ -10,7 +10,6 @@ use super::ModelTurnRuntime;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::util::backoff;
-use codex_client::RetryOperation;
 use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -97,11 +96,6 @@ pub(crate) async fn handle_retryable_model_stream_error<F>(
 where
     F: FnMut() -> Option<String>,
 {
-    let operation = match request {
-        ModelStreamRequest::Sampling => RetryOperation::Sampling,
-        ModelStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
-    };
-
     if allow_unbounded_connection_retry
         && turn_context
             .config
@@ -121,7 +115,7 @@ where
         sess.notify_stream_error(turn_context, "Reconnecting... waiting for network", err)
             .await;
         retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
-        codex_client::record_retry!(retry_state.connection_retries, retry_delay, operation);
+        record_model_retry(retry_state.connection_retries, retry_delay, request);
         tokio::time::sleep(retry_delay).await;
         retry_state.connection_retry_delay = retry_delay
             .saturating_mul(2)
@@ -159,12 +153,29 @@ where
             )
             .await;
         }
-        codex_client::record_retry!(retry_count, delay, operation);
+        record_model_retry(retry_count, delay, request);
         tokio::time::sleep(delay).await;
         return Ok(());
     }
 
     Err(err)
+}
+
+fn record_model_retry(attempt: u64, delay: Duration, request: ModelStreamRequest) {
+    let operation = match request {
+        ModelStreamRequest::Sampling => "sampling",
+        ModelStreamRequest::RemoteCompactionV2 => "remote_compaction_v2",
+    };
+
+    tracing::event!(
+        target: "codex_otel.trace_safe",
+        tracing::Level::TRACE,
+        event.name = "codex.retry",
+        retry.attempt = attempt,
+        retry.delay_ms = delay.as_millis() as u64,
+        retry.layer = "stream",
+        retry.operation = operation,
+    );
 }
 
 pub(crate) fn log_retry(
