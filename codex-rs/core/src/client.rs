@@ -66,7 +66,6 @@ use codex_api::response_create_client_metadata;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
-use codex_login::CodexAuth;
 use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::add_originator_header;
@@ -127,6 +126,7 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::AgentIdentitySessionFallback;
+use codex_model_provider::ProviderAuthMetadata;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
@@ -226,7 +226,7 @@ struct ModelClientState {
 /// Keeping this as a single bundle ensures prewarm and normal request paths
 /// share the same auth/provider setup flow.
 struct CurrentClientSetup {
-    auth: Option<CodexAuth>,
+    auth_metadata: ProviderAuthMetadata,
     api_provider: ApiProvider,
     api_auth: SharedAuthProvider,
     agent_identity_telemetry: Option<AgentIdentityTelemetry>,
@@ -585,7 +585,7 @@ impl ModelClient {
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.auth_metadata.auth_mode(),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 PendingUnauthorizedRetry::default(),
@@ -625,7 +625,7 @@ impl ModelClient {
             prompt_cache_key: prompt_cache_key.as_deref(),
             text,
             access_programs: cyber_access_program::for_auth(
-                client_setup.auth.as_ref(),
+                client_setup.auth_metadata,
                 prompt.cyber_access_program,
             ),
         };
@@ -648,7 +648,7 @@ impl ModelClient {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
         if let Some(header_value) = self.build_routing_hint_header(
-            client_setup.auth.as_ref(),
+            client_setup.auth_metadata,
             &model,
             service_tier.as_deref(),
         ) {
@@ -744,7 +744,7 @@ impl ModelClient {
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
             AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.auth_metadata.auth_mode(),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 PendingUnauthorizedRetry::default(),
@@ -1000,7 +1000,7 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
+        let auth_metadata = self.state.provider.auth_metadata().await;
         let request_setup = self
             .state
             .provider
@@ -1011,7 +1011,7 @@ impl ModelClient {
             })
             .await?;
         Ok(CurrentClientSetup {
-            auth,
+            auth_metadata,
             api_provider: request_setup.api_provider,
             api_auth: request_setup.resolved_auth.auth,
             agent_identity_telemetry: request_setup.resolved_auth.agent_identity_telemetry,
@@ -1020,12 +1020,12 @@ impl ModelClient {
 
     fn build_routing_hint_header(
         &self,
-        auth: Option<&CodexAuth>,
+        auth_metadata: ProviderAuthMetadata,
         model: &str,
         service_tier: Option<&str>,
     ) -> Option<HeaderValue> {
         let provider = self.state.provider.info();
-        if !auth.is_some_and(CodexAuth::uses_codex_backend)
+        if !auth_metadata.uses_codex_backend()
             || !provider.is_openai()
             || !provider.requires_openai_auth
             || provider.env_key.is_some()
@@ -1350,7 +1350,7 @@ impl ModelClientSession {
             ))
         })?;
         let auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+            client_setup.auth_metadata.auth_mode(),
             client_setup.api_auth.as_ref(),
             client_setup.agent_identity_telemetry.clone(),
             PendingUnauthorizedRetry::default(),
@@ -1441,9 +1441,9 @@ impl ModelClientSession {
             ))
     }
 
-    fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
+    fn responses_request_compression(&self, auth_metadata: ProviderAuthMetadata) -> Compression {
         if self.client.state.enable_request_compression
-            && auth.is_some_and(CodexAuth::uses_codex_backend)
+            && auth_metadata.uses_codex_backend()
             && self.client.state.provider.info().is_openai()
         {
             Compression::Zstd
@@ -1492,7 +1492,7 @@ impl ModelClientSession {
                 .client
                 .build_api_transport(&client_setup.api_provider, RESPONSES_ENDPOINT)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.auth_metadata.auth_mode(),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
@@ -1503,7 +1503,7 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
             );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let compression = self.responses_request_compression(client_setup.auth_metadata);
             let mut options = self
                 .build_responses_options(
                     responses_metadata,
@@ -1521,7 +1521,7 @@ impl ModelClientSession {
                 responses_metadata,
             )?;
             if let Some(header_value) = self.client.build_routing_hint_header(
-                client_setup.auth.as_ref(),
+                client_setup.auth_metadata,
                 &request.model,
                 request.service_tier.as_deref(),
             ) {
@@ -1530,7 +1530,7 @@ impl ModelClientSession {
                     .insert(X_CODEX_ROUTING_HINT_HEADER, header_value);
             }
             request.access_programs = cyber_access_program::for_auth(
-                client_setup.auth.as_ref(),
+                client_setup.auth_metadata,
                 prompt.cyber_access_program,
             );
             self.client
@@ -1638,7 +1638,7 @@ impl ModelClientSession {
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.auth_metadata.auth_mode(),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
@@ -1652,12 +1652,12 @@ impl ModelClientSession {
                 responses_metadata,
             )?;
             request.access_programs = cyber_access_program::for_auth(
-                client_setup.auth.as_ref(),
+                client_setup.auth_metadata,
                 prompt.cyber_access_program,
             );
             let mut websocket_metadata = responses_metadata.clone();
             websocket_metadata.routing_hint = self.client.build_routing_hint_header(
-                client_setup.auth.as_ref(),
+                client_setup.auth_metadata,
                 &request.model,
                 request.service_tier.as_deref(),
             );
