@@ -4,6 +4,7 @@ use codex_api::ReqwestTransport;
 use codex_client::HttpTransport;
 use codex_client::RequestBody;
 use codex_login::default_client::create_client;
+use codex_model_provider::ProviderApiRequestSetupError;
 use codex_model_provider::SharedModelProvider;
 use codex_utils_output_truncation::TruncationPolicy;
 use http::HeaderValue;
@@ -44,15 +45,20 @@ impl HistoryNotesBackend {
             }),
         );
 
-        let provider =
-            self.provider.api_provider().await.map_err(|error| {
-                format!("History backend provider could not be resolved: {error}")
-            })?;
-        let auth = self
+        let setup = self
             .provider
-            .api_auth()
+            .api_request_setup_with_stage_errors()
             .await
-            .map_err(|error| format!("History backend auth could not be resolved: {error}"))?;
+            .map_err(|error| match error {
+                ProviderApiRequestSetupError::Provider(error) => {
+                    format!("History backend provider could not be resolved: {error}")
+                }
+                ProviderApiRequestSetupError::Auth(error) => {
+                    format!("History backend auth could not be resolved: {error}")
+                }
+            })?;
+        let provider = setup.api_provider;
+        let auth = setup.resolved_auth.auth;
 
         let mut request = provider.build_request(Method::POST, path);
         let encoded_truncation_policy = serde_json::to_string(&truncation_policy)
