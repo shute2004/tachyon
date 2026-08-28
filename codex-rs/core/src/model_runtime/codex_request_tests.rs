@@ -83,6 +83,51 @@ fn message_and_output_contract_round_trip_preserves_codex_decorations() {
 }
 
 #[test]
+fn reasoning_round_trip_preserves_provider_private_continuation() {
+    let metadata = InternalChatMessageMetadataPassthrough {
+        turn_id: Some("turn-reasoning".to_string()),
+        ..Default::default()
+    };
+    let reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "request-bridge")),
+        summary: vec![
+            ReasoningItemReasoningSummary::SummaryText {
+                text: "first summary".to_string(),
+            },
+            ReasoningItemReasoningSummary::SummaryText {
+                text: "second summary".to_string(),
+            },
+        ],
+        content: Some(vec![
+            ReasoningItemContent::ReasoningText {
+                text: "internal reasoning".to_string(),
+            },
+            ReasoningItemContent::Text {
+                text: "exposed reasoning".to_string(),
+            },
+        ]),
+        encrypted_content: Some("opaque-provider-continuation".to_string()),
+        internal_chat_message_metadata_passthrough: Some(metadata),
+    };
+    let prompt = prompt_with(vec![reasoning.clone()], Vec::new());
+
+    let request = assert_prompt_request_semantics_round_trip(&prompt);
+    assert_eq!(
+        request.input,
+        vec![ModelInputItem::Reasoning(ModelReasoning {
+            summary: vec!["first summary".to_string(), "second summary".to_string(),],
+            content: vec![
+                "internal reasoning".to_string(),
+                "exposed reasoning".to_string(),
+            ],
+        })]
+    );
+
+    let rebuilt = prompt_from_model_request(&request, &prompt).expect("round trip");
+    assert_eq!(rebuilt.input, vec![reasoning]);
+}
+
+#[test]
 fn grammar_and_deferred_freeform_tool_round_trip() {
     let prompt = prompt_with(
         Vec::new(),
