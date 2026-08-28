@@ -1,5 +1,8 @@
 use super::step_settings::ResolvedStepSettings;
+use super::token_budget::has_explicit_settings;
+use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::config::TokenBudgetConfig;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
@@ -196,6 +199,10 @@ pub struct TurnContext {
     /// Turn-scoped configuration. Read step-specific settings such as service tier and
     /// approvals reviewer from the corresponding `StepContext` instead.
     pub config: Arc<Config>,
+    /// Preferences captured before token-budget defaults from the turn's initial model.
+    pub(crate) configured_token_budget: Option<TokenBudgetConfig>,
+    /// Captured once so later consumers can resolve the same preferences for another model.
+    pub(crate) use_model_token_budget_defaults: bool,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     /// Frozen settings used to construct this context. Legacy turn consumers
     /// keep this view even when later steps use different settings.
@@ -514,6 +521,8 @@ impl TurnContext {
             realtime_active: self.realtime_active,
             code_mode_available: self.code_mode_available,
             config: Arc::new(config),
+            configured_token_budget: self.configured_token_budget.clone(),
+            use_model_token_budget_defaults: self.use_model_token_budget_defaults,
             auth_manager: self.auth_manager.clone(),
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
@@ -736,7 +745,15 @@ impl Session {
         );
 
         let mut per_turn_config = per_turn_config;
-        super::token_budget::apply_model_defaults(&mut per_turn_config, model_info);
+        let configured_token_budget = per_turn_config.token_budget.clone();
+        let use_model_token_budget_defaults =
+            per_turn_config.features.enabled(Feature::TokenBudget)
+                && !has_explicit_settings(&per_turn_config);
+        per_turn_config.token_budget = resolve_token_budget(
+            configured_token_budget.as_ref(),
+            use_model_token_budget_defaults,
+            model_info,
+        );
         if step_settings.reasoning_effort() == Some(&ReasoningEffort::Persistent) {
             super::time_reminder::apply_persistent_defaults(&mut per_turn_config);
         }
@@ -775,6 +792,8 @@ impl Session {
             realtime_active: false,
             code_mode_available: true,
             config: per_turn_config,
+            configured_token_budget,
+            use_model_token_budget_defaults,
             auth_manager,
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
