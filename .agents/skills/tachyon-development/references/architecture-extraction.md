@@ -1,7 +1,7 @@
 # Architecture extraction guidance
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-28 15:36 JST
+> Last reviewed: 2026-08-28 04:59 JST
 
 Use this reference for changes that move responsibilities out of Codex/OpenAI-specific implementation into Tachyon-owned model-runtime abstractions.
 
@@ -129,14 +129,6 @@ Endpoint selection may depend on auth context, while final request authenticatio
 
 Before migrating a call site to a provider-owned unscoped request-setup helper, audit call-site-specific side effects between `api_provider()` and `api_auth*()`. Receiver registration at the call site can make that ordering semantic. Simple unscoped composition is distinct from ordering-sensitive scoped composition such as Guardian; never mechanically migrate every adjacent provider/auth call. `ProviderApiRequestSetup` is a transitional coordination bundle, not an atomic request-attempt or Endpoint/Auth snapshot.
 
-### Raw auth semantic projection
-
-When a caller uses concrete provider auth only to derive semantic decisions such as telemetry mode, backend routing, or account-class checks, prefer a narrow provider-owned projection over exposing raw credentials across the kernel boundary.
-
-Preserve which auth snapshot those semantics came from. A pre-request-setup auth snapshot is not automatically equivalent to `ResolvedProviderAuth`: scoped resolution may substitute or bootstrap request credentials such as Agent Identity. Do not move pre-setup semantics onto resolved request auth unless code evidence proves the behavior is equivalent.
-
-Such projections are migration boundaries, not evidence for a final generic Tachyon Auth contract. In particular, existing Codex/OpenAI vocabulary such as `AuthMode` should not be promoted into the final kernel abstraction merely because it is useful during extraction.
-
 ## Provider-private runtime state
 
 Continuation IDs, cached WebSocket state, refreshed credentials, entitlement data, provider discovery caches, signing state, sticky-routing tokens, and similar data stay opaque behind the adapter unless generic orchestration has a demonstrated need for a semantic result.
@@ -167,4 +159,3 @@ Do not design the final abstraction farther ahead than the code can currently ju
 - 2026-08-27 10:31 JST — Re-reviewed this reference and standardized freshness/change-history timestamps.
 - 2026-08-27 11:38 JST — Added the guardrail that transport-specific connection helpers such as HTTP-to-WebSocket scheme conversion must not be frozen into the future Endpoint contract merely because they currently live on an internal deployment value.
 - 2026-08-28 04:59 JST — Added request-setup ordering guardrails for the provider-owned unscoped migration and preserved ordering-sensitive scoped call sites.
-- 2026-08-28 15:36 JST — Added the guardrail that pre-request raw-auth semantics must remain distinct from scoped resolved request auth, and documented provider-owned semantic projection as a transitional extraction seam.
