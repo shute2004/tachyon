@@ -4,6 +4,8 @@ use crate::PluginGitMode;
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
 use crate::installed_marketplaces::installed_marketplace_roots_from_layer_stack;
 use crate::is_openai_curated_marketplace_name;
+use crate::loaded_cache_metrics;
+use crate::loaded_cache_metrics::RequestOutcome;
 use crate::loader::PluginHookLoadOutcome;
 use crate::loader::TargetCuratedMarketplace;
 use crate::loader::configured_curated_plugin_ids_from_codex_home;
@@ -687,11 +689,6 @@ impl PluginsManager {
         }
     }
 
-    pub async fn plugins_for_config(&self, config: &PluginsConfigInput) -> PluginLoadOutcome {
-        self.plugins_for_config_with_force_reload(config, /*force_reload*/ false)
-            .await
-    }
-
     /// Returns skill snapshots parsed while loading the matching plugin cache entry.
     pub fn plugin_skill_snapshots_for_config(
         &self,
@@ -720,15 +717,10 @@ impl PluginsManager {
         skip_all,
         fields(
             otel.name = "plugins_for_config",
-            force_reload,
             plugins_enabled = config.plugins_enabled
         )
     )]
-    pub(crate) async fn plugins_for_config_with_force_reload(
-        &self,
-        config: &PluginsConfigInput,
-        force_reload: bool,
-    ) -> PluginLoadOutcome {
+    pub async fn plugins_for_config(&self, config: &PluginsConfigInput) -> PluginLoadOutcome {
         if !config.plugins_enabled {
             return PluginLoadOutcome::default();
         }
@@ -738,6 +730,7 @@ impl PluginsManager {
         // same-account revisions also cover ordinary token refreshes, where returning no plugins
         // is wrong, so retry those instead.
         let auth_change_receiver = self.auth_manager.auth_change_receiver();
+        let mut cache_outcome = RequestOutcome::Hit;
 
         loop {
             let auth_revision = *auth_change_receiver.borrow();
@@ -751,9 +744,10 @@ impl PluginsManager {
                 remote_global_catalog_active,
                 auth_identity.clone(),
             );
-            if !force_reload && let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
+            if let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
                 let outcome = self.resolve_loaded_plugins_for_auth(plugins, auth_mode);
                 if *auth_change_receiver.borrow() == auth_revision {
+                    cache_outcome.record();
                     return outcome;
                 }
                 if !self.remote_installed_plugins_auth_is_current(&auth_identity) {
@@ -762,7 +756,16 @@ impl PluginsManager {
                 continue;
             }
 
-            let Ok(_load_permit) = self.loaded_plugins_load_semaphore.acquire().await else {
+            if matches!(cache_outcome, RequestOutcome::Hit) {
+                cache_outcome = RequestOutcome::HitAfterWait;
+            }
+            let wait_started = Instant::now();
+            let load_permit = self.loaded_plugins_load_semaphore.acquire().await;
+            loaded_cache_metrics::record_duration(
+                loaded_cache_metrics::WAIT_DURATION,
+                wait_started.elapsed(),
+            );
+            let Ok(_load_permit) = load_permit else {
                 warn!("plugin load semaphore closed");
                 return PluginLoadOutcome::default();
             };
@@ -772,9 +775,10 @@ impl PluginsManager {
                 }
                 continue;
             }
-            if !force_reload && let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
+            if let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
                 let outcome = self.resolve_loaded_plugins_for_auth(plugins, auth_mode);
                 if *auth_change_receiver.borrow() == auth_revision {
+                    cache_outcome.record();
                     return outcome;
                 }
                 if !self.remote_installed_plugins_auth_is_current(&auth_identity) {
@@ -784,6 +788,8 @@ impl PluginsManager {
             }
             let cache_generation = self.loaded_plugins_cache_generation();
             let plugin_skill_snapshots = new_plugin_skill_snapshots();
+            cache_outcome = RequestOutcome::Load;
+            let load_started = Instant::now();
             let plugins = load_plugins_from_layer_stack(
                 &config.config_layer_stack,
                 self.remote_installed_plugins_snapshot(),
@@ -794,6 +800,10 @@ impl PluginsManager {
                 self.skill_root_loader.as_ref(),
             )
             .await;
+            loaded_cache_metrics::record_duration(
+                loaded_cache_metrics::LOAD_DURATION,
+                load_started.elapsed(),
+            );
             if *auth_change_receiver.borrow() != auth_revision {
                 if !self.remote_installed_plugins_auth_is_current(&auth_identity) {
                     return PluginLoadOutcome::default();
@@ -809,6 +819,7 @@ impl PluginsManager {
             );
             let outcome = self.resolve_loaded_plugins_for_auth(plugins, auth_mode);
             if *auth_change_receiver.borrow() == auth_revision {
+                cache_outcome.record();
                 return outcome;
             }
             if !self.remote_installed_plugins_auth_is_current(&auth_identity) {
@@ -871,6 +882,8 @@ impl PluginsManager {
         };
         cache.generation = cache.generation.wrapping_add(1);
         cache.entries.clear();
+        drop(cache);
+        loaded_cache_metrics::record_event("clear");
     }
 
     fn clear_caches_after_marketplace_source_refresh(
@@ -934,14 +947,20 @@ impl PluginsManager {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
         };
-        if cache.generation == generation {
-            cache.entries.retain(|entry| entry.key != key);
-            cache.entries.push_front(LoadedPluginsCacheEntry {
-                key,
-                plugins,
-                plugin_skill_snapshots,
-            });
-            cache.entries.truncate(LOADED_PLUGINS_CACHE_CAPACITY);
+        if cache.generation != generation {
+            return;
+        }
+        cache.entries.retain(|entry| entry.key != key);
+        cache.entries.push_front(LoadedPluginsCacheEntry {
+            key,
+            plugins,
+            plugin_skill_snapshots,
+        });
+        let evicted = cache.entries.len() > LOADED_PLUGINS_CACHE_CAPACITY;
+        cache.entries.truncate(LOADED_PLUGINS_CACHE_CAPACITY);
+        drop(cache);
+        if evicted {
+            loaded_cache_metrics::record_event("capacity_eviction");
         }
     }
 
