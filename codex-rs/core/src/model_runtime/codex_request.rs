@@ -16,6 +16,8 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_tools::FreeformTool;
 use codex_tools::FreeformToolFormat;
@@ -37,6 +39,7 @@ use crate::model_runtime::ir::ModelMessagePhase;
 use crate::model_runtime::ir::ModelMessageRole;
 use crate::model_runtime::ir::ModelOutputConfig;
 use crate::model_runtime::ir::ModelOutputFormat;
+use crate::model_runtime::ir::ModelReasoning;
 use crate::model_runtime::ir::ModelRequest;
 use crate::model_runtime::ir::ModelToolAvailability;
 use crate::model_runtime::ir::ModelToolCall;
@@ -177,6 +180,24 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
                 .map(|content| model_content_from_response(content, role))
                 .collect::<Option<Vec<_>>>()?,
         })),
+        ResponseItem::Reasoning {
+            summary, content, ..
+        } => Some(ModelInputItem::Reasoning(ModelReasoning {
+            summary: summary
+                .iter()
+                .map(|summary| match summary {
+                    ReasoningItemReasoningSummary::SummaryText { text } => text.clone(),
+                })
+                .collect(),
+            content: content
+                .iter()
+                .flatten()
+                .map(|content| match content {
+                    ReasoningItemContent::ReasoningText { text }
+                    | ReasoningItemContent::Text { text } => text.clone(),
+                })
+                .collect(),
+        })),
         ResponseItem::FunctionCall {
             name,
             namespace,
@@ -226,14 +247,12 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
             content: model_tool_result_content(output)?,
             is_error: output.success == Some(false),
         })),
-        // Reasoning/encrypted continuation, discovery-result payloads, local shell, built-in
-        // provider tools, compaction, agent messaging, and provider-generated compatibility items
-        // stay on the explicit legacy path. In particular, ToolSearchOutput currently contains
-        // Responses-shaped serialized tool declarations; C2 must not carry them through generic
-        // ModelToolResultContent::Json until a provider-neutral discovery-result representation
-        // exists.
+        // Discovery-result payloads, local shell, built-in provider tools, compaction, agent
+        // messaging, and provider-generated compatibility items stay on the explicit legacy path.
+        // In particular, ToolSearchOutput currently contains Responses-shaped serialized tool
+        // declarations; C2 must not carry them through generic ModelToolResultContent::Json until a
+        // provider-neutral discovery-result representation exists.
         ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Reasoning { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::ToolSearchCall { .. }
@@ -282,6 +301,20 @@ fn response_item_from_model_input(
                 internal_chat_message_metadata_passthrough:
                     internal_chat_message_metadata_passthrough.clone(),
             })
+        }
+        (ModelInputItem::Reasoning(reasoning), legacy @ ResponseItem::Reasoning { .. }) => {
+            let Some(ModelInputItem::Reasoning(expected)) = model_input_item_from_response(legacy)
+            else {
+                return Err(invalid_request(
+                    "reasoning migration template is no longer canonicalizable",
+                ));
+            };
+            if &expected != reasoning {
+                return Err(invalid_request(
+                    "canonical reasoning no longer matches the migration template",
+                ));
+            }
+            Ok(legacy.clone())
         }
         (
             ModelInputItem::ToolCall(call),

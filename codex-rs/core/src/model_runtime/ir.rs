@@ -45,8 +45,19 @@ impl Default for ModelRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelInputItem {
     Message(ModelMessage),
+    Reasoning(ModelReasoning),
     ToolCall(ModelToolCall),
     ToolResult(ModelToolResult),
+}
+
+/// Provider-neutral reasoning semantics retained in request-side conversation history.
+///
+/// Opaque or encrypted continuation state is backend-private and is not represented in the
+/// canonical model IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelReasoning {
+    pub summary: Vec<String>,
+    pub content: Vec<String>,
 }
 
 /// A role-bearing model message.
