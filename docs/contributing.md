@@ -1,39 +1,64 @@
 ## Contributing
 
-We welcome community contributions through the [openai/codex issue tracker](https://github.com/openai/codex/issues). Bug reports, root-cause analyses, and feature requests help us understand what matters most and improve Codex.
+Tachyon is under active extraction from the OpenAI Codex codebase. The repository is public, but its long-term contribution and governance model is not yet considered stable.
 
-**We do not accept external code contributions or pull requests.**
+This document describes the expectations for changes made in the repository today. It does not promise that every proposed external change will be accepted while the kernel boundary is still moving.
 
-### Why we do not accept external code contributions
+### Before changing code
 
-Effective changes to Codex require architectural context, an understanding of system-level constraints, and visibility into the project's roadmap. External pull requests often focus on issues that are lower priority, affect a small number of users, or need substantial changes to fit the broader system. Reviewing and iterating on those changes can take more time than implementing a fix directly, diverting attention from higher-priority work.
+Read the project architecture first:
 
-Community expertise is most valuable when shared through detailed bug reports, reproduction steps, logs, root-cause analysis, and design discussions in issues. Understanding the problem, identifying the right solution, and prioritizing the work are typically the hard parts; implementation is comparatively straightforward with the help of Codex itself.
+- [`TACHYON.md`](../TACHYON.md)
+- [`docs/tachyon/architecture.md`](tachyon/architecture.md)
+- [`docs/tachyon/model-ir.md`](tachyon/model-ir.md) when changing model-runtime request or event semantics
 
-For these reasons, we focus community contributions on issue reports, analysis, and feedback, while the Codex team handles code changes.
+Tachyon is an extraction project rather than a clean-room rewrite. Changes should preserve mature harness behavior unless the change is intentionally modifying that behavior.
 
-### Reporting bugs
+### Scope changes narrowly
 
-Before opening a new issue, search the issue tracker to see whether the problem has already been reported. If it has, add any new information to the existing issue.
+Prefer focused changes that move one responsibility behind a Tachyon-owned boundary or fix one concrete behavior.
 
-When reporting a bug, include as much relevant detail as possible:
+In particular:
 
-- Clear, detailed steps to reproduce the problem.
-- Expected and actual behavior.
-- Your Codex version, operating system, and other relevant environment details.
-- Logs, error messages, or other diagnostic information, with sensitive information removed.
-- Root-cause analysis, technical observations, or potential approaches to a fix, if available.
+- do not remove a mature Codex capability merely because its current implementation is OpenAI-specific;
+- distinguish reusable harness semantics from provider/product wire details;
+- keep provider-specific protocol, authentication, endpoint, transport, and compatibility behavior below the corresponding boundary;
+- avoid introducing speculative generic abstractions before the current code provides evidence for their semantics;
+- avoid unrelated cleanup in architecture-migration changes.
 
-### Requesting features
+When an existing compatibility path is intentionally retained, make that explicit rather than forcing a provider-specific shape into a generic Tachyon type.
 
-Open a feature request in the issue tracker, or upvote an existing request that describes the same need. Explain your use case, the behavior you would like, and why it would improve your workflow.
+### Validate the affected workspace
 
-### Community values
+The current Rust workspace remains under `codex-rs/` during extraction.
 
-- **Be kind and inclusive.** Treat others with respect; we follow the [Contributor Covenant](https://www.contributor-covenant.org/).
-- **Assume good intent.** Written communication is hard, so err on the side of generosity.
-- **Share what you learn.** Reproduction details, logs, and analysis help the entire community.
+Start validation from the repository root and use the repository-pinned Rust toolchain:
+
+```shell
+cd codex-rs
+cargo check -p codex-core
+```
+
+Add focused tests for the behavior or boundary being changed. Broader checks should be proportional to the affected dependency surface rather than added speculatively.
+
+The existing CI configuration is inherited from the Codex-derived workspace and remains part of the migration surface. Some jobs cover the full workspace rather than only Tachyon-specific code.
+
+### Architecture-sensitive changes
+
+Changes to the following areas should be reviewed as architecture changes rather than only as local refactors:
+
+- model-runtime interfaces or canonical IR
+- provider / protocol / route / endpoint / auth / transport ownership
+- tool-call semantic boundaries
+- agent-loop ownership
+- context/history/compaction or persistence boundaries
+- host-facing command/event/query/snapshot contracts
+- removal of Codex/OpenAI implementation that may contain reusable harness capability
+
+For those changes, review should consider the exact final diff and current base, because a review performed before a material rebase or follow-up change can become stale.
 
 ### Security
 
-If you discover a security vulnerability, follow the [security policy](../SECURITY.md) instead of reporting it in a public issue.
+Do not publish credentials, access tokens, private keys, sensitive logs, or vulnerability details in a public pull request.
+
+For security-sensitive reports, follow the repository's [security policy](../SECURITY.md).
