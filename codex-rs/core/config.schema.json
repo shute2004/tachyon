@@ -817,6 +817,9 @@
             "plugins": {
               "type": "boolean"
             },
+            "powershell_shell_version": {
+              "type": "boolean"
+            },
             "prevent_idle_sleep": {
               "type": "boolean"
             },
@@ -5837,6 +5840,9 @@
           "type": "boolean"
         },
         "plugins": {
+          "type": "boolean"
+        },
+        "powershell_shell_version": {
           "type": "boolean"
         },
         "prevent_idle_sleep": {
