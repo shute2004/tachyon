@@ -30,6 +30,8 @@ use crate::tools::tool_dispatch_trace::ToolDispatchTrace;
 use crate::util::error_or_panic;
 use codex_analytics::ControlToolCallStatus;
 use codex_extension_api::ToolCallOutcome;
+use codex_history::CodexHarnessMetadata;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::parse_command::ParsedCommand;
@@ -195,7 +197,7 @@ pub(crate) struct AnyToolResult {
 }
 
 impl AnyToolResult {
-    pub(crate) fn into_response(self) -> ResponseInputItem {
+    pub(crate) fn into_response(self) -> ResponseItemEnvelope {
         let Self {
             call_id,
             payload,
@@ -203,7 +205,15 @@ impl AnyToolResult {
             ..
         } = self;
 
-        response_item_for_tool_output(result.as_ref(), &call_id, &payload)
+        ResponseItemEnvelope {
+            item: response_item_for_tool_output(result.as_ref(), &call_id, &payload).into(),
+            metadata: result
+                .fallback_token_limit_override()
+                .map(|limit| CodexHarnessMetadata {
+                    fallback_token_limit_override: Some(limit),
+                    ..Default::default()
+                }),
+        }
     }
 
     pub(crate) fn code_mode_result(self) -> serde_json::Value {
@@ -239,6 +249,10 @@ impl ToolOutput for PostToolUseFeedbackOutput {
 
     fn success_for_logging(&self) -> bool {
         self.original.success_for_logging()
+    }
+
+    fn fallback_token_limit_override(&self) -> Option<usize> {
+        self.original.fallback_token_limit_override()
     }
 
     fn to_tool_result(&self) -> Option<codex_tools::ToolResult> {

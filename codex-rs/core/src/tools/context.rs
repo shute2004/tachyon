@@ -1,4 +1,3 @@
-use crate::context_manager::truncate_function_output_payload;
 use crate::original_image_detail::sanitize_original_image_detail;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -24,9 +23,11 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolResult;
 use codex_tools::default_namespace_description;
+use codex_utils_audio::estimate_audio_token_count;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
+use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::truncate_text;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -130,6 +131,10 @@ impl ToolOutput for McpToolOutput {
         self.result.success()
     }
 
+    fn fallback_token_limit_override(&self) -> Option<usize> {
+        Some((self.truncation_policy * 1.2).token_budget())
+    }
+
     fn to_tool_result(&self) -> Option<ToolResult> {
         ToolResult::from_function_call_output(&self.response_payload())
     }
@@ -183,7 +188,12 @@ impl McpToolOutput {
         //
         // The text is serialized again inside the Responses payload, so allow
         // a small buffer for JSON escaping and wrapper overhead.
-        truncate_function_output_payload(&payload, self.truncation_policy * 1.2)
+        truncate_function_output_payload(
+            &mut payload,
+            self.truncation_policy * 1.2,
+            estimate_audio_token_count,
+        );
+        payload
     }
 }
 

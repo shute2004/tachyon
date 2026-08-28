@@ -1983,6 +1983,7 @@ async fn persist_custom_mcp_tool_approval_writes_tool_override() {
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains("[mcp_servers.docs.tools.search]"));
@@ -2200,6 +2201,7 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config_for_custom_serve
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert_eq!(mcp_tool_approval_is_remembered(&session, &key).await, true);
@@ -2249,6 +2251,7 @@ enabled = true
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains(r#"[plugins."sample@test".mcp_servers.sample.tools.search]"#));
@@ -2304,6 +2307,7 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains("[mcp_servers.docs.tools.search]"));
