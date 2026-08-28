@@ -1,3 +1,4 @@
+mod authorization;
 mod config;
 mod extension;
 mod review_evidence;
