@@ -211,27 +211,47 @@ impl ModelTurnRuntime {
     }
 
     /// Runs migration-stage remote compaction without exposing provider-private turn-affinity
-    /// state to harness call sites.
+    /// state to harness call sites. Representable model-visible request semantics cross the
+    /// canonical `ModelRequest` boundary; unsupported Codex/Responses-only shapes retain the
+    /// existing legacy path unchanged.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn compact_conversation_history(
+    pub(crate) async fn compact_conversation_history_migrating_request(
         &self,
-        prompt: &Prompt,
+        request: Option<&ModelRequest>,
+        legacy_prompt: &Prompt,
         model_info: &ModelInfo,
         settings: CompactConversationRequestSettings,
         session_telemetry: &SessionTelemetry,
         compaction_trace: &CompactionTraceContext,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<Vec<ResponseItem>> {
-        self.adapter
-            .compact_conversation_history(
-                prompt,
-                model_info,
-                settings,
-                session_telemetry,
-                compaction_trace,
-                responses_metadata,
-            )
-            .await
+        match request {
+            Some(request) => {
+                self.adapter
+                    .compact_model_request(
+                        request,
+                        legacy_prompt,
+                        model_info,
+                        settings,
+                        session_telemetry,
+                        compaction_trace,
+                        responses_metadata,
+                    )
+                    .await
+            }
+            None => {
+                self.adapter
+                    .compact_conversation_history(
+                        legacy_prompt,
+                        model_info,
+                        settings,
+                        session_telemetry,
+                        compaction_trace,
+                        responses_metadata,
+                    )
+                    .await
+            }
+        }
     }
 
     /// Returns a backend-provided retry UX hint without tying it to runtime preparation semantics.

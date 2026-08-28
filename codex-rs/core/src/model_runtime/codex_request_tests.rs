@@ -421,6 +421,14 @@ fn function_tool_output_schema_stays_on_legacy_path_until_ir_supports_it() {
 }
 
 #[test]
+fn access_program_state_stays_on_legacy_path() {
+    let mut prompt = prompt_with(Vec::new(), Vec::new());
+    prompt.cyber_access_program = Some(codex_protocol::turn_input::CyberAccessProgram::Standard);
+
+    assert_eq!(try_model_request_from_prompt(&prompt), None);
+}
+
+#[test]
 fn unconstrained_freeform_input_is_rejected_by_current_codex_adapter() {
     let prompt = prompt_with(Vec::new(), Vec::new());
     let mut request = try_model_request_from_prompt(&prompt).expect("empty prompt is canonical");
