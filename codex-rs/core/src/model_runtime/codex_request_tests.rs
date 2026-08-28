@@ -115,10 +115,7 @@ fn reasoning_round_trip_preserves_provider_private_continuation() {
     assert_eq!(
         request.input,
         vec![ModelInputItem::Reasoning(ModelReasoning {
-            summary: vec![
-                "first summary".to_string(),
-                "second summary".to_string(),
-            ],
+            summary: vec!["first summary".to_string(), "second summary".to_string(),],
             content: vec![
                 "internal reasoning".to_string(),
                 "exposed reasoning".to_string(),
