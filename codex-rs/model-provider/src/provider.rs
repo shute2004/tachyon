@@ -20,6 +20,7 @@ use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
 use http::HeaderValue;
@@ -92,6 +93,37 @@ pub enum ProviderUnauthorizedRecovery {
     NotConfigured,
     /// The provider recovered its authentication state and the request can be retried.
     Recovered,
+}
+
+/// Semantic metadata projected from the provider's current auth snapshot.
+///
+/// This is a transitional provider-owned projection for callers that need auth
+/// behavior without access to concrete `CodexAuth` credentials. It describes
+/// the pre-request-setup auth snapshot and is intentionally distinct from
+/// [`ResolvedProviderAuth`], which may represent scoped request credentials.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderAuthMetadata {
+    auth_mode: Option<AuthMode>,
+}
+
+impl ProviderAuthMetadata {
+    fn from_auth(auth: Option<&CodexAuth>) -> Self {
+        Self {
+            auth_mode: auth.map(CodexAuth::auth_mode),
+        }
+    }
+
+    pub fn auth_mode(self) -> Option<AuthMode> {
+        self.auth_mode
+    }
+
+    pub fn uses_codex_backend(self) -> bool {
+        self.auth_mode.is_some_and(AuthMode::uses_codex_backend)
+    }
+
+    pub fn is_chatgpt_auth(self) -> bool {
+        self.auth_mode.is_some_and(AuthMode::has_chatgpt_account)
+    }
 }
 
 /// Low-level API provider configuration and request authentication.
@@ -249,6 +281,18 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
 
     /// Returns the current provider-scoped auth value, if one is configured.
     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>>;
+
+    /// Returns semantic metadata projected from the current provider auth snapshot.
+    ///
+    /// This intentionally resolves independently of request-scoped authentication
+    /// so callers preserve the same pre-setup auth semantics they historically
+    /// derived from `CodexAuth` directly.
+    fn auth_metadata(&self) -> ModelProviderFuture<'_, ProviderAuthMetadata> {
+        Box::pin(async move {
+            let auth = self.auth().await;
+            ProviderAuthMetadata::from_auth(auth.as_ref())
+        })
+    }
 
     /// Returns the current app-visible account state for this provider.
     fn account_state(&self) -> ProviderAccountResult;
@@ -973,6 +1017,40 @@ mod tests {
                 .expect("runtime base URL should resolve"),
             Some("https://example.test/v1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn auth_metadata_projects_current_auth_semantics() {
+        let provider = create_model_provider(
+            provider_for("https://example.test/v1".to_string()),
+            /*auth_manager*/ None,
+        );
+        let metadata = provider.auth_metadata().await;
+        assert_eq!(metadata.auth_mode(), None);
+        assert!(!metadata.uses_codex_backend());
+        assert!(!metadata.is_chatgpt_auth());
+
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "openai-api-key",
+            ))),
+        );
+        let metadata = provider.auth_metadata().await;
+        assert_eq!(metadata.auth_mode(), Some(AuthMode::ApiKey));
+        assert!(!metadata.uses_codex_backend());
+        assert!(!metadata.is_chatgpt_auth());
+
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+        );
+        let metadata = provider.auth_metadata().await;
+        assert_eq!(metadata.auth_mode(), Some(AuthMode::Chatgpt));
+        assert!(metadata.uses_codex_backend());
+        assert!(metadata.is_chatgpt_auth());
     }
 
     #[tokio::test]
