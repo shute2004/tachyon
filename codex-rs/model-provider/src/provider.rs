@@ -179,6 +179,17 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns the configured provider metadata.
     fn info(&self) -> &ModelProviderInfo;
 
+    /// Returns the runtime base URL as a status/presentation projection.
+    ///
+    /// This is not the request deployment. Implementations that resolve a provider-specific
+    /// runtime URL may override this method, while request execution remains owned by
+    /// [`ModelProvider::api_deployment`].
+    fn runtime_base_url(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<Option<String>>> {
+        Box::pin(async { Ok(self.info().base_url.clone()) })
+    }
+
     /// Returns the provider-owned capability upper bounds.
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
@@ -932,6 +943,35 @@ mod tests {
                 .expect("API deployment should resolve")
                 .base_url,
             "https://example.test/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_provider_runtime_base_url_uses_configured_base_url() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider
+                .runtime_base_url()
+                .await
+                .expect("runtime base URL should resolve"),
+            None
+        );
+
+        let provider = create_model_provider(
+            provider_for("https://example.test/v1".to_string()),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            provider
+                .runtime_base_url()
+                .await
+                .expect("runtime base URL should resolve"),
+            Some("https://example.test/v1".to_string())
         );
     }
 

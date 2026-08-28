@@ -187,6 +187,10 @@ impl ModelProvider for AmazonBedrockModelProvider {
         &self.info
     }
 
+    fn runtime_base_url(&self) -> ModelProviderFuture<'_, Result<Option<String>>> {
+        Box::pin(AmazonBedrockModelProvider::runtime_base_url(self))
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             namespace_tools: true,
@@ -393,6 +397,26 @@ mod tests {
                 .get("x-amzn-mantle-client-agent")
                 .and_then(|value| value.to_str().ok()),
             Some("codex")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_base_url_trait_dispatch_uses_bedrock_runtime_resolution() {
+        let mut provider_info = command_auth_provider(/*base_url*/ None);
+        provider_info.aws = Some(ModelProviderAwsAuthInfo {
+            profile: None,
+            region: Some("us-west-2".to_string()),
+            auth_refresh: None,
+        });
+        let provider = AmazonBedrockModelProvider::new(provider_info, /*auth_manager*/ None);
+        let provider: &dyn ModelProvider = &provider;
+
+        assert_eq!(
+            provider
+                .runtime_base_url()
+                .await
+                .expect("Bedrock runtime base URL should resolve"),
+            Some("https://bedrock-mantle.us-west-2.api.aws/openai/v1".to_string())
         );
     }
 
