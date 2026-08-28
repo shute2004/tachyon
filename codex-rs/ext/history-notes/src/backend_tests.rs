@@ -1,6 +1,7 @@
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -19,6 +20,66 @@ use wiremock::matchers::path;
 use super::ENCRYPTED_TOOL_ARGUMENTS_HEADER;
 use super::HistoryNotesBackend;
 use super::TOOL_OUTPUT_TRUNCATION_POLICY_HEADER;
+
+#[tokio::test]
+async fn reports_provider_resolution_error_before_auth_resolution() {
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
+            api_key: "bedrock-api-key-test".to_string(),
+            region: "us-west-1".to_string(),
+        }));
+    let backend = HistoryNotesBackend::new(create_model_provider(
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+        Some(auth_manager),
+    ));
+
+    let error = backend
+        .call(
+            "alpha/notes/v2/read_file",
+            "session-123",
+            "/root",
+            json!({"path": "notes.md"}),
+            TruncationPolicy::Bytes(1024),
+        )
+        .await
+        .expect_err("unsupported Bedrock region should fail provider resolution");
+
+    assert_eq!(
+        error,
+        "History backend provider could not be resolved: Fatal error: Amazon Bedrock does not support region `us-west-1`"
+    );
+}
+
+#[tokio::test]
+async fn reports_auth_resolution_error_after_provider_resolution() {
+    let provider_info =
+        ModelProviderInfo::create_openai_provider(Some("https://example.test/v1".to_string()));
+    let backend = HistoryNotesBackend::new(create_model_provider(
+        provider_info,
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
+                api_key: "bedrock-api-key-test".to_string(),
+                region: "us-east-1".to_string(),
+            }),
+        )),
+    ));
+
+    let error = backend
+        .call(
+            "alpha/notes/v2/read_file",
+            "session-123",
+            "/root",
+            json!({"path": "notes.md"}),
+            TruncationPolicy::Bytes(1024),
+        )
+        .await
+        .expect_err("Bedrock auth should fail for the OpenAI provider");
+
+    assert_eq!(
+        error,
+        "History backend auth could not be resolved: unsupported operation: Bedrock API key auth is only supported by the Amazon Bedrock model provider"
+    );
+}
 
 #[tokio::test]
 async fn routes_through_codex_backend_and_injects_trusted_session_agent_context() {

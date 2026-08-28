@@ -104,6 +104,31 @@ pub struct ProviderApiRequestSetup {
     pub resolved_auth: ResolvedProviderAuth,
 }
 
+/// Identifies which stage failed while resolving an unscoped request setup.
+#[derive(Debug)]
+pub enum ProviderApiRequestSetupError {
+    /// Provider/deployment resolution failed.
+    Provider(CodexErr),
+    /// Authentication resolution failed after provider resolution.
+    Auth(CodexErr),
+}
+
+impl fmt::Display for ProviderApiRequestSetupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) | Self::Auth(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ProviderApiRequestSetupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) | Self::Auth(error) => Some(error),
+        }
+    }
+}
+
 /// Error returned when a provider cannot construct its app-visible account state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAccountError {
@@ -280,6 +305,31 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         Box::pin(async move {
             let api_provider = self.api_provider().await?;
             let resolved_auth = ResolvedProviderAuth::new(self.api_auth().await?);
+            Ok(ProviderApiRequestSetup {
+                api_provider,
+                resolved_auth,
+            })
+        })
+    }
+
+    /// Resolves low-level API configuration and unscoped request authentication while
+    /// preserving which setup stage returned an error.
+    fn api_request_setup_with_stage_errors(
+        &self,
+    ) -> ModelProviderFuture<
+        '_,
+        std::result::Result<ProviderApiRequestSetup, ProviderApiRequestSetupError>,
+    > {
+        Box::pin(async move {
+            let api_provider = self
+                .api_provider()
+                .await
+                .map_err(ProviderApiRequestSetupError::Provider)?;
+            let resolved_auth = ResolvedProviderAuth::new(
+                self.api_auth()
+                    .await
+                    .map_err(ProviderApiRequestSetupError::Auth)?,
+            );
             Ok(ProviderApiRequestSetup {
                 api_provider,
                 resolved_auth,
@@ -925,6 +975,89 @@ mod tests {
             .await
             .expect("request setup should resolve");
 
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider", "auth"]
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_unscoped_request_setup_resolves_provider_before_auth_on_success() {
+        let (provider, calls) = recording_provider(SetupFailure::None);
+
+        provider
+            .api_request_setup_with_stage_errors()
+            .await
+            .expect("request setup should resolve");
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider", "auth"]
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_unscoped_request_setup_reports_provider_error_and_skips_auth() {
+        let (provider, calls) = recording_provider(SetupFailure::Provider);
+
+        let error = match provider.api_request_setup_with_stage_errors().await {
+            Ok(_) => panic!("provider failure should stop request setup"),
+            Err(error) => error,
+        };
+
+        match error {
+            ProviderApiRequestSetupError::Provider(error) => {
+                assert!(matches!(
+                    error.details(),
+                    codex_protocol::error::CodexErrorDetails::Stream(message)
+                        if message == "provider setup failed"
+                ));
+                assert_eq!(
+                    error.to_string(),
+                    "stream disconnected before completion: provider setup failed"
+                );
+            }
+            ProviderApiRequestSetupError::Auth(error) => {
+                panic!("unexpected auth-stage error: {error}");
+            }
+        }
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["provider"]
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_unscoped_request_setup_reports_auth_error_after_provider() {
+        let (provider, calls) = recording_provider(SetupFailure::Auth);
+
+        let error = match provider.api_request_setup_with_stage_errors().await {
+            Ok(_) => panic!("auth failure should stop request setup"),
+            Err(error) => error,
+        };
+
+        match error {
+            ProviderApiRequestSetupError::Provider(error) => {
+                panic!("unexpected provider-stage error: {error}");
+            }
+            ProviderApiRequestSetupError::Auth(error) => {
+                assert!(matches!(
+                    error.details(),
+                    codex_protocol::error::CodexErrorDetails::Stream(message)
+                        if message == "auth setup failed"
+                ));
+                assert_eq!(
+                    error.to_string(),
+                    "stream disconnected before completion: auth setup failed"
+                );
+            }
+        }
         assert_eq!(
             *calls
                 .lock()
