@@ -26,6 +26,7 @@ pub use provider::ProviderAccountState;
 pub use provider::ProviderApiRequestSetup;
 pub use provider::ProviderApiRequestSetupError;
 pub use provider::ProviderAuthMetadata;
+pub use provider::ProviderAuthRecoveryMessages;
 pub use provider::ProviderCapabilities;
 pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;
