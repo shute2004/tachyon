@@ -253,7 +253,7 @@ fn provider_web_search_tool_stays_on_legacy_path() {
 }
 
 #[test]
-fn tool_search_output_stays_on_legacy_path_until_discovery_result_ir_exists() {
+fn tool_search_output_round_trips_through_discovery_result_ir() {
     let prompt = prompt_with(
         vec![ResponseItem::ToolSearchOutput {
             id: None,
@@ -276,7 +276,22 @@ fn tool_search_output_stays_on_legacy_path_until_discovery_result_ir_exists() {
         Vec::new(),
     );
 
-    assert_eq!(try_model_request_from_prompt(&prompt), None);
+    let request = assert_prompt_request_semantics_round_trip(&prompt);
+    let [ModelInputItem::ToolResult(result)] = request.input.as_slice() else {
+        panic!("expected one canonical tool result");
+    };
+    assert_eq!(result.call_id, ModelToolCallId("call-search-1".to_string()));
+    let [ModelToolResultContent::DiscoveredTools(tools)] = result.content.as_slice() else {
+        panic!("expected semantic discovered-tool content");
+    };
+    assert!(matches!(
+        tools.as_slice(),
+        [ModelToolSpec::Function {
+            name,
+            purpose: ModelToolPurpose::Invocation,
+            ..
+        }] if name == "discovered_tool"
+    ));
 }
 
 #[test]

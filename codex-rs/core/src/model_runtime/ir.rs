@@ -209,6 +209,9 @@ pub struct ModelToolResult {
 pub enum ModelToolResultContent {
     Text(String),
     Json(Value),
+    /// Tool declarations exposed by a harness-owned discovery result. The declarations remain
+    /// semantic `ModelToolSpec`s rather than provider-shaped serialized tool JSON.
+    DiscoveredTools(Vec<ModelToolSpec>),
     Image {
         source: ModelMediaSource,
         detail: Option<ModelImageDetail>,

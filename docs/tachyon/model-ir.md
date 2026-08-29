@@ -38,6 +38,8 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - immediate versus deferred tool availability and semantic tool-discovery purpose;
 - structured or textual tool-call input;
 - text/JSON/media tool results;
+- tool-discovery results that expose semantic tool declarations without carrying provider-shaped
+  serialized tool JSON;
 - text and JSON-schema output contracts;
 - streamed output-item lifecycle with a partial start header distinct from a completed item;
 - text, tool-input, and reasoning deltas;
@@ -56,8 +58,9 @@ Current Codex behavior provides three useful examples:
   free-form input may be unconstrained text or constrained by a grammar, represented by
   `ModelFreeformInputFormat`; the Responses `type` field itself is not canonical.
 - Codex uses Responses `defer_loading` and a `tool_search` wire tool to implement client-side
-  deferred tool discovery. The canonical capability is represented by `ModelToolAvailability` and
-  `ModelToolPurpose`, not by a Responses-shaped `ToolSearch` variant.
+  deferred tool discovery. The canonical capability is represented by `ModelToolAvailability`,
+  `ModelToolPurpose`, and semantic discovered-tool declarations in `ModelToolResultContent`, not by
+  Responses-shaped `ToolSearch` / `ToolSearchOutput` variants or serialized provider tool JSON.
 - Responses assistant messages may carry `Commentary` or `FinalAnswer`. Tachyon keeps the
   harness-significant distinction as `ModelMessagePhase::{Commentary, Final}` while allowing `None`
   for providers that do not expose it.
