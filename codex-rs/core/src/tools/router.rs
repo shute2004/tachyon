@@ -1,4 +1,6 @@
 use crate::function_tool::FunctionCallError;
+use crate::model_runtime::ir::ModelToolCall;
+use crate::model_runtime::ir::ModelToolInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 #[cfg(test)]
@@ -144,6 +146,39 @@ impl ToolRouter {
         self.registry.tool(&call.tool_name)
     }
 
+    /// Build a mature Tool Runtime call from provider-neutral invocation semantics.
+    ///
+    /// `encrypted_function_args` is a migration-only Codex decoration used by the existing
+    /// collaboration plaintext-source behavior. It is intentionally not part of `ModelToolCall`.
+    pub(crate) fn build_model_invocation_call(
+        call: ModelToolCall,
+        encrypted_function_args: Option<Vec<String>>,
+    ) -> ToolCall {
+        let ModelToolCall {
+            call_id,
+            namespace,
+            name,
+            input,
+        } = call;
+        let tool_name = ToolName::new(namespace, name).with_default_namespace();
+        match input {
+            ModelToolInput::Json(arguments) => ToolCall {
+                tool_name,
+                call_id: call_id.0,
+                payload: ToolPayload::Function {
+                    arguments: arguments.to_string(),
+                },
+                encrypted_function_args,
+            },
+            ModelToolInput::Text(input) => ToolCall {
+                tool_name,
+                call_id: call_id.0,
+                payload: ToolPayload::Custom { input },
+                encrypted_function_args: None,
+            },
+        }
+    }
+
     #[instrument(level = "trace", skip_all, err)]
     pub fn build_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
         match item {
@@ -155,13 +190,36 @@ impl ToolRouter {
                 call_id,
                 ..
             } => {
-                let tool_name = ToolName::new(namespace, name).with_default_namespace();
-                Ok(Some(ToolCall {
-                    tool_name,
-                    call_id,
-                    payload: ToolPayload::Function { arguments },
-                    encrypted_function_args,
-                }))
+                // Representable function calls enter the mature Tool Runtime through the canonical
+                // model-call vocabulary. Invalid JSON stays on the legacy path so current error
+                // handling remains unchanged until the stream consumer is fully canonicalized.
+                let Ok(input) = serde_json::from_str(&arguments) else {
+                    let tool_name = ToolName::new(namespace, name).with_default_namespace();
+                    return Ok(Some(ToolCall {
+                        tool_name,
+                        call_id,
+                        payload: ToolPayload::Function { arguments },
+                        encrypted_function_args,
+                    }));
+                };
+                let model_call = ModelToolCall {
+                    call_id: crate::model_runtime::ir::ModelToolCallId(call_id),
+                    namespace,
+                    name,
+                    input: ModelToolInput::Json(input),
+                };
+                let mut call = Self::build_model_invocation_call(model_call, encrypted_function_args);
+                // Preserve the exact provider-authored JSON text during migration. Canonical
+                // semantics choose the tool and input category; the legacy text is only a byte-for-
+                // byte decoration for existing logging/extensions until the call site stops passing
+                // `ResponseItem` altogether.
+                if let ToolPayload::Function {
+                    arguments: canonical_arguments,
+                } = &mut call.payload
+                {
+                    *canonical_arguments = arguments;
+                }
+                Ok(Some(call))
             }
             ResponseItem::ToolSearchCall {
                 call_id: Some(call_id),
@@ -189,12 +247,15 @@ impl ToolRouter {
                 input,
                 call_id,
                 ..
-            } => Ok(Some(ToolCall {
-                tool_name: ToolName::new(namespace, name).with_default_namespace(),
-                call_id,
-                payload: ToolPayload::Custom { input },
-                encrypted_function_args: None,
-            })),
+            } => Ok(Some(Self::build_model_invocation_call(
+                ModelToolCall {
+                    call_id: crate::model_runtime::ir::ModelToolCallId(call_id),
+                    namespace,
+                    name,
+                    input: ModelToolInput::Text(input),
+                },
+                None,
+            ))),
             _ => Ok(None),
         }
     }
