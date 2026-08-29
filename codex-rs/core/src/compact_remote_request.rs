@@ -5,6 +5,7 @@ use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::try_model_request_from_prompt;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -69,6 +70,7 @@ pub(super) async fn run_remote_compact_attempt(
         output_schema_strict: true,
         cyber_access_program: turn_context.cyber_access_program,
     };
+    let model_request = try_model_request_from_prompt(&prompt);
     let responses_metadata = sess
         .responses_metadata(
             turn_context.as_ref(),
@@ -85,7 +87,8 @@ pub(super) async fn run_remote_compact_attempt(
         },
     };
     let new_history = turn_runtime
-        .compact_conversation_history(
+        .compact_conversation_history_migrating_request(
+            model_request.as_ref(),
             &prompt,
             turn_context.model_info(),
             settings,

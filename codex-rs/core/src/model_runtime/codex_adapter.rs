@@ -239,6 +239,32 @@ impl CodexModelTurnRuntimeAdapter {
             .await
     }
 
+    /// Reconstructs the current provider-shaped compact request only after the harness-visible
+    /// semantics have crossed the canonical `ModelRequest` boundary. `legacy_prompt` remains a
+    /// migration-only template for provider-private decorations.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn compact_model_request(
+        &self,
+        request: &ModelRequest,
+        legacy_prompt: &Prompt,
+        model_info: &ModelInfo,
+        settings: CompactConversationRequestSettings,
+        session_telemetry: &SessionTelemetry,
+        compaction_trace: &CompactionTraceContext,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Vec<ResponseItem>> {
+        let prompt = prompt_from_model_request(request, legacy_prompt)?;
+        self.compact_conversation_history(
+            &prompt,
+            model_info,
+            settings,
+            session_telemetry,
+            compaction_trace,
+            responses_metadata,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn compact_conversation_history(
         &self,
