@@ -13,6 +13,7 @@ use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
+use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolRegistry;
 #[cfg(test)]
 use crate::tools::spec_plan::finalize_tool_router;
@@ -177,6 +178,50 @@ impl ToolRouter {
                 encrypted_function_args: None,
             },
         }
+    }
+
+    /// Resolve a canonical model call against the Tool Runtime that advertised the target tool.
+    ///
+    /// Discovery calls are identified from the registered runtime's declared `ToolSpec`, not from
+    /// the provider event variant or the literal tool name. Other calls retain the generic
+    /// JSON/function or text/custom mapping above.
+    pub(crate) fn build_model_tool_call(
+        &self,
+        call: ModelToolCall,
+        encrypted_function_args: Option<Vec<String>>,
+    ) -> Result<ToolCall, FunctionCallError> {
+        let tool_name =
+            ToolName::new(call.namespace.clone(), call.name.clone()).with_default_namespace();
+        let is_client_tool_search = self.registry.tool(&tool_name).is_some_and(|runtime| {
+            matches!(
+                runtime.spec(),
+                ToolSpec::ToolSearch { execution, .. } if execution == "client"
+            )
+        });
+        if !is_client_tool_search {
+            return Ok(Self::build_model_invocation_call(
+                call,
+                encrypted_function_args,
+            ));
+        }
+
+        let ModelToolCall { call_id, input, .. } = call;
+        let ModelToolInput::Json(arguments) = input else {
+            return Err(FunctionCallError::RespondToModel(
+                "failed to parse tool_search arguments: expected structured JSON input".to_string(),
+            ));
+        };
+        let arguments: SearchToolCallParams = serde_json::from_value(arguments).map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to parse tool_search arguments: {err}"
+            ))
+        })?;
+        Ok(ToolCall {
+            tool_name,
+            call_id: call_id.0,
+            payload: ToolPayload::ToolSearch { arguments },
+            encrypted_function_args: None,
+        })
     }
 
     #[instrument(level = "trace", skip_all, err)]
