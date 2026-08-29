@@ -53,10 +53,7 @@ fn canonical_text_invocation_builds_custom_call_without_codex_function_decoratio
         Some(Vec::new()),
     );
 
-    assert_eq!(
-        call.tool_name,
-        ToolName::namespaced("mcp__python", "exec")
-    );
+    assert_eq!(call.tool_name, ToolName::namespaced("mcp__python", "exec"));
     assert_eq!(call.call_id, "call-2");
     assert_eq!(call.encrypted_function_args, None);
     assert_eq!(call.direct_source(), ToolCallSource::Direct);
@@ -71,10 +68,8 @@ fn canonical_text_invocation_builds_custom_call_without_codex_function_decoratio
 #[test]
 fn canonical_tool_search_uses_registered_discovery_runtime() {
     let source_registry = ToolRegistry::empty_for_test();
-    let handler = ToolSearchHandlerCache::default().get_or_build(
-        &source_registry,
-        ToolSearchSourceListing::Omit,
-    );
+    let handler = ToolSearchHandlerCache::default()
+        .get_or_build(&source_registry, ToolSearchSourceListing::Omit);
     let registry = ToolRegistry::with_handler_for_test(handler);
     let router = ToolRouter::from_parts(registry, Vec::new());
 
