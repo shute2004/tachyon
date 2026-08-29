@@ -1,4 +1,7 @@
 use crate::function_tool::FunctionCallError;
+use crate::model_runtime::ir::ModelToolCall;
+use crate::model_runtime::ir::ModelToolCallId;
+use crate::model_runtime::ir::ModelToolInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 #[cfg(test)]
@@ -82,6 +85,20 @@ pub(crate) struct ToolSuggestCandidates {
     pub(crate) presentation: ToolSuggestPresentation,
 }
 
+/// Codex-only data required while provider-shaped stream items still wrap canonical tool calls.
+///
+/// None of these fields belong in `ModelToolCall`: exact JSON text and encrypted continuation data
+/// are provider-private, while the client discovery marker is a migration cue until the generic
+/// Tool Runtime boundary carries discovery purpose independently of the Responses item variant.
+enum CodexToolCallDecoration {
+    Function {
+        original_arguments: String,
+        encrypted_function_args: Option<Vec<String>>,
+    },
+    Custom,
+    ClientToolSearch,
+}
+
 impl ToolRouter {
     #[cfg(test)]
     pub(crate) fn from_registry(
@@ -144,6 +161,89 @@ impl ToolRouter {
         self.registry.tool(&call.tool_name)
     }
 
+    /// Build a mature Tool Runtime invocation from provider-neutral model-call semantics.
+    fn build_model_invocation_call(call: ModelToolCall) -> ToolCall {
+        let ModelToolCall {
+            call_id,
+            namespace,
+            name,
+            input,
+        } = call;
+        let tool_name = ToolName::new(namespace, name).with_default_namespace();
+        match input {
+            ModelToolInput::Json(arguments) => ToolCall {
+                tool_name,
+                call_id: call_id.0,
+                payload: ToolPayload::Function {
+                    arguments: arguments.to_string(),
+                },
+                encrypted_function_args: None,
+            },
+            ModelToolInput::Text(input) => ToolCall {
+                tool_name,
+                call_id: call_id.0,
+                payload: ToolPayload::Custom { input },
+                encrypted_function_args: None,
+            },
+        }
+    }
+
+    fn build_decorated_model_tool_call(
+        call: ModelToolCall,
+        decoration: CodexToolCallDecoration,
+    ) -> Result<ToolCall, FunctionCallError> {
+        match decoration {
+            CodexToolCallDecoration::Function {
+                original_arguments,
+                encrypted_function_args,
+            } => {
+                let mut call = Self::build_model_invocation_call(call);
+                let ToolPayload::Function { arguments } = &mut call.payload else {
+                    return Err(FunctionCallError::Fatal(
+                        "canonical function call lost structured JSON input".to_string(),
+                    ));
+                };
+                // Preserve exact provider-authored JSON bytes for existing logging/extensions while
+                // canonical JSON semantics own the runtime invocation shape.
+                *arguments = original_arguments;
+                call.encrypted_function_args = encrypted_function_args;
+                Ok(call)
+            }
+            CodexToolCallDecoration::Custom => Ok(Self::build_model_invocation_call(call)),
+            CodexToolCallDecoration::ClientToolSearch => {
+                let ModelToolCall {
+                    call_id,
+                    namespace: _,
+                    name,
+                    input,
+                } = call;
+                let ModelToolInput::Json(arguments) = input else {
+                    return Err(FunctionCallError::RespondToModel(
+                        "failed to parse tool_search arguments: expected structured JSON input"
+                            .to_string(),
+                    ));
+                };
+                let arguments: SearchToolCallParams =
+                    serde_json::from_value(arguments).map_err(|err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "failed to parse tool_search arguments: {err}"
+                        ))
+                    })?;
+                Ok(ToolCall {
+                    tool_name: ToolName::plain(name),
+                    call_id: call_id.0,
+                    payload: ToolPayload::ToolSearch { arguments },
+                    encrypted_function_args: None,
+                })
+            }
+        }
+    }
+
+    /// Transitional Codex adapter around the provider-neutral Tool Runtime ingress.
+    ///
+    /// Representable model tool calls are projected into `ModelToolCall` first. Only migration-only
+    /// provider decorations are retained alongside that canonical call. Unsupported provider shapes
+    /// stay on the explicit legacy path rather than widening the generic IR.
     #[instrument(level = "trace", skip_all, err)]
     pub fn build_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
         match item {
@@ -155,33 +255,46 @@ impl ToolRouter {
                 call_id,
                 ..
             } => {
-                let tool_name = ToolName::new(namespace, name).with_default_namespace();
-                Ok(Some(ToolCall {
-                    tool_name,
-                    call_id,
-                    payload: ToolPayload::Function { arguments },
-                    encrypted_function_args,
-                }))
+                let Ok(input) = serde_json::from_str(&arguments) else {
+                    // Invalid JSON cannot be represented by `ModelToolInput::Json`. Preserve the
+                    // exact legacy behavior until malformed-call handling has its own generic seam.
+                    let tool_name = ToolName::new(namespace, name).with_default_namespace();
+                    return Ok(Some(ToolCall {
+                        tool_name,
+                        call_id,
+                        payload: ToolPayload::Function { arguments },
+                        encrypted_function_args,
+                    }));
+                };
+                Self::build_decorated_model_tool_call(
+                    ModelToolCall {
+                        call_id: ModelToolCallId(call_id),
+                        namespace,
+                        name,
+                        input: ModelToolInput::Json(input),
+                    },
+                    CodexToolCallDecoration::Function {
+                        original_arguments: arguments,
+                        encrypted_function_args,
+                    },
+                )
+                .map(Some)
             }
             ResponseItem::ToolSearchCall {
                 call_id: Some(call_id),
                 execution,
                 arguments,
                 ..
-            } if execution == "client" => {
-                let arguments: SearchToolCallParams =
-                    serde_json::from_value(arguments).map_err(|err| {
-                        FunctionCallError::RespondToModel(format!(
-                            "failed to parse tool_search arguments: {err}"
-                        ))
-                    })?;
-                Ok(Some(ToolCall {
-                    tool_name: ToolName::plain("tool_search"),
-                    call_id,
-                    payload: ToolPayload::ToolSearch { arguments },
-                    encrypted_function_args: None,
-                }))
-            }
+            } if execution == "client" => Self::build_decorated_model_tool_call(
+                ModelToolCall {
+                    call_id: ModelToolCallId(call_id),
+                    namespace: None,
+                    name: "tool_search".to_string(),
+                    input: ModelToolInput::Json(arguments),
+                },
+                CodexToolCallDecoration::ClientToolSearch,
+            )
+            .map(Some),
             ResponseItem::ToolSearchCall { .. } => Ok(None),
             ResponseItem::CustomToolCall {
                 name,
@@ -189,12 +302,16 @@ impl ToolRouter {
                 input,
                 call_id,
                 ..
-            } => Ok(Some(ToolCall {
-                tool_name: ToolName::new(namespace, name).with_default_namespace(),
-                call_id,
-                payload: ToolPayload::Custom { input },
-                encrypted_function_args: None,
-            })),
+            } => Self::build_decorated_model_tool_call(
+                ModelToolCall {
+                    call_id: ModelToolCallId(call_id),
+                    namespace,
+                    name,
+                    input: ModelToolInput::Text(input),
+                },
+                CodexToolCallDecoration::Custom,
+            )
+            .map(Some),
             _ => Ok(None),
         }
     }
@@ -287,3 +404,7 @@ impl ToolRouter {
 #[cfg(test)]
 #[path = "router_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "router_model_call_tests.rs"]
+mod model_call_tests;
