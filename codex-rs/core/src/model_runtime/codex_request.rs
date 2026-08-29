@@ -254,7 +254,9 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
             execution,
             tools,
             ..
-        } if status == TOOL_SEARCH_COMPLETED_STATUS && execution == TOOL_SEARCH_CLIENT_EXECUTION => {
+        } if status == TOOL_SEARCH_COMPLETED_STATUS
+            && execution == TOOL_SEARCH_CLIENT_EXECUTION =>
+        {
             Some(ModelInputItem::ToolResult(ModelToolResult {
                 call_id: ModelToolCallId(call_id.clone()),
                 content: vec![ModelToolResultContent::DiscoveredTools(
