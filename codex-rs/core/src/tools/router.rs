@@ -208,7 +208,8 @@ impl ToolRouter {
                     name,
                     input: ModelToolInput::Json(input),
                 };
-                let mut call = Self::build_model_invocation_call(model_call, encrypted_function_args);
+                let mut call =
+                    Self::build_model_invocation_call(model_call, encrypted_function_args);
                 // Preserve the exact provider-authored JSON text during migration. Canonical
                 // semantics choose the tool and input category; the legacy text is only a byte-for-
                 // byte decoration for existing logging/extensions until the call site stops passing
