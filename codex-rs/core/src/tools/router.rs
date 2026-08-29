@@ -349,3 +349,7 @@ impl ToolRouter {
 #[cfg(test)]
 #[path = "router_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "router_model_call_tests.rs"]
+mod model_call_tests;
