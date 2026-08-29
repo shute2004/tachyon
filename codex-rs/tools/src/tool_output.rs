@@ -310,7 +310,10 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonToolOutput, ToolOutput, ToolResult, ToolResultContent};
+    use super::JsonToolOutput;
+    use super::ToolOutput;
+    use super::ToolResult;
+    use super::ToolResultContent;
     use serde_json::json;
 
     #[test]
