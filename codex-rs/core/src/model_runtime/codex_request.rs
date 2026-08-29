@@ -52,6 +52,7 @@ use crate::model_runtime::ir::ModelToolSpec;
 
 const TOOL_SEARCH_NAME: &str = "tool_search";
 const TOOL_SEARCH_CLIENT_EXECUTION: &str = "client";
+const TOOL_SEARCH_COMPLETED_STATUS: &str = "completed";
 const FREEFORM_GRAMMAR_FORMAT: &str = "grammar";
 
 /// Returns a canonical request only when the current Codex prompt can be represented without
@@ -247,11 +248,23 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
             content: model_tool_result_content(output)?,
             is_error: output.success == Some(false),
         })),
-        // Discovery-result payloads, local shell, built-in provider tools, compaction, agent
-        // messaging, and provider-generated compatibility items stay on the explicit legacy path.
-        // In particular, ToolSearchOutput currently contains Responses-shaped serialized tool
-        // declarations; C2 must not carry them through generic ModelToolResultContent::Json until a
-        // provider-neutral discovery-result representation exists.
+        ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            status,
+            execution,
+            tools,
+            ..
+        } if status == TOOL_SEARCH_COMPLETED_STATUS && execution == TOOL_SEARCH_CLIENT_EXECUTION => {
+            Some(ModelInputItem::ToolResult(ModelToolResult {
+                call_id: ModelToolCallId(call_id.clone()),
+                content: vec![ModelToolResultContent::DiscoveredTools(
+                    model_discovered_tools(tools)?,
+                )],
+                is_error: false,
+            }))
+        }
+        // Local shell, built-in provider tools, compaction, agent messaging, provider-owned tool
+        // search, and provider-generated compatibility items stay on the explicit legacy path.
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::LocalShellCall { .. }
@@ -572,6 +585,95 @@ fn model_tool_result_content(
     }
 }
 
+fn model_discovered_tools(tools: &[Value]) -> Option<Vec<ModelToolSpec>> {
+    let mut model_tools = Vec::new();
+    for tool in tools {
+        let object = tool.as_object()?;
+        match object.get("type")?.as_str()? {
+            "function" => {
+                model_tools.push(model_discovered_function_tool(None, object)?);
+            }
+            "namespace" => {
+                if !object_has_only_keys(object, &["type", "name", "description", "tools"]) {
+                    return None;
+                }
+                let namespace = object.get("name")?.as_str()?;
+                let description = object.get("description")?.as_str()?;
+                if description != default_namespace_description(namespace) {
+                    return None;
+                }
+                let namespace_tools = object.get("tools")?.as_array()?;
+                for tool in namespace_tools {
+                    let tool_object = tool.as_object()?;
+                    match tool_object.get("type")?.as_str()? {
+                        "function" => model_tools.push(model_discovered_function_tool(
+                            Some(namespace.to_string()),
+                            tool_object,
+                        )?),
+                        "custom" => {
+                            if !object_has_only_keys(
+                                tool_object,
+                                &["type", "name", "description", "defer_loading", "format"],
+                            ) {
+                                return None;
+                            }
+                            let mut freeform = tool.clone();
+                            freeform.as_object_mut()?.remove("type");
+                            let freeform: FreeformTool = serde_json::from_value(freeform).ok()?;
+                            model_tools.push(model_freeform_tool(
+                                Some(namespace.to_string()),
+                                &freeform,
+                                ModelToolPurpose::Invocation,
+                            )?);
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(model_tools)
+}
+
+fn model_discovered_function_tool(
+    namespace: Option<String>,
+    object: &serde_json::Map<String, Value>,
+) -> Option<ModelToolSpec> {
+    if !object_has_only_keys(
+        object,
+        &[
+            "type",
+            "name",
+            "description",
+            "strict",
+            "defer_loading",
+            "parameters",
+        ],
+    ) || object.get("type")?.as_str()? != "function"
+    {
+        return None;
+    }
+
+    let defer_loading = match object.get("defer_loading") {
+        Some(value) => Some(value.as_bool()?),
+        None => None,
+    };
+    let tool = ResponsesApiTool {
+        name: object.get("name")?.as_str()?.to_string(),
+        description: object.get("description")?.as_str()?.to_string(),
+        strict: object.get("strict")?.as_bool()?,
+        defer_loading,
+        parameters: serde_json::from_value(object.get("parameters")?.clone()).ok()?,
+        output_schema: None,
+    };
+    model_function_tool(namespace, &tool, ModelToolPurpose::Invocation)
+}
+
+fn object_has_only_keys(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    object.keys().all(|key| allowed.contains(&key.as_str()))
+}
+
 fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bool {
     if schema.encrypted.is_some() {
         return true;
@@ -884,6 +986,118 @@ fn codex_defer_loading(availability: ModelToolAvailability) -> Option<bool> {
 
 fn invalid_request(message: impl Into<String>) -> codex_protocol::error::CodexErr {
     CodexErrorDetails::InvalidRequest(message.into()).into()
+}
+
+#[cfg(test)]
+mod discovery_result_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn client_output(tools: Vec<Value>) -> ResponseItem {
+        ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some("search-1".to_string()),
+            status: TOOL_SEARCH_COMPLETED_STATUS.to_string(),
+            execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+            tools,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    #[test]
+    fn client_tool_search_output_uses_semantic_discovery_result() {
+        let legacy = client_output(vec![
+            json!({
+                "type": "function",
+                "name": "lookup",
+                "description": "Lookup records",
+                "strict": false,
+                "defer_loading": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }),
+            json!({
+                "type": "namespace",
+                "name": "mcp__calendar",
+                "description": "Tools in the mcp__calendar namespace.",
+                "tools": [{
+                    "type": "custom",
+                    "name": "search_events",
+                    "description": "Search calendar events",
+                    "defer_loading": true,
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: /.+/"
+                    }
+                }]
+            }),
+        ]);
+
+        let canonical = model_input_item_from_response(&legacy)
+            .expect("client discovery output should be canonicalizable");
+        let ModelInputItem::ToolResult(result) = &canonical else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.call_id, ModelToolCallId("search-1".to_string()));
+        assert!(!result.is_error);
+        let [ModelToolResultContent::DiscoveredTools(tools)] = result.content.as_slice() else {
+            panic!("expected discovered tools content");
+        };
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(
+            &tools[0],
+            ModelToolSpec::Function {
+                namespace: None,
+                name,
+                availability: ModelToolAvailability::Deferred,
+                purpose: ModelToolPurpose::Invocation,
+                ..
+            } if name == "lookup"
+        ));
+        assert!(matches!(
+            &tools[1],
+            ModelToolSpec::Freeform {
+                namespace: Some(namespace),
+                name,
+                availability: ModelToolAvailability::Deferred,
+                purpose: ModelToolPurpose::Invocation,
+                ..
+            } if namespace == "mcp__calendar" && name == "search_events"
+        ));
+
+        let rebuilt = response_item_from_model_input(&canonical, &legacy)
+            .expect("migration template should restore exact provider shape");
+        assert_eq!(rebuilt, legacy);
+    }
+
+    #[test]
+    fn provider_owned_tool_search_output_stays_on_legacy_path() {
+        let mut legacy = client_output(Vec::new());
+        let ResponseItem::ToolSearchOutput { execution, .. } = &mut legacy else {
+            unreachable!();
+        };
+        *execution = "server".to_string();
+
+        assert_eq!(model_input_item_from_response(&legacy), None);
+    }
+
+    #[test]
+    fn unknown_discovered_tool_fields_stay_on_legacy_path() {
+        let legacy = client_output(vec![json!({
+            "type": "function",
+            "name": "lookup",
+            "description": "Lookup records",
+            "strict": false,
+            "parameters": {"type": "object"},
+            "provider_hint": "opaque"
+        })]);
+
+        assert_eq!(model_input_item_from_response(&legacy), None);
+    }
 }
 
 #[cfg(test)]
