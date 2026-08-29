@@ -213,7 +213,7 @@ impl ToolRouter {
             CodexToolCallDecoration::ClientToolSearch => {
                 let ModelToolCall {
                     call_id,
-                    namespace,
+                    namespace: _,
                     name,
                     input,
                 } = call;
@@ -230,7 +230,7 @@ impl ToolRouter {
                         ))
                     })?;
                 Ok(ToolCall {
-                    tool_name: ToolName::new(namespace, name).with_default_namespace(),
+                    tool_name: ToolName::plain(name),
                     call_id: call_id.0,
                     payload: ToolPayload::ToolSearch { arguments },
                     encrypted_function_args: None,
