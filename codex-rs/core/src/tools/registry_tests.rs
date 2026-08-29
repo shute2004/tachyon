@@ -2,6 +2,9 @@ use super::*;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_tools::ToolResult;
+use codex_tools::ToolResultContent;
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
@@ -33,6 +36,31 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
 }
 
 impl CoreToolRuntime for TestHandler {}
+
+struct EgressTestOutput {
+    canonical: Option<ToolResult>,
+}
+
+impl ToolOutput for EgressTestOutput {
+    fn log_output(&self) -> String {
+        "legacy".to_string()
+    }
+
+    fn success_for_logging(&self) -> bool {
+        true
+    }
+
+    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
+        ResponseInputItem::FunctionCallOutput {
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_text("legacy".to_string()),
+        }
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        self.canonical.clone()
+    }
+}
 
 struct ReadinessTestHandler {
     handler: TestHandler,
@@ -625,6 +653,54 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
     assert_eq!(
         result.code_mode_result(),
         serde_json::json!({ "typed": true })
+    );
+}
+
+#[test]
+fn any_tool_result_prefers_canonical_egress_over_legacy_response_item() {
+    let result = AnyToolResult {
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        result: Box::new(EgressTestOutput {
+            canonical: Some(ToolResult {
+                content: vec![ToolResultContent::Text("canonical".to_string())],
+                is_error: false,
+            }),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(
+        result.into_response(),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("canonical".to_string()),
+                success: Some(true),
+            },
+        }
+    );
+}
+
+#[test]
+fn any_tool_result_uses_exact_legacy_response_when_canonical_egress_is_unavailable() {
+    let result = AnyToolResult {
+        call_id: "call-2".to_string(),
+        payload: ToolPayload::Custom {
+            input: "custom".to_string(),
+        },
+        result: Box::new(EgressTestOutput { canonical: None }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(
+        result.into_response(),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "call-2".to_string(),
+            output: FunctionCallOutputPayload::from_text("legacy".to_string()),
+        }
     );
 }
 

@@ -14,6 +14,9 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolName;
+use codex_tools::ToolResult;
+use codex_tools::ToolResultContent;
+use codex_tools::ToolResultImageDetail;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
@@ -230,8 +233,50 @@ impl ToolOutput for FunctionToolOutput {
         function_tool_response(call_id, payload, self.body.clone(), self.success)
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        let success = self.success?;
+        let content = self
+            .body
+            .iter()
+            .map(model_tool_output_content)
+            .collect::<Option<Vec<_>>>()?;
+        Some(ToolResult {
+            content,
+            is_error: !success,
+        })
+    }
+
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
         self.post_tool_use_response.clone()
+    }
+}
+
+fn model_tool_output_content(content: &FunctionCallOutputContentItem) -> Option<ToolResultContent> {
+    match content {
+        FunctionCallOutputContentItem::InputText { text } => {
+            Some(ToolResultContent::Text(text.clone()))
+        }
+        FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+            Some(ToolResultContent::Image {
+                uri: image_url.clone(),
+                detail: detail.map(model_tool_output_image_detail),
+            })
+        }
+        FunctionCallOutputContentItem::InputAudio { audio_url } => Some(ToolResultContent::Audio {
+            uri: audio_url.clone(),
+        }),
+        FunctionCallOutputContentItem::EncryptedContent { .. } => None,
+    }
+}
+
+fn model_tool_output_image_detail(
+    detail: codex_protocol::models::ImageDetail,
+) -> ToolResultImageDetail {
+    match detail {
+        codex_protocol::models::ImageDetail::Auto => ToolResultImageDetail::Auto,
+        codex_protocol::models::ImageDetail::Low => ToolResultImageDetail::Low,
+        codex_protocol::models::ImageDetail::High => ToolResultImageDetail::High,
+        codex_protocol::models::ImageDetail::Original => ToolResultImageDetail::Original,
     }
 }
 

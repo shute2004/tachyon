@@ -7,6 +7,40 @@ use serde_json::Value as JsonValue;
 
 use crate::ToolPayload;
 
+/// Provider-neutral semantic result produced by a tool runtime.
+///
+/// This is an optional migration projection. Tool runtimes that carry provider-private metadata,
+/// or whose success state cannot be represented exactly, should return `None` and keep the legacy
+/// `to_response_item` path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolResult {
+    pub content: Vec<ToolResultContent>,
+    pub is_error: bool,
+}
+
+/// Provider-neutral content in a tool result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolResultContent {
+    Text(String),
+    Json(JsonValue),
+    Image {
+        uri: String,
+        detail: Option<ToolResultImageDetail>,
+    },
+    Audio {
+        uri: String,
+    },
+}
+
+/// Image fidelity hint that does not assume a provider wire representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolResultImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
 /// Model-facing output contract returned by executable tool runtimes.
 pub trait ToolOutput: Send {
     /// Returns a deliberately lossy diagnostic representation, before telemetry size limits.
@@ -24,6 +58,14 @@ pub trait ToolOutput: Send {
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
+
+    /// Optionally projects this output into provider-neutral tool-result semantics.
+    ///
+    /// Returning `None` is the compatibility fallback for outputs that contain provider-private
+    /// metadata or cannot preserve their success/content semantics exactly.
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        None
+    }
 
     /// Returns the tool call id exposed to `PostToolUse` hooks for this output.
     fn post_tool_use_id(&self, call_id: &str) -> String {
@@ -69,6 +111,10 @@ where
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         (**self).to_response_item(call_id, payload)
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        (**self).to_tool_result()
     }
 
     fn post_tool_use_id(&self, call_id: &str) -> String {
@@ -149,6 +195,13 @@ impl ToolOutput for JsonToolOutput {
             call_id: call_id.to_string(),
             output,
         }
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        self.success.map(|success| ToolResult {
+            content: vec![ToolResultContent::Json(self.value.clone())],
+            is_error: !success,
+        })
     }
 
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
@@ -253,4 +306,45 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonToolOutput, ToolOutput, ToolResult, ToolResultContent};
+    use serde_json::json;
+
+    #[test]
+    fn json_tool_output_projects_success() {
+        let value = json!({"answer": 42});
+        let output = JsonToolOutput::with_success(value.clone(), Some(true));
+
+        assert_eq!(
+            output.to_tool_result(),
+            Some(ToolResult {
+                content: vec![ToolResultContent::Json(value)],
+                is_error: false,
+            })
+        );
+    }
+
+    #[test]
+    fn json_tool_output_projects_error() {
+        let value = json!({"error": "failed"});
+        let output = JsonToolOutput::with_success(value.clone(), Some(false));
+
+        assert_eq!(
+            output.to_tool_result(),
+            Some(ToolResult {
+                content: vec![ToolResultContent::Json(value)],
+                is_error: true,
+            })
+        );
+    }
+
+    #[test]
+    fn json_tool_output_unknown_success_keeps_legacy_fallback() {
+        let output = JsonToolOutput::with_success(json!("unknown"), None);
+
+        assert_eq!(output.to_tool_result(), None);
+    }
 }

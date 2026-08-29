@@ -18,6 +18,7 @@ mod codex_request;
 pub mod ir;
 pub(crate) mod retry;
 pub mod route;
+mod tool_result;
 
 use crate::client::CompactConversationRequestSettings;
 use crate::client::ModelClient;
@@ -40,6 +41,7 @@ use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 use ir::ModelRequest;
 use route::ModelProviderId;
+pub(crate) use tool_result::to_response_item as tool_result_to_response_item;
 
 /// Transitional C2 bridge: project the current Codex prompt into canonical request semantics when
 /// doing so is lossless. Unsupported provider-specific history/state stays on the legacy path.
