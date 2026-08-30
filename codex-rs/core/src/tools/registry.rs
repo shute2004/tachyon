@@ -116,7 +116,11 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
                     let ResponseInputItem::FunctionCallOutput {
                         output: FunctionCallOutputPayload { body, .. },
                         ..
-                    } = result.to_response_item(&invocation.call_id, &invocation.payload)
+                    } = response_item_for_tool_output(
+                        result,
+                        &invocation.call_id,
+                        &invocation.payload,
+                    )
                     else {
                         return None;
                     };
@@ -198,7 +202,8 @@ impl AnyToolResult {
             result,
             ..
         } = self;
-        result.to_response_item(&call_id, &payload)
+
+        response_item_for_tool_output(result.as_ref(), &call_id, &payload)
     }
 
     pub(crate) fn code_mode_result(self) -> serde_json::Value {
@@ -207,6 +212,19 @@ impl AnyToolResult {
         } = self;
         result.code_mode_result(&payload)
     }
+}
+
+pub(crate) fn response_item_for_tool_output(
+    result: &dyn ToolOutput,
+    call_id: &str,
+    payload: &ToolPayload,
+) -> ResponseInputItem {
+    result
+        .to_tool_result()
+        .and_then(|tool_result| {
+            crate::model_runtime::tool_result_to_response_item(tool_result, call_id, payload)
+        })
+        .unwrap_or_else(|| result.to_response_item(call_id, payload))
 }
 
 struct PostToolUseFeedbackOutput {

@@ -14,6 +14,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolName;
+use codex_tools::ToolResult;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
@@ -230,8 +231,18 @@ impl ToolOutput for FunctionToolOutput {
         function_tool_response(call_id, payload, self.body.clone(), self.success)
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        ToolResult::from_function_call_output(&self.response_payload())
+    }
+
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
         self.post_tool_use_response.clone()
+    }
+}
+
+impl FunctionToolOutput {
+    fn response_payload(&self) -> FunctionCallOutputPayload {
+        function_call_output_payload(self.body.clone(), self.success)
     }
 }
 
@@ -512,6 +523,26 @@ fn function_tool_response(
     body: Vec<FunctionCallOutputContentItem>,
     success: Option<bool>,
 ) -> ResponseInputItem {
+    let output = function_call_output_payload(body, success);
+
+    if matches!(payload, ToolPayload::Custom { .. }) {
+        return ResponseInputItem::CustomToolCallOutput {
+            call_id: call_id.to_string(),
+            name: None,
+            output,
+        };
+    }
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output,
+    }
+}
+
+fn function_call_output_payload(
+    body: Vec<FunctionCallOutputContentItem>,
+    success: Option<bool>,
+) -> FunctionCallOutputPayload {
     let body = match body.as_slice() {
         [FunctionCallOutputContentItem::InputText { text }] => {
             FunctionCallOutputBody::Text(text.clone())
@@ -519,18 +550,7 @@ fn function_tool_response(
         _ => FunctionCallOutputBody::ContentItems(body),
     };
 
-    if matches!(payload, ToolPayload::Custom { .. }) {
-        return ResponseInputItem::CustomToolCallOutput {
-            call_id: call_id.to_string(),
-            name: None,
-            output: FunctionCallOutputPayload { body, success },
-        };
-    }
-
-    ResponseInputItem::FunctionCallOutput {
-        call_id: call_id.to_string(),
-        output: FunctionCallOutputPayload { body, success },
-    }
+    FunctionCallOutputPayload { body, success }
 }
 
 #[cfg(test)]

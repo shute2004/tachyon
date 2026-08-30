@@ -163,6 +163,7 @@ mod token_budget;
 mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
+mod tool_result_egress;
 mod tools;
 mod truncation;
 mod turn_input_submission;
