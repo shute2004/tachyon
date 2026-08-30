@@ -236,6 +236,18 @@ impl PreparedMcpCall {
         &self.server_name
     }
 
+    /// Returns whether this call is bound to the host-owned Codex Apps server.
+    pub fn is_host_owned_apps(&self) -> bool {
+        self.config
+            .mcp_server_catalog
+            .server(&self.server_name)
+            .is_some_and(|registration| {
+                registration
+                    .source()
+                    .is_host_owned_apps(&self.server_name, registration.config())
+            })
+    }
+
     pub fn server_origin(&self) -> Option<&str> {
         self.server_metadata
             .origin
@@ -254,6 +266,18 @@ impl PreparedMcpCall {
     pub fn tool_approval_mode(&self) -> AppToolApproval {
         self.server_metadata
             .tool_approval_mode(&self.tool_info.tool.name)
+    }
+
+    /// Returns the explicit output budget captured with this call's effective server config.
+    pub fn output_token_limit(&self) -> Option<usize> {
+        self.config
+            .mcp_server_catalog
+            .server(&self.server_name)?
+            .config()
+            .tools
+            .get(self.tool_info.tool.name.as_ref())?
+            .output_token_limit
+            .map(std::num::NonZeroUsize::get)
     }
 
     pub fn plugin_id(&self) -> Option<&str> {
