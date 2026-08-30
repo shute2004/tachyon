@@ -198,6 +198,14 @@ impl AnyToolResult {
             result,
             ..
         } = self;
+
+        if let Some(tool_result) = result.to_tool_result()
+            && let Some(response) =
+                crate::model_runtime::tool_result_to_response_item(tool_result, &call_id, &payload)
+        {
+            return response;
+        }
+
         result.to_response_item(&call_id, &payload)
     }
 
