@@ -3,10 +3,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::protocol::SessionSource;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ToolCallRequester;
+use codex_rollout_trace::ToolDispatchResult;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +24,7 @@ use crate::tools::code_mode::WAIT_TOOL_NAME;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
@@ -59,6 +62,57 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
 }
 
 impl CoreToolRuntime for TestHandler {}
+
+struct DivergentToolOutput;
+
+impl ToolOutput for DivergentToolOutput {
+    fn log_output(&self) -> String {
+        String::new()
+    }
+    fn success_for_logging(&self) -> bool {
+        true
+    }
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+        FunctionToolOutput::from_text("legacy".to_string(), None).to_response_item(call_id, payload)
+    }
+    fn to_tool_result(&self) -> Option<codex_tools::ToolResult> {
+        Some(codex_tools::ToolResult::success_text("canonical"))
+    }
+}
+
+#[tokio::test]
+async fn trace_and_hook_inputs_use_canonical_tool_result_before_legacy_item() {
+    let (session, turn) = make_session_and_context().await;
+    let invocation = test_invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "trace-call",
+        "test_tool",
+        ToolCallSource::Direct,
+        "{}",
+    );
+    let Some(ToolDispatchResult::DirectResponse {
+        response_item: ResponseInputItem::FunctionCallOutput { output, .. },
+    }) = super::tool_dispatch_result(
+        &invocation,
+        &invocation.call_id,
+        &invocation.payload,
+        &DivergentToolOutput,
+    )
+    else {
+        panic!("canonical direct trace input should be a function output");
+    };
+    assert_eq!(output.body.to_text(), Some("canonical".to_string()));
+    assert_eq!(
+        TestHandler {
+            tool_name: invocation.tool_name.clone()
+        }
+        .post_tool_use_payload(&invocation, &DivergentToolOutput)
+        .unwrap()
+        .tool_response,
+        serde_json::json!("canonical")
+    );
+}
 
 struct MissingCellCodeModeSessionProvider;
 

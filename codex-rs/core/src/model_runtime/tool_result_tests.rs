@@ -1,11 +1,18 @@
-use super::{model_tool_result, to_response_item};
-use crate::model_runtime::ir::{ModelToolCallId, ModelToolResult, ModelToolResultContent};
-use crate::tools::context::{FunctionToolOutput, ToolOutput};
-use codex_protocol::models::{
-    FunctionCallOutputBody, FunctionCallOutputContentItem, FunctionCallOutputPayload, ImageDetail,
-    ResponseInputItem,
-};
-use codex_tools::{ToolPayload, ToolResult, ToolResultContent};
+use super::model_tool_result;
+use super::to_response_item;
+use crate::model_runtime::ir::ModelToolCallId;
+use crate::model_runtime::ir::ModelToolResult;
+use crate::model_runtime::ir::ModelToolResultContent;
+use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolOutput;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ResponseInputItem;
+use codex_tools::ToolPayload;
+use codex_tools::ToolResult;
+use codex_tools::ToolResultContent;
 use serde_json::json;
 
 fn media_items(detail: ImageDetail) -> Vec<FunctionCallOutputContentItem> {
@@ -18,13 +25,19 @@ fn media_items(detail: ImageDetail) -> Vec<FunctionCallOutputContentItem> {
     .unwrap()
 }
 
-fn response_output(actual: ResponseInputItem) -> (String, FunctionCallOutputPayload) {
-    match actual {
-        ResponseInputItem::FunctionCallOutput { call_id, output }
-        | ResponseInputItem::CustomToolCallOutput {
-            call_id, output, ..
-        } => (call_id, output),
-        actual => panic!("unexpected tool output: {actual:?}"),
+fn output(actual: ResponseInputItem, payload: &ToolPayload) -> (String, FunctionCallOutputPayload) {
+    match (payload, actual) {
+        (
+            ToolPayload::Function { .. },
+            ResponseInputItem::FunctionCallOutput { call_id, output },
+        )
+        | (
+            ToolPayload::Custom { .. },
+            ResponseInputItem::CustomToolCallOutput {
+                call_id, output, ..
+            },
+        ) => (call_id, output),
+        (_, actual) => panic!("unexpected tool output: {actual:?}"),
     }
 }
 
@@ -47,8 +60,10 @@ fn neutral_json_result_stays_structured_until_the_adapter_boundary() {
     let payload = ToolPayload::Function {
         arguments: "{}".into(),
     };
-    let (call_id, output) =
-        response_output(to_response_item(result, "json-call", &payload).unwrap());
+    let (call_id, output) = output(
+        to_response_item(result, "json-call", &payload).unwrap(),
+        &payload,
+    );
     assert_eq!(call_id, "json-call");
     assert_eq!(
         output.body,
@@ -72,8 +87,10 @@ fn function_and_custom_results_encode_exact_body_and_success() {
             let result = FunctionToolOutput::from_text(text.into(), Some(success))
                 .to_tool_result()
                 .expect("known function output success should project");
-            let (call_id, output) =
-                response_output(to_response_item(result, "call-1", &payload).unwrap());
+            let (call_id, output) = output(
+                to_response_item(result, "call-1", &payload).unwrap(),
+                &payload,
+            );
             assert_eq!(call_id, "call-1");
             assert_eq!(output.body, FunctionCallOutputBody::Text(text.into()));
             assert_eq!(output.success, Some(success));
@@ -96,8 +113,10 @@ fn mixed_text_image_audio_output_preserves_order_and_image_detail() {
         let payload = ToolPayload::Function {
             arguments: "{}".into(),
         };
-        let (call_id, output) =
-            response_output(to_response_item(result, "media-call", &payload).unwrap());
+        let (call_id, output) = output(
+            to_response_item(result, "media-call", &payload).unwrap(),
+            &payload,
+        );
         assert_eq!(call_id, "media-call");
         assert_eq!(output.body, FunctionCallOutputBody::ContentItems(items));
         assert_eq!(output.success, Some(false));

@@ -9,6 +9,7 @@ use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::registry::response_item_for_tool_output;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::ToolDispatchInvocation;
 use codex_rollout_trace::ToolDispatchPayload;
@@ -100,7 +101,7 @@ fn tool_dispatch_result(
     match invocation.source {
         ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => {
             Some(ToolDispatchResult::DirectResponse {
-                response_item: result.to_response_item(call_id, payload),
+                response_item: response_item_for_tool_output(result, call_id, payload),
             })
         }
         ToolCallSource::CodeMode { .. } => Some(ToolDispatchResult::CodeModeResponse {
