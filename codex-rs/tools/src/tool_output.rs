@@ -7,6 +7,90 @@ use serde_json::Value as JsonValue;
 
 use crate::ToolPayload;
 
+/// Provider-neutral semantic result produced by a tool runtime.
+/// Unrepresentable or provider-private output remains on the legacy response-item path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolResult {
+    pub content: Vec<ToolResultContent>,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn success_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error: false,
+        }
+    }
+
+    pub fn error_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error: true,
+        }
+    }
+
+    pub fn success_json(value: JsonValue) -> Self {
+        Self {
+            content: vec![ToolResultContent::Json(value)],
+            is_error: false,
+        }
+    }
+
+    pub fn error_json(value: JsonValue) -> Self {
+        Self {
+            content: vec![ToolResultContent::Json(value)],
+            is_error: true,
+        }
+    }
+
+    pub fn from_function_call_output(payload: &FunctionCallOutputPayload) -> Option<Self> {
+        let success = payload.success?;
+        let content = match &payload.body {
+            FunctionCallOutputBody::Text(text) => vec![ToolResultContent::Text(text.clone())],
+            FunctionCallOutputBody::ContentItems(items)
+                if matches!(
+                    items.as_slice(),
+                    [FunctionCallOutputContentItem::InputText { .. }]
+                ) =>
+            {
+                return None;
+            }
+            FunctionCallOutputBody::ContentItems(items) => items
+                .iter()
+                .map(tool_result_content)
+                .collect::<Option<Vec<_>>>()?,
+        };
+
+        Some(Self {
+            content,
+            is_error: !success,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolResultContent {
+    Text(String),
+    Json(JsonValue),
+    Image {
+        uri: String,
+        detail: Option<ToolResultImageDetail>,
+    },
+    Audio {
+        uri: String,
+    },
+}
+
+/// Image fidelity hint that does not assume a provider wire representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolResultImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
 /// Model-facing output contract returned by executable tool runtimes.
 pub trait ToolOutput: Send {
     /// Returns a deliberately lossy diagnostic representation, before telemetry size limits.
@@ -24,6 +108,11 @@ pub trait ToolOutput: Send {
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
+
+    /// Returns `None` when canonical projection cannot preserve exact semantics.
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        None
+    }
 
     /// Returns the tool call id exposed to `PostToolUse` hooks for this output.
     fn post_tool_use_id(&self, call_id: &str) -> String {
@@ -69,6 +158,10 @@ where
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         (**self).to_response_item(call_id, payload)
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        (**self).to_tool_result()
     }
 
     fn post_tool_use_id(&self, call_id: &str) -> String {
@@ -151,6 +244,16 @@ impl ToolOutput for JsonToolOutput {
         }
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        self.success.map(|success| {
+            if success {
+                ToolResult::success_json(self.value.clone())
+            } else {
+                ToolResult::error_json(self.value.clone())
+            }
+        })
+    }
+
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
         Some(self.value.clone())
     }
@@ -187,6 +290,33 @@ impl ToolOutput for codex_protocol::mcp::CallToolResult {
             fields.remove("_meta");
         }
         result
+    }
+}
+
+fn tool_result_content(content: &FunctionCallOutputContentItem) -> Option<ToolResultContent> {
+    match content {
+        FunctionCallOutputContentItem::InputText { text } => {
+            Some(ToolResultContent::Text(text.clone()))
+        }
+        FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+            Some(ToolResultContent::Image {
+                uri: image_url.clone(),
+                detail: detail.map(tool_result_image_detail),
+            })
+        }
+        FunctionCallOutputContentItem::InputAudio { audio_url } => Some(ToolResultContent::Audio {
+            uri: audio_url.clone(),
+        }),
+        FunctionCallOutputContentItem::EncryptedContent { .. } => None,
+    }
+}
+
+fn tool_result_image_detail(detail: codex_protocol::models::ImageDetail) -> ToolResultImageDetail {
+    match detail {
+        codex_protocol::models::ImageDetail::Auto => ToolResultImageDetail::Auto,
+        codex_protocol::models::ImageDetail::Low => ToolResultImageDetail::Low,
+        codex_protocol::models::ImageDetail::High => ToolResultImageDetail::High,
+        codex_protocol::models::ImageDetail::Original => ToolResultImageDetail::Original,
     }
 }
 
@@ -254,3 +384,7 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
             .join("\n"),
     )
 }
+
+#[cfg(test)]
+#[path = "tool_output_tests.rs"]
+mod tests;
