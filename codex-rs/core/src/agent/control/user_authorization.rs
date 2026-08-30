@@ -39,7 +39,6 @@ impl AgentControl {
             .services
             .thread_extension_data
             .get::<GuardianReviewEvidence>();
-        let mut user_message_count = 0usize;
         let mut messages = root_history
             .raw_items()
             .filter_map(|item| match (parse_turn_item(item), item) {
@@ -48,7 +47,6 @@ impl AgentControl {
                     (!is_summary_message(&message)
                         && !message.trim_start().starts_with("<user_action>"))
                     .then(|| {
-                        user_message_count = user_message_count.saturating_add(1);
                         GuardianRootMessage::User(
                             guardian_truncate_text(&message, MAX_ROOT_MESSAGE_TOKENS).0,
                         )
@@ -82,10 +80,7 @@ impl AgentControl {
             |evidence| evidence.authorization_version(history.as_ref()),
         );
         Some(GuardianRootSnapshot {
-            authorization_version: GuardianAuthorizationVersion {
-                user_message_count,
-                ..authorization_version
-            },
+            authorization_version,
             messages,
         })
     }
