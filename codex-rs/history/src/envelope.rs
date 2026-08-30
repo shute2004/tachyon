@@ -71,10 +71,8 @@ mod tests {
 
     #[test]
     fn generic_history_envelope_preserves_non_provider_item_and_metadata() {
-        let mut envelope = HistoryEnvelope::with_metadata(
-            String::from("first"),
-            TestMetadata { budget: 2048 },
-        );
+        let mut envelope =
+            HistoryEnvelope::with_metadata(String::from("first"), TestMetadata { budget: 2048 });
 
         assert_eq!(envelope.as_str(), "first");
         *envelope = String::from("second");
