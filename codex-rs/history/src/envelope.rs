@@ -29,6 +29,10 @@ impl<T, M> HistoryEnvelope<T, M> {
         }
     }
 
+    pub fn borrow(&self) -> &T {
+        &self.item
+    }
+
     pub fn into_item(self) -> T {
         self.item
     }
