@@ -26,10 +26,8 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
         .iter()
         .filter_map(|envelope| {
             let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Output).then_some((
-                correlation.compatibility_pairing_class,
-                correlation.call_id,
-            ))
+            (correlation.side == HistoryToolSide::Output)
+                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
         })
         .collect::<HashSet<_>>();
 
@@ -43,10 +41,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
             continue;
         };
         if correlation.side != HistoryToolSide::Call
-            || output_keys.contains(&(
-                correlation.compatibility_pairing_class,
-                correlation.call_id,
-            ))
+            || output_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
         {
             continue;
         }
@@ -154,10 +149,8 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
         .iter()
         .filter_map(|envelope| {
             let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Call).then_some((
-                correlation.compatibility_pairing_class,
-                correlation.call_id,
-            ))
+            (correlation.side == HistoryToolSide::Call)
+                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
         })
         .collect::<HashSet<_>>();
 
@@ -168,10 +161,7 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
         };
         if correlation.side != HistoryToolSide::Output
             || !correlation.local_counterpart_required
-            || call_keys.contains(&(
-                correlation.compatibility_pairing_class,
-                correlation.call_id,
-            ))
+            || call_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
         {
             continue;
         }
@@ -301,7 +291,7 @@ mod tests {
             ResponseItem::LocalShellCall {
                 call_id: Some(remaining_call_id),
                 ..
-            } if remaining_call_id == call_id
+            } if remaining_call_id.as_str() == call_id
         ));
     }
 }
