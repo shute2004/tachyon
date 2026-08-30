@@ -5,9 +5,10 @@ on:
 
 jobs:
   python-sdk:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    # Tachyon must be able to run required CI without OpenAI's private runner groups.
+    # The Python SDK job already executes its actual test workload inside Docker,
+    # so a standard GitHub-hosted Linux runner preserves the intended environment.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -43,9 +44,10 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   sdks:
-    runs-on:
-      group: ${{ github.event.repository.name }}-runners
-      labels: ${{ github.event.repository.name }}-linux-x64
+    # Keep the Bazel/TypeScript SDK validation required, but run it on public
+    # GitHub infrastructure. The Bazel wrapper already has an unauthenticated
+    # fallback when the BuildBuddy secret is unavailable.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
       name: bazel
