@@ -383,6 +383,34 @@ mod tests {
     use tracing_test::internal::MockWriter;
 
     #[test]
+    fn tool_search_failure_response_preserves_tool_search_shape() {
+        let response = ToolCallRuntime::failure_response(
+            ToolCall {
+                tool_name: codex_tools::ToolName::plain("tool_search"),
+                call_id: "search-call".to_string(),
+                payload: ToolPayload::ToolSearch {
+                    arguments: codex_protocol::models::SearchToolCallParams {
+                        query: String::new(),
+                        limit: None,
+                    },
+                },
+                encrypted_function_args: None,
+            },
+            FunctionCallError::RespondToModel("query must not be empty".to_string()),
+        );
+
+        assert_eq!(
+            response,
+            ResponseInputItem::ToolSearchOutput {
+                call_id: "search-call".to_string(),
+                status: "completed".to_string(),
+                execution: "client".to_string(),
+                tools: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn tool_call_timing_guard_ignores_code_mode_source() {
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::INFO)
