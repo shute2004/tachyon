@@ -106,7 +106,11 @@ fn function_call_output_projects_content_or_falls_back() {
         Some(true),
     );
     let unknown = payload(FunctionCallOutputBody::Text("unknown".into()), None);
-    for payload in [encrypted, unknown] {
+    let singleton = payload(
+        FunctionCallOutputBody::ContentItems(vec![item(json!({"type":"input_text","text":"one"}))]),
+        Some(true),
+    );
+    for payload in [encrypted, unknown, singleton] {
         assert_eq!(ToolResult::from_function_call_output(&payload), None);
     }
 }

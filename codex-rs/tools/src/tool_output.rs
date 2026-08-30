@@ -44,12 +44,18 @@ impl ToolResult {
         }
     }
 
-    /// Projects a known-status function-call output without losing its body shape or content
-    /// ordering. Outputs with unknown success or encrypted content stay on the legacy path.
     pub fn from_function_call_output(payload: &FunctionCallOutputPayload) -> Option<Self> {
         let success = payload.success?;
         let content = match &payload.body {
             FunctionCallOutputBody::Text(text) => vec![ToolResultContent::Text(text.clone())],
+            FunctionCallOutputBody::ContentItems(items)
+                if matches!(
+                    items.as_slice(),
+                    [FunctionCallOutputContentItem::InputText { .. }]
+                ) =>
+            {
+                return None;
+            }
             FunctionCallOutputBody::ContentItems(items) => items
                 .iter()
                 .map(tool_result_content)
@@ -63,7 +69,6 @@ impl ToolResult {
     }
 }
 
-/// Provider-neutral content in a tool result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolResultContent {
     Text(String),
@@ -104,10 +109,7 @@ pub trait ToolOutput: Send {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
 
-    /// Optionally projects this output into provider-neutral tool-result semantics.
-    ///
-    /// Returning `None` is the compatibility fallback for outputs that contain provider-private
-    /// metadata or cannot preserve their success/content semantics exactly.
+    /// Returns `None` when canonical projection cannot preserve exact semantics.
     fn to_tool_result(&self) -> Option<ToolResult> {
         None
     }

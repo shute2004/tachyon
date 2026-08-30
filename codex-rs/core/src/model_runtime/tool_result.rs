@@ -1,6 +1,3 @@
-//! Transitional egress from provider-neutral tool results to the Codex Responses adapter.
-//! Provider-private or otherwise unrepresentable outputs return `None` for exact legacy fallback.
-
 use crate::model_runtime::ir::ModelImageDetail;
 use crate::model_runtime::ir::ModelMediaSource;
 use crate::model_runtime::ir::ModelToolResult;
@@ -107,8 +104,7 @@ fn response_content_item(
         ModelToolResultContent::Text(text) => {
             Some(FunctionCallOutputContentItem::InputText { text: text.clone() })
         }
-        // JSON is intentionally stringified only at this Codex adapter boundary. It remains
-        // `ModelToolResultContent::Json` while crossing the provider-neutral model runtime IR.
+        // JSON is stringified only at this Codex adapter boundary.
         ModelToolResultContent::Json(value) => Some(FunctionCallOutputContentItem::InputText {
             text: value.to_string(),
         }),
