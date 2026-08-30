@@ -215,15 +215,30 @@ impl ToolCallRuntime {
 
     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
         let message = err.to_string();
-        match call.payload {
-            ToolPayload::ToolSearch { .. } => ResponseInputItem::ToolSearchOutput {
-                call_id: call.call_id,
+        let ToolCall {
+            call_id, payload, ..
+        } = call;
+
+        if matches!(&payload, ToolPayload::ToolSearch { .. }) {
+            return ResponseInputItem::ToolSearchOutput {
+                call_id,
                 status: "completed".to_string(),
                 execution: "client".to_string(),
                 tools: Vec::new(),
-            },
+            };
+        }
+
+        if let Some(response) = crate::model_runtime::tool_result_to_response_item(
+            codex_tools::ToolResult::error_text(message.clone()),
+            &call_id,
+            &payload,
+        ) {
+            return response;
+        }
+
+        match payload {
             ToolPayload::Custom { .. } => ResponseInputItem::CustomToolCallOutput {
-                call_id: call.call_id,
+                call_id,
                 name: None,
                 output: codex_protocol::models::FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(message),
@@ -231,7 +246,7 @@ impl ToolCallRuntime {
                 },
             },
             _ => ResponseInputItem::FunctionCallOutput {
-                call_id: call.call_id,
+                call_id,
                 output: codex_protocol::models::FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(message),
                     success: Some(false),
@@ -366,6 +381,34 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tracing_test::internal::MockWriter;
+
+    #[test]
+    fn tool_search_failure_response_preserves_tool_search_shape() {
+        let response = ToolCallRuntime::failure_response(
+            ToolCall {
+                tool_name: codex_tools::ToolName::plain("tool_search"),
+                call_id: "search-call".to_string(),
+                payload: ToolPayload::ToolSearch {
+                    arguments: codex_protocol::models::SearchToolCallParams {
+                        query: String::new(),
+                        limit: None,
+                    },
+                },
+                encrypted_function_args: None,
+            },
+            FunctionCallError::RespondToModel("query must not be empty".to_string()),
+        );
+
+        assert_eq!(
+            response,
+            ResponseInputItem::ToolSearchOutput {
+                call_id: "search-call".to_string(),
+                status: "completed".to_string(),
+                execution: "client".to_string(),
+                tools: Vec::new(),
+            }
+        );
+    }
 
     #[test]
     fn tool_call_timing_guard_ignores_code_mode_source() {

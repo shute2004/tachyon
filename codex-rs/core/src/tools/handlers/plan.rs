@@ -12,6 +12,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::EventMsg;
 use codex_tools::ToolName;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 use serde_json::Value as JsonValue;
 
@@ -28,6 +29,10 @@ impl ToolOutput for PlanToolOutput {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(PLAN_UPDATED_MESSAGE))
     }
 
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {

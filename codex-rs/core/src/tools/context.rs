@@ -93,6 +93,10 @@ impl ToolOutput for McpToolOutput {
         self.result.success()
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        ToolResult::from_function_call_output(&self.response_payload())
+    }
+
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
         ResponseInputItem::FunctionCallOutput {
             call_id: call_id.to_string(),
@@ -265,6 +269,10 @@ impl ToolOutput for ApplyPatchToolOutput {
         true
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(self.text.clone()))
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         function_tool_response(
             call_id,
@@ -350,6 +358,10 @@ impl ToolOutput for ExecCommandToolOutput {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(self.response_text()))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {

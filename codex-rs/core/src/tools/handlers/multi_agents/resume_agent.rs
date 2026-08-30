@@ -3,6 +3,7 @@ use crate::agent::next_thread_spawn_depth;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::create_resume_agent_tool;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 use std::sync::Arc;
 
@@ -178,6 +179,10 @@ impl ToolOutput for ResumeAgentResult {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "resume_agent")
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(tool_output_tool_result(self, "resume_agent"))
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {

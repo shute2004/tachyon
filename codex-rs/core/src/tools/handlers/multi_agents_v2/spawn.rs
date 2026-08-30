@@ -15,6 +15,7 @@ use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -350,6 +351,10 @@ impl ToolOutput for SpawnAgentResult {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "spawn_agent")
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(tool_output_tool_result(self, "spawn_agent"))
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {

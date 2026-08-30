@@ -11,6 +11,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_protocol::models::ResponseInputItem;
 use codex_tools::ToolName;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 use serde_json::Value as JsonValue;
 use serde_json::json;
@@ -42,6 +43,10 @@ impl ToolOutput for GetContextRemainingOutput {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(self.fragment()))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
