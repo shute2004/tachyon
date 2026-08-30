@@ -1,10 +1,5 @@
-//! Transitional egress from provider-neutral tool results to the Codex Responses shape.
-//!
-//! Tool runtimes first project their output into `codex_tools::ToolResult`. This module carries
-//! that semantic result through the model-runtime IR and only realizes the current Responses
-//! representation at the adapter boundary. Provider-private item metadata is intentionally not
-//! reconstructed here; outputs that cannot be represented without it return `None` so callers can
-//! use the legacy output path.
+//! Transitional egress from provider-neutral tool results to the Codex Responses adapter.
+//! Provider-private or otherwise unrepresentable outputs return `None` for exact legacy fallback.
 
 use crate::model_runtime::ir::ModelImageDetail;
 use crate::model_runtime::ir::ModelMediaSource;
@@ -20,8 +15,7 @@ use codex_tools::ToolResult;
 use codex_tools::ToolResultContent;
 use codex_tools::ToolResultImageDetail;
 
-/// Converts one neutral tool result into the current Codex response item when the result and
-/// payload have a lossless Responses representation.
+/// Converts a neutral result when it has a lossless Responses representation.
 pub(crate) fn to_response_item(
     result: ToolResult,
     call_id: &str,
@@ -31,11 +25,7 @@ pub(crate) fn to_response_item(
     response_item_from_model_tool_result(&result, payload)
 }
 
-/// Projects a neutral result into the canonical model IR before any provider wire encoding.
-///
-/// This function is intentionally private to the egress module. The registry only needs the
-/// complete adapter operation above, while this module's focused tests inspect the intermediate
-/// IR directly.
+/// Projects a neutral result into canonical model IR before provider wire encoding.
 fn model_tool_result(result: ToolResult, call_id: &str) -> Option<ModelToolResult> {
     let content = result
         .content

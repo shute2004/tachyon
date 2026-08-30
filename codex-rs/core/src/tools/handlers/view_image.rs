@@ -25,6 +25,7 @@ use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 
 pub struct ViewImageHandler {
@@ -230,16 +231,12 @@ impl ToolOutput for ViewImageOutput {
         true
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        ToolResult::from_function_call_output(&self.function_call_output_payload())
+    }
+
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
-        let body =
-            FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputImage {
-                image_url: self.image_url.clone(),
-                detail: Some(self.image_detail),
-            }]);
-        let output = FunctionCallOutputPayload {
-            body,
-            success: Some(true),
-        };
+        let output = self.function_call_output_payload();
 
         ResponseInputItem::FunctionCallOutput {
             call_id: call_id.to_string(),
@@ -255,6 +252,20 @@ impl ToolOutput for ViewImageOutput {
                 "image_url": self.image_url,
                 "detail": self.image_detail
             })
+        }
+    }
+}
+
+impl ViewImageOutput {
+    fn function_call_output_payload(&self) -> FunctionCallOutputPayload {
+        let body =
+            FunctionCallOutputBody::ContentItems(vec![FunctionCallOutputContentItem::InputImage {
+                image_url: self.image_url.clone(),
+                detail: Some(self.image_detail),
+            }]);
+        FunctionCallOutputPayload {
+            body,
+            success: Some(true),
         }
     }
 }

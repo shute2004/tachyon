@@ -22,6 +22,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use codex_tools::ToolResult;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -69,6 +70,13 @@ where
 {
     FunctionToolOutput::from_text(tool_output_json_text(value, tool_name), success)
         .to_response_item(call_id, payload)
+}
+
+pub(crate) fn tool_output_tool_result<T>(value: &T, tool_name: &str) -> ToolResult
+where
+    T: Serialize,
+{
+    ToolResult::success_text(tool_output_json_text(value, tool_name))
 }
 
 pub(crate) fn tool_output_code_mode_result<T>(value: &T, tool_name: &str) -> JsonValue

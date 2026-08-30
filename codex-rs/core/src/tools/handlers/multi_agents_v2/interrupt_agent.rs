@@ -2,6 +2,7 @@ use super::analytics::ToolCallAnalytics;
 use super::*;
 use crate::tools::handlers::multi_agents_spec::create_interrupt_agent_tool_v2;
 use codex_protocol::error::CodexErrorDetails;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
@@ -128,6 +129,10 @@ impl ToolOutput for InterruptAgentResult {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "interrupt_agent")
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(tool_output_tool_result(self, "interrupt_agent"))
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {

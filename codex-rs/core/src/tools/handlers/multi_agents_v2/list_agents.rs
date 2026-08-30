@@ -2,6 +2,7 @@ use super::analytics::ToolCallAnalytics;
 use super::*;
 use crate::agent::control::ListedAgent;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
@@ -81,6 +82,10 @@ impl ToolOutput for ListAgentsResult {
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "list_agents")
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(tool_output_tool_result(self, "list_agents"))
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {

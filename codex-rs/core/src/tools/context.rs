@@ -15,8 +15,6 @@ use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_tools::LoadableToolSpec;
 use codex_tools::ToolName;
 use codex_tools::ToolResult;
-use codex_tools::ToolResultContent;
-use codex_tools::ToolResultImageDetail;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
@@ -93,6 +91,10 @@ impl ToolOutput for McpToolOutput {
 
     fn success_for_logging(&self) -> bool {
         self.result.success()
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        ToolResult::from_function_call_output(&self.response_payload())
     }
 
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
@@ -234,16 +236,7 @@ impl ToolOutput for FunctionToolOutput {
     }
 
     fn to_tool_result(&self) -> Option<ToolResult> {
-        let success = self.success?;
-        let content = self
-            .body
-            .iter()
-            .map(model_tool_output_content)
-            .collect::<Option<Vec<_>>>()?;
-        Some(ToolResult {
-            content,
-            is_error: !success,
-        })
+        ToolResult::from_function_call_output(&self.response_payload())
     }
 
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
@@ -251,32 +244,9 @@ impl ToolOutput for FunctionToolOutput {
     }
 }
 
-fn model_tool_output_content(content: &FunctionCallOutputContentItem) -> Option<ToolResultContent> {
-    match content {
-        FunctionCallOutputContentItem::InputText { text } => {
-            Some(ToolResultContent::Text(text.clone()))
-        }
-        FunctionCallOutputContentItem::InputImage { image_url, detail } => {
-            Some(ToolResultContent::Image {
-                uri: image_url.clone(),
-                detail: detail.map(model_tool_output_image_detail),
-            })
-        }
-        FunctionCallOutputContentItem::InputAudio { audio_url } => Some(ToolResultContent::Audio {
-            uri: audio_url.clone(),
-        }),
-        FunctionCallOutputContentItem::EncryptedContent { .. } => None,
-    }
-}
-
-fn model_tool_output_image_detail(
-    detail: codex_protocol::models::ImageDetail,
-) -> ToolResultImageDetail {
-    match detail {
-        codex_protocol::models::ImageDetail::Auto => ToolResultImageDetail::Auto,
-        codex_protocol::models::ImageDetail::Low => ToolResultImageDetail::Low,
-        codex_protocol::models::ImageDetail::High => ToolResultImageDetail::High,
-        codex_protocol::models::ImageDetail::Original => ToolResultImageDetail::Original,
+impl FunctionToolOutput {
+    fn response_payload(&self) -> FunctionCallOutputPayload {
+        function_call_output_payload(self.body.clone(), self.success)
     }
 }
 
@@ -297,6 +267,10 @@ impl ToolOutput for ApplyPatchToolOutput {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(self.text.clone()))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
@@ -384,6 +358,10 @@ impl ToolOutput for ExecCommandToolOutput {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::success_text(self.response_text()))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
@@ -557,6 +535,26 @@ fn function_tool_response(
     body: Vec<FunctionCallOutputContentItem>,
     success: Option<bool>,
 ) -> ResponseInputItem {
+    let output = function_call_output_payload(body, success);
+
+    if matches!(payload, ToolPayload::Custom { .. }) {
+        return ResponseInputItem::CustomToolCallOutput {
+            call_id: call_id.to_string(),
+            name: None,
+            output,
+        };
+    }
+
+    ResponseInputItem::FunctionCallOutput {
+        call_id: call_id.to_string(),
+        output,
+    }
+}
+
+fn function_call_output_payload(
+    body: Vec<FunctionCallOutputContentItem>,
+    success: Option<bool>,
+) -> FunctionCallOutputPayload {
     let body = match body.as_slice() {
         [FunctionCallOutputContentItem::InputText { text }] => {
             FunctionCallOutputBody::Text(text.clone())
@@ -564,18 +562,7 @@ fn function_tool_response(
         _ => FunctionCallOutputBody::ContentItems(body),
     };
 
-    if matches!(payload, ToolPayload::Custom { .. }) {
-        return ResponseInputItem::CustomToolCallOutput {
-            call_id: call_id.to_string(),
-            name: None,
-            output: FunctionCallOutputPayload { body, success },
-        };
-    }
-
-    ResponseInputItem::FunctionCallOutput {
-        call_id: call_id.to_string(),
-        output: FunctionCallOutputPayload { body, success },
-    }
+    FunctionCallOutputPayload { body, success }
 }
 
 #[cfg(test)]

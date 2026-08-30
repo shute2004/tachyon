@@ -8,14 +8,59 @@ use serde_json::Value as JsonValue;
 use crate::ToolPayload;
 
 /// Provider-neutral semantic result produced by a tool runtime.
-///
-/// This is an optional migration projection. Tool runtimes that carry provider-private metadata,
-/// or whose success state cannot be represented exactly, should return `None` and keep the legacy
-/// `to_response_item` path.
+/// Unrepresentable or provider-private output remains on the legacy response-item path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
     pub content: Vec<ToolResultContent>,
     pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn success_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error: false,
+        }
+    }
+
+    pub fn error_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error: true,
+        }
+    }
+
+    pub fn success_json(value: JsonValue) -> Self {
+        Self {
+            content: vec![ToolResultContent::Json(value)],
+            is_error: false,
+        }
+    }
+
+    pub fn error_json(value: JsonValue) -> Self {
+        Self {
+            content: vec![ToolResultContent::Json(value)],
+            is_error: true,
+        }
+    }
+
+    /// Projects a known-status function-call output without losing its body shape or content
+    /// ordering. Outputs with unknown success or encrypted content stay on the legacy path.
+    pub fn from_function_call_output(payload: &FunctionCallOutputPayload) -> Option<Self> {
+        let success = payload.success?;
+        let content = match &payload.body {
+            FunctionCallOutputBody::Text(text) => vec![ToolResultContent::Text(text.clone())],
+            FunctionCallOutputBody::ContentItems(items) => items
+                .iter()
+                .map(tool_result_content)
+                .collect::<Option<Vec<_>>>()?,
+        };
+
+        Some(Self {
+            content,
+            is_error: !success,
+        })
+    }
 }
 
 /// Provider-neutral content in a tool result.
@@ -198,9 +243,12 @@ impl ToolOutput for JsonToolOutput {
     }
 
     fn to_tool_result(&self) -> Option<ToolResult> {
-        self.success.map(|success| ToolResult {
-            content: vec![ToolResultContent::Json(self.value.clone())],
-            is_error: !success,
+        self.success.map(|success| {
+            if success {
+                ToolResult::success_json(self.value.clone())
+            } else {
+                ToolResult::error_json(self.value.clone())
+            }
         })
     }
 
@@ -240,6 +288,33 @@ impl ToolOutput for codex_protocol::mcp::CallToolResult {
             fields.remove("_meta");
         }
         result
+    }
+}
+
+fn tool_result_content(content: &FunctionCallOutputContentItem) -> Option<ToolResultContent> {
+    match content {
+        FunctionCallOutputContentItem::InputText { text } => {
+            Some(ToolResultContent::Text(text.clone()))
+        }
+        FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+            Some(ToolResultContent::Image {
+                uri: image_url.clone(),
+                detail: detail.map(tool_result_image_detail),
+            })
+        }
+        FunctionCallOutputContentItem::InputAudio { audio_url } => Some(ToolResultContent::Audio {
+            uri: audio_url.clone(),
+        }),
+        FunctionCallOutputContentItem::EncryptedContent { .. } => None,
+    }
+}
+
+fn tool_result_image_detail(detail: codex_protocol::models::ImageDetail) -> ToolResultImageDetail {
+    match detail {
+        codex_protocol::models::ImageDetail::Auto => ToolResultImageDetail::Auto,
+        codex_protocol::models::ImageDetail::Low => ToolResultImageDetail::Low,
+        codex_protocol::models::ImageDetail::High => ToolResultImageDetail::High,
+        codex_protocol::models::ImageDetail::Original => ToolResultImageDetail::Original,
     }
 }
 
@@ -309,45 +384,5 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
 }
 
 #[cfg(test)]
-mod tests {
-    use super::JsonToolOutput;
-    use super::ToolOutput;
-    use super::ToolResult;
-    use super::ToolResultContent;
-    use serde_json::json;
-
-    #[test]
-    fn json_tool_output_projects_success() {
-        let value = json!({"answer": 42});
-        let output = JsonToolOutput::with_success(value.clone(), Some(true));
-
-        assert_eq!(
-            output.to_tool_result(),
-            Some(ToolResult {
-                content: vec![ToolResultContent::Json(value)],
-                is_error: false,
-            })
-        );
-    }
-
-    #[test]
-    fn json_tool_output_projects_error() {
-        let value = json!({"error": "failed"});
-        let output = JsonToolOutput::with_success(value.clone(), Some(false));
-
-        assert_eq!(
-            output.to_tool_result(),
-            Some(ToolResult {
-                content: vec![ToolResultContent::Json(value)],
-                is_error: true,
-            })
-        );
-    }
-
-    #[test]
-    fn json_tool_output_unknown_success_keeps_legacy_fallback() {
-        let output = JsonToolOutput::with_success(json!("unknown"), None);
-
-        assert_eq!(output.to_tool_result(), None);
-    }
-}
+#[path = "tool_output_tests.rs"]
+mod tests;
