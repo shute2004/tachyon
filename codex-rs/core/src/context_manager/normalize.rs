@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::context::ContextualUserFragment;
 use crate::context::UnsupportedMedia;
-use crate::context_manager::history_item::HistoryToolFamily;
 use crate::context_manager::history_item::HistoryToolSide;
+use crate::context_manager::history_item::ResponsesToolPairingClass;
 use crate::context_manager::history_item::tool_correlation;
 use crate::util::error_or_panic;
 use tracing::info;
@@ -26,8 +26,10 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
         .iter()
         .filter_map(|envelope| {
             let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Output)
-                .then_some((correlation.family, correlation.call_id))
+            (correlation.side == HistoryToolSide::Output).then_some((
+                correlation.compatibility_pairing_class,
+                correlation.call_id,
+            ))
         })
         .collect::<HashSet<_>>();
 
@@ -41,14 +43,17 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
             continue;
         };
         if correlation.side != HistoryToolSide::Call
-            || output_keys.contains(&(correlation.family, correlation.call_id))
+            || output_keys.contains(&(
+                correlation.compatibility_pairing_class,
+                correlation.call_id,
+            ))
         {
             continue;
         }
 
-        // Construction remains in the Responses compatibility layer for now. The correlation
-        // decision above is provider-neutral; a later slice can move item construction behind the
-        // provider adapter without changing the history pairing semantics again.
+        // Construction remains in the Responses compatibility layer for now. Matching above uses
+        // generic call/result correlation facts plus an explicitly compatibility-only Responses
+        // pairing class, so the latter cannot be mistaken for the future canonical history taxonomy.
         match &envelope.item {
             ResponseItem::FunctionCall { id, call_id, .. } => {
                 info!("Function call output is missing for call id: {call_id}");
@@ -149,8 +154,10 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
         .iter()
         .filter_map(|envelope| {
             let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Call)
-                .then_some((correlation.family, correlation.call_id))
+            (correlation.side == HistoryToolSide::Call).then_some((
+                correlation.compatibility_pairing_class,
+                correlation.call_id,
+            ))
         })
         .collect::<HashSet<_>>();
 
@@ -160,22 +167,25 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
             continue;
         };
         if correlation.side != HistoryToolSide::Output
-            || !correlation.counterpart_required
-            || call_keys.contains(&(correlation.family, correlation.call_id))
+            || !correlation.local_counterpart_required
+            || call_keys.contains(&(
+                correlation.compatibility_pairing_class,
+                correlation.call_id,
+            ))
         {
             continue;
         }
 
-        match correlation.family {
-            HistoryToolFamily::Function => error_or_panic(format!(
+        match correlation.compatibility_pairing_class {
+            ResponsesToolPairingClass::FunctionCallOutput => error_or_panic(format!(
                 "Orphan function call output for call id: {}",
                 correlation.call_id
             )),
-            HistoryToolFamily::Custom => error_or_panic(format!(
+            ResponsesToolPairingClass::CustomToolCallOutput => error_or_panic(format!(
                 "Orphan custom tool call output for call id: {}",
                 correlation.call_id
             )),
-            HistoryToolFamily::ToolSearch => error_or_panic(format!(
+            ResponsesToolPairingClass::ToolSearchOutput => error_or_panic(format!(
                 "Orphan tool search output for call id: {}",
                 correlation.call_id
             )),
@@ -231,12 +241,68 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
 
     if let Some(pos) = items.iter().position(|envelope| {
         tool_correlation(&envelope.item).is_some_and(|candidate| {
-            candidate.family == correlation.family
+            candidate.compatibility_pairing_class == correlation.compatibility_pairing_class
                 && candidate.side == counterpart_side
                 && candidate.call_id == correlation.call_id
         })
     }) {
         items.remove(pos);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::LocalShellAction;
+    use codex_protocol::models::LocalShellExecAction;
+    use codex_protocol::models::LocalShellStatus;
+
+    #[test]
+    fn function_output_removal_prefers_function_call_over_local_shell_call() {
+        let call_id = "shared-call";
+        let mut items = vec![
+            ResponseItemEnvelope::new(ResponseItem::LocalShellCall {
+                id: None,
+                call_id: Some(call_id.to_string()),
+                status: LocalShellStatus::Completed,
+                action: LocalShellAction::Exec(LocalShellExecAction {
+                    command: vec!["echo".to_string(), "local".to_string()],
+                    timeout_ms: None,
+                    working_directory: None,
+                    env: None,
+                    user: None,
+                }),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+                id: None,
+                name: "do_it".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: call_id.to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        ];
+        let output = ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        remove_corresponding_for(&mut items, &output);
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0].item,
+            ResponseItem::LocalShellCall {
+                call_id: Some(remaining_call_id),
+                ..
+            } if remaining_call_id == call_id
+        ));
     }
 }
 
