@@ -127,14 +127,20 @@ fn model_discovered_tool_spec(
             description,
             input_format,
             availability,
-        } => Some(crate::model_runtime::ir::ModelToolSpec::Freeform {
-            namespace,
-            name,
-            description,
-            input_format: model_freeform_input_format(input_format),
-            availability: model_tool_availability(availability),
-            purpose: crate::model_runtime::ir::ModelToolPurpose::Invocation,
-        }),
+        } => {
+            // Codex client discovery only carries free-form tools inside a loadable namespace.
+            // Keep broader neutral results on the legacy path instead of inventing a top-level
+            // Responses ToolSearchOutput shape that the current producer cannot emit.
+            let namespace = namespace?;
+            Some(crate::model_runtime::ir::ModelToolSpec::Freeform {
+                namespace: Some(namespace),
+                name,
+                description,
+                input_format: model_freeform_input_format(input_format),
+                availability: model_tool_availability(availability),
+                purpose: crate::model_runtime::ir::ModelToolPurpose::Invocation,
+            })
+        }
     }
 }
 
