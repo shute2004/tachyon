@@ -15,6 +15,9 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseInputItem;
+use codex_tools::DiscoveredFreeformInputFormat;
+use codex_tools::DiscoveredToolAvailability;
+use codex_tools::DiscoveredToolSpec;
 use codex_tools::FreeformTool;
 use codex_tools::FreeformToolFormat;
 use codex_tools::JsonToolOutput;
@@ -317,6 +320,21 @@ fn discovered_tools_only_encode_for_known_successful_search_results() {
             None
         );
     }
+
+    let root_freeform = ToolResult::success_discovered_tools(vec![DiscoveredToolSpec::Freeform {
+        namespace: None,
+        name: "raw_query".to_string(),
+        description: "Run a raw query".to_string(),
+        input_format: DiscoveredFreeformInputFormat::Grammar {
+            syntax: "lark".to_string(),
+            definition: "start: /.+/".to_string(),
+        },
+        availability: DiscoveredToolAvailability::Deferred,
+    }]);
+    assert_eq!(
+        to_response_item(root_freeform, "search-root-freeform", &search_payload),
+        None
+    );
 
     let function_payload = ToolPayload::Function {
         arguments: "{}".to_string(),
