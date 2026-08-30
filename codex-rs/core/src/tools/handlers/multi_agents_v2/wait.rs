@@ -2,6 +2,7 @@ use super::*;
 use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -163,6 +164,13 @@ impl ToolOutput for WaitAgentResult {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::unknown_text(tool_output_json_text(
+            self,
+            "wait_agent",
+        )))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {

@@ -241,6 +241,10 @@ impl ToolOutput for PostToolUseFeedbackOutput {
         self.original.success_for_logging()
     }
 
+    fn to_tool_result(&self) -> Option<codex_tools::ToolResult> {
+        self.model_visible.to_tool_result()
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         self.model_visible.to_response_item(call_id, payload)
     }

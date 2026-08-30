@@ -93,7 +93,7 @@ fn function_call_output_payload(result: &ModelToolResult) -> Option<FunctionCall
 
     Some(FunctionCallOutputPayload {
         body,
-        success: Some(!result.is_error),
+        success: result.is_error.map(|is_error| !is_error),
     })
 }
 

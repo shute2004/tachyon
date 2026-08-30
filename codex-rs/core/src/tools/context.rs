@@ -306,6 +306,13 @@ impl ToolOutput for AbortedToolOutput {
         false
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        // The adapter rejects ToolSearch payloads, so its provider-specific empty discovery
+        // result still falls through to `to_response_item`; function/custom aborts are textual
+        // results with unknown status.
+        Some(ToolResult::unknown_text(self.message.clone()))
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         match payload {
             ToolPayload::ToolSearch { .. } => ResponseInputItem::ToolSearchOutput {

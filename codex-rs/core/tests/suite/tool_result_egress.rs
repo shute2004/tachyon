@@ -105,6 +105,7 @@ async fn agent_loop_uses_tool_result_egress() -> Result<()> {
     skip_if_no_network!(Ok(()));
     for (canonical, expected) in [
         (Some(ToolResult::success_text("canonical")), "canonical"),
+        (Some(ToolResult::unknown_text("unknown")), "unknown"),
         (None, "legacy"),
     ] {
         assert_egress(canonical, expected).await?;

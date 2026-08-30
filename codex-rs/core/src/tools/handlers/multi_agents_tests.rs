@@ -200,6 +200,37 @@ where
     }
 }
 
+#[test]
+fn wait_agent_outputs_preserve_unknown_status_in_canonical_egress() {
+    fn assert_unknown_status<T: ToolOutput>(output: T) {
+        let payload = ToolPayload::Function {
+            arguments: "{}".to_string(),
+        };
+        let expected = output.to_response_item("wait-call", &payload);
+        let result = output
+            .to_tool_result()
+            .expect("wait output should have a canonical textual result");
+        assert_eq!(result.is_error, None);
+        assert_eq!(
+            crate::model_runtime::tool_result_to_response_item(result, "wait-call", &payload),
+            Some(expected)
+        );
+    }
+
+    assert_unknown_status(
+        crate::tools::handlers::multi_agents::wait::WaitAgentResult {
+            status: HashMap::new(),
+            timed_out: true,
+        },
+    );
+    assert_unknown_status(
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+        },
+    );
+}
+
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
     agents: Vec<ListedAgentResult>,

@@ -246,7 +246,7 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
         } => Some(ModelInputItem::ToolResult(ModelToolResult {
             call_id: ModelToolCallId(call_id.clone()),
             content: model_tool_result_content(output)?,
-            is_error: output.success == Some(false),
+            is_error: output.success.map(|success| !success),
         })),
         ResponseItem::ToolSearchOutput {
             call_id: Some(call_id),
@@ -262,7 +262,7 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
                 content: vec![ModelToolResultContent::DiscoveredTools(
                     model_discovered_tools(tools)?,
                 )],
-                is_error: false,
+                is_error: Some(false),
             }))
         }
         // Local shell, built-in provider tools, compaction, agent messaging, provider-owned tool
@@ -991,6 +991,39 @@ fn invalid_request(message: impl Into<String>) -> codex_protocol::error::CodexEr
 }
 
 #[cfg(test)]
+mod tool_result_status_tests {
+    use super::*;
+
+    #[test]
+    fn function_output_success_status_round_trips_without_normalizing_unknown() {
+        for success in [Some(true), Some(false), None] {
+            let legacy = ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-status".to_string()),
+                name: None,
+                namespace: None,
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text("result".to_string()),
+                    success,
+                },
+                internal_chat_message_metadata_passthrough: None,
+            };
+
+            let canonical = model_input_item_from_response(&legacy)
+                .expect("text function output should be canonicalizable");
+            let ModelInputItem::ToolResult(result) = &canonical else {
+                panic!("expected canonical tool result");
+            };
+            assert_eq!(result.is_error, success.map(|success| !success));
+            assert_eq!(
+                response_item_from_model_input(&canonical, &legacy).unwrap(),
+                legacy
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod discovery_result_tests {
     use super::*;
     use serde_json::json;
@@ -1045,7 +1078,7 @@ mod discovery_result_tests {
             panic!("expected tool result");
         };
         assert_eq!(result.call_id, ModelToolCallId("search-1".to_string()));
-        assert!(!result.is_error);
+        assert_eq!(result.is_error, Some(false));
         let [ModelToolResultContent::DiscoveredTools(tools)] = result.content.as_slice() else {
             panic!("expected discovered tools content");
         };

@@ -46,6 +46,44 @@ fn function_payloads_remain_function_outputs() {
 }
 
 #[test]
+fn aborted_output_uses_unknown_canonical_status_except_for_tool_search() {
+    let output = AbortedToolOutput {
+        message: "aborted".to_string(),
+    };
+    let function_payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let expected = output.to_response_item("abort-call", &function_payload);
+    let result = output
+        .to_tool_result()
+        .expect("function abort should have a canonical textual result");
+    assert_eq!(result.is_error, None);
+    assert_eq!(
+        crate::model_runtime::tool_result_to_response_item(result, "abort-call", &function_payload,),
+        Some(expected)
+    );
+
+    let search_payload = ToolPayload::ToolSearch {
+        arguments: SearchToolCallParams {
+            query: "calendar".to_string(),
+            limit: None,
+        },
+    };
+    let legacy = output.to_response_item("abort-search", &search_payload);
+    assert_eq!(
+        crate::model_runtime::tool_result_to_response_item(
+            output.to_tool_result().unwrap(),
+            "abort-search",
+            &search_payload,
+        ),
+        None
+    );
+    assert!(
+        matches!(legacy, ResponseInputItem::ToolSearchOutput { tools, .. } if tools.is_empty())
+    );
+}
+
+#[test]
 fn mcp_code_mode_result_omits_private_metadata() {
     let output = CallToolResult {
         content: vec![serde_json::json!({

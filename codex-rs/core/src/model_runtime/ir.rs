@@ -200,7 +200,8 @@ pub enum ModelToolInputKind {
 pub struct ModelToolResult {
     pub call_id: ModelToolCallId,
     pub content: Vec<ModelToolResultContent>,
-    pub is_error: bool,
+    /// Whether the result is known to be an error. `None` preserves an unknown producer status.
+    pub is_error: Option<bool>,
 }
 
 /// Tool-result content is distinct from ordinary message content because structured JSON output is
