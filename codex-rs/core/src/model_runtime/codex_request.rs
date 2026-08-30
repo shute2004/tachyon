@@ -676,51 +676,6 @@ fn object_has_only_keys(object: &serde_json::Map<String, Value>, allowed: &[&str
     object.keys().all(|key| allowed.contains(&key.as_str()))
 }
 
-pub(crate) fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bool {
-    if schema.encrypted.is_some() {
-        return true;
-    }
-
-    schema
-        .items
-        .as_deref()
-        .is_some_and(schema_has_responses_encrypted_marker)
-        || schema.properties.as_ref().is_some_and(|properties| {
-            properties
-                .values()
-                .any(schema_has_responses_encrypted_marker)
-        })
-        || schema
-            .additional_properties
-            .as_ref()
-            .is_some_and(|additional| match additional {
-                codex_tools::AdditionalProperties::Boolean(_) => false,
-                codex_tools::AdditionalProperties::Schema(schema) => {
-                    schema_has_responses_encrypted_marker(schema)
-                }
-            })
-        || schema
-            .any_of
-            .as_ref()
-            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
-        || schema
-            .one_of
-            .as_ref()
-            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
-        || schema
-            .all_of
-            .as_ref()
-            .is_some_and(|schemas| schemas.iter().any(schema_has_responses_encrypted_marker))
-        || schema
-            .defs
-            .as_ref()
-            .is_some_and(|schemas| schemas.values().any(schema_has_responses_encrypted_marker))
-        || schema
-            .definitions
-            .as_ref()
-            .is_some_and(|schemas| schemas.values().any(schema_has_responses_encrypted_marker))
-}
-
 fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
     let mut model_tools = Vec::new();
     for tool in tools {
@@ -767,7 +722,7 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                 description,
                 parameters,
             } if execution == TOOL_SEARCH_CLIENT_EXECUTION => {
-                if schema_has_responses_encrypted_marker(parameters) {
+                if parameters.has_responses_encrypted_marker() {
                     return None;
                 }
                 model_tools.push(ModelToolSpec::Function {
@@ -794,7 +749,7 @@ fn model_function_tool(
     // `JsonSchema::encrypted` is a Responses-only reviewed-parameter marker,
     // not JSON Schema or provider-neutral model semantics. Keep such tool
     // declarations on the legacy request path during C2.
-    if schema_has_responses_encrypted_marker(&tool.parameters) {
+    if tool.parameters.has_responses_encrypted_marker() {
         return None;
     }
 
@@ -841,6 +796,20 @@ fn model_tool_availability(defer_loading: Option<bool>) -> Option<ModelToolAvail
 /// Converts canonical invocation tool declarations to the Codex adapter's client-discovery
 /// output values. Serialization remains inside this provider-specific conversion module.
 pub(super) fn tool_search_output_values_from_model(tools: &[ModelToolSpec]) -> Option<Vec<Value>> {
+    // Model IR can represent a top-level free-form tool, but the current Codex client-discovery
+    // output vocabulary cannot. Keep this provider representability constraint at the adapter.
+    if tools.iter().any(|tool| {
+        matches!(
+            tool,
+            ModelToolSpec::Freeform {
+                namespace: None,
+                ..
+            }
+        )
+    }) {
+        return None;
+    }
+
     codex_tools_from_model(tools)
         .ok()?
         .into_iter()

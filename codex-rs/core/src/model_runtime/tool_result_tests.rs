@@ -331,6 +331,21 @@ fn discovered_tools_only_encode_for_known_successful_search_results() {
         },
         availability: DiscoveredToolAvailability::Deferred,
     }]);
+    let model_result = model_tool_result(root_freeform.clone(), "search-root-freeform")
+        .expect("namespace-less free-form should reach Model IR");
+    let [ModelToolResultContent::DiscoveredTools(tools)] = model_result.content.as_slice() else {
+        panic!("expected discovered tools");
+    };
+    assert!(matches!(
+        tools.as_slice(),
+        [ModelToolSpec::Freeform {
+            namespace: None,
+            name,
+            ..
+        }] if name == "raw_query"
+    ));
+
+    // Codex client ToolSearchOutput cannot represent a top-level free-form declaration.
     assert_eq!(
         to_response_item(root_freeform, "search-root-freeform", &search_payload),
         None
@@ -342,5 +357,59 @@ fn discovered_tools_only_encode_for_known_successful_search_results() {
     assert_eq!(
         to_response_item(discovered, "function-call", &function_payload),
         None
+    );
+}
+
+#[test]
+fn namespace_less_discovery_freeform_uses_legacy_registry_fallback() {
+    struct NamespaceLessFreeformOutput;
+
+    impl ToolOutput for NamespaceLessFreeformOutput {
+        fn log_output(&self) -> String {
+            "namespace-less free-form discovery".to_string()
+        }
+
+        fn success_for_logging(&self) -> bool {
+            true
+        }
+
+        fn to_tool_result(&self) -> Option<ToolResult> {
+            Some(ToolResult::success_discovered_tools(vec![
+                codex_tools::DiscoveredToolSpec::Freeform {
+                    namespace: None,
+                    name: "raw_query".to_string(),
+                    description: "Run a raw query".to_string(),
+                    input_format: codex_tools::DiscoveredFreeformInputFormat::Grammar {
+                        syntax: "lark".to_string(),
+                        definition: "start: /.+/".to_string(),
+                    },
+                    availability: codex_tools::DiscoveredToolAvailability::Deferred,
+                },
+            ]))
+        }
+
+        fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
+            ResponseInputItem::ToolSearchOutput {
+                call_id: call_id.to_string(),
+                status: "completed".to_string(),
+                execution: "client".to_string(),
+                tools: vec![json!({"legacy_fallback": true})],
+            }
+        }
+    }
+
+    let output = NamespaceLessFreeformOutput;
+    let payload = ToolPayload::ToolSearch {
+        arguments: serde_json::from_value(json!({"query": "tools"})).unwrap(),
+    };
+    let expected = output.to_response_item("search-root-freeform", &payload);
+
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &output,
+            "search-root-freeform",
+            &payload,
+        ),
+        expected
     );
 }

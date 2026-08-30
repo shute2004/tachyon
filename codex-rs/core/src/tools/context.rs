@@ -214,7 +214,9 @@ fn discovered_tool_specs(tool: &LoadableToolSpec) -> Option<Vec<DiscoveredToolSp
     match tool {
         LoadableToolSpec::Function(tool) => Some(vec![discovered_function_tool(None, tool)?]),
         LoadableToolSpec::Namespace(namespace) => {
-            if namespace.description != default_namespace_description(&namespace.name) {
+            if namespace.tools.is_empty()
+                || namespace.description != default_namespace_description(&namespace.name)
+            {
                 return None;
             }
             namespace
@@ -237,7 +239,7 @@ fn discovered_function_tool(
     namespace: Option<String>,
     tool: &ResponsesApiTool,
 ) -> Option<DiscoveredToolSpec> {
-    if crate::model_runtime::schema_has_responses_encrypted_marker(&tool.parameters) {
+    if tool.parameters.has_responses_encrypted_marker() {
         return None;
     }
     Some(DiscoveredToolSpec::Function {

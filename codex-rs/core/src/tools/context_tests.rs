@@ -484,6 +484,23 @@ fn tool_search_output_uses_canonical_result_and_preserves_invalid_fallbacks() {
         invalid_namespace.to_response_item("search-invalid-namespace", &payload)
     );
 
+    let empty_namespace = ToolSearchOutput {
+        tools: vec![LoadableToolSpec::Namespace(ResponsesApiNamespace {
+            name: "calendar".to_string(),
+            description: "Tools in the calendar namespace.".to_string(),
+            tools: Vec::new(),
+        })],
+    };
+    assert_eq!(empty_namespace.to_tool_result(), None);
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &empty_namespace,
+            "search-empty-namespace",
+            &payload,
+        ),
+        empty_namespace.to_response_item("search-empty-namespace", &payload)
+    );
+
     let invalid_defer_loading = ToolSearchOutput {
         tools: vec![LoadableToolSpec::Function(ResponsesApiTool {
             name: "lookup".to_string(),
