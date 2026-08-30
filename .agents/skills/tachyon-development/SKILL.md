@@ -6,7 +6,7 @@ description: Use when developing, refactoring, validating, reviewing, or merging
 # Tachyon Development
 
 > Added: 2026-08-27 09:10 JST  
-> Last reviewed: 2026-08-27 13:46 JST
+> Last reviewed: 2026-08-31 JST
 
 Use this skill for work in `shute2004/tachyon`.
 
@@ -14,14 +14,14 @@ Use this skill for work in `shute2004/tachyon`.
 
 1. Read the current `main`, `TACHYON.md`, `docs/tachyon/architecture.md`, and the implementation directly relevant to the change. Do not design from PR text or issue text alone.
 2. Preserve behavior first. Move dependency direction and ownership boundaries incrementally rather than rewriting mature Codex behavior from scratch.
-3. Use a short-lived focused branch from current `main` and keep the PR scoped to one architectural or behavioral responsibility.
-4. Before editing model-runtime code, distinguish generic harness capability from provider/protocol-specific realization. Keep concrete OpenAI/Codex mechanisms below adapters unless their generic semantics are demonstrated.
-5. For local Rust checks, read `references/local-validation.md`.
-6. Before sending terminal commands or patching workflows, read `references/terminal-and-patching.md`.
-7. For branch, PR, merge, and independent-review workflow, read `references/git-pr-workflow.md`.
-8. For ModelRuntime, Provider/Protocol/Route, Endpoint/Auth, compaction, retry, or provider-private state work, read `references/architecture-extraction.md`.
-9. If development reveals a non-obvious rule that a fresh agent would likely miss, consider updating this skill or recording a candidate in Notion. Do not add skill content mechanically after every task.
-10. Check the freshness metadata and change history of any Skill/reference guidance you rely on. If it is old relative to current code, verify the relevant implementation before treating it as authoritative.
+3. Before expanding a change beyond its immediate responsibility, read `references/implementation-scope-discipline.md` and distinguish a true prerequisite from an adjacent improvement.
+4. Use a short-lived focused branch from current `main`. For branch/worktree lifecycle and cleanup, read `references/branch-hygiene.md`.
+5. Before editing model-runtime or other provider-boundary code, distinguish generic harness capability from provider/protocol-specific realization. Keep concrete provider mechanisms below adapters unless their generic semantics are demonstrated. For the detailed extraction rules, read `references/architecture-extraction.md`.
+6. For local Rust checks, read `references/local-validation.md`. When several local checks or ordered steps must be handed to the user, also read `references/local-validation-command-handoff.md` and minimize user operations by packaging validation when practical.
+7. Before sending terminal commands or constructing patching workflows, read `references/terminal-and-patching.md`.
+8. For branch, PR, and merge workflow, read `references/git-pr-workflow.md`. For durable architecture-boundary changes, also read `references/independent-architecture-review.md`.
+9. Check the freshness metadata and change history of any Skill/reference guidance you rely on. If it is old relative to current code, verify the relevant implementation before treating it as authoritative.
+10. Project-specific reusable developer-agent guidance belongs in this Tachyon Agent Skill. Mutable progress/current SHAs, coordination, and historical snapshots belong in the private development-memory repository rather than being duplicated as a second active Skill source.
 
 ## Upstream Codex synchronization
 
@@ -62,3 +62,4 @@ A migration PR should make clear:
 - 2026-08-27 10:05 JST — Added explicit Skill freshness checks to the core workflow.
 - 2026-08-27 10:31 JST — Re-reviewed the full Skill and standardized freshness/change-history timestamps.
 - 2026-08-27 13:46 JST — Added high-frequency Codex upstream audit cadence and separation between extraction, upstream synchronization, and Tachyon-specific improvements.
+- 2026-08-31 JST — Consolidated project-specific branch hygiene, scope discipline, independent review, and low-burden local-validation handoff guidance from Second-Brain into this Agent Skill.
