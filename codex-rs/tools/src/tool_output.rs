@@ -12,40 +12,54 @@ use crate::ToolPayload;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
     pub content: Vec<ToolResultContent>,
-    pub is_error: bool,
+    /// Whether the result is known to be an error. `None` preserves a producer's unknown status.
+    pub is_error: Option<bool>,
 }
 
 impl ToolResult {
     pub fn success_text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(text.into())],
-            is_error: false,
+            is_error: Some(false),
         }
     }
 
     pub fn error_text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(text.into())],
-            is_error: true,
+            is_error: Some(true),
+        }
+    }
+
+    pub fn unknown_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error: None,
         }
     }
 
     pub fn success_json(value: JsonValue) -> Self {
         Self {
             content: vec![ToolResultContent::Json(value)],
-            is_error: false,
+            is_error: Some(false),
         }
     }
 
     pub fn error_json(value: JsonValue) -> Self {
         Self {
             content: vec![ToolResultContent::Json(value)],
-            is_error: true,
+            is_error: Some(true),
+        }
+    }
+
+    pub fn unknown_json(value: JsonValue) -> Self {
+        Self {
+            content: vec![ToolResultContent::Json(value)],
+            is_error: None,
         }
     }
 
     pub fn from_function_call_output(payload: &FunctionCallOutputPayload) -> Option<Self> {
-        let success = payload.success?;
         let content = match &payload.body {
             FunctionCallOutputBody::Text(text) => vec![ToolResultContent::Text(text.clone())],
             FunctionCallOutputBody::ContentItems(items)
@@ -64,7 +78,7 @@ impl ToolResult {
 
         Some(Self {
             content,
-            is_error: !success,
+            is_error: payload.success.map(|success| !success),
         })
     }
 }
@@ -245,12 +259,10 @@ impl ToolOutput for JsonToolOutput {
     }
 
     fn to_tool_result(&self) -> Option<ToolResult> {
-        self.success.map(|success| {
-            if success {
-                ToolResult::success_json(self.value.clone())
-            } else {
-                ToolResult::error_json(self.value.clone())
-            }
+        Some(match self.success {
+            Some(true) => ToolResult::success_json(self.value.clone()),
+            Some(false) => ToolResult::error_json(self.value.clone()),
+            None => ToolResult::unknown_json(self.value.clone()),
         })
     }
 

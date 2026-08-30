@@ -4,6 +4,7 @@ use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use codex_protocol::error::CodexErrorDetails;
+use codex_tools::ToolResult;
 use codex_tools::ToolSpec;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -290,6 +291,13 @@ impl ToolOutput for WaitAgentResult {
 
     fn success_for_logging(&self) -> bool {
         true
+    }
+
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        Some(ToolResult::unknown_text(tool_output_json_text(
+            self,
+            "wait_agent",
+        )))
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {

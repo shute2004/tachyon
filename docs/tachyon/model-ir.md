@@ -37,7 +37,8 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - free-form input grammar constraints without assuming a provider wire representation;
 - immediate versus deferred tool availability and semantic tool-discovery purpose;
 - structured or textual tool-call input;
-- text/JSON/media tool results;
+- text/JSON/media tool results with a tri-state error marker (`Some(true)` known error,
+  `Some(false)` known success, `None` unknown);
 - tool-discovery results that expose semantic tool declarations without carrying provider-shaped
   serialized tool JSON;
 - text and JSON-schema output contracts;
@@ -123,6 +124,12 @@ continue through Codex-specific compatibility paths. Later they should either:
 output tokens are the common baseline; cache and reasoning details are optional. A provider-reported
 total may be kept separately rather than recomputed because providers can account for token classes
 that the common fields do not represent.
+
+Tool-result status follows the same lossless principle at the model-runtime boundary. A canonical
+`ModelToolResult` keeps `is_error: Option<bool>`: `Some(true)` and `Some(false)` retain an explicit
+provider or harness decision, while `None` means that the producer did not determine the status.
+The current Responses adapter maps this marker back to `FunctionCallOutputPayload.success` without
+turning an unknown result into a success or error.
 
 ## Migration order
 

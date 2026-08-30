@@ -10,6 +10,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseInputItem;
+use codex_tools::JsonToolOutput;
 use codex_tools::ToolPayload;
 use codex_tools::ToolResult;
 use codex_tools::ToolResultContent;
@@ -46,12 +47,12 @@ fn neutral_json_result_stays_structured_until_the_adapter_boundary() {
     let value = json!({"answer": 42});
     let result = ToolResult {
         content: vec![ToolResultContent::Json(value.clone())],
-        is_error: true,
+        is_error: Some(true),
     };
     let expected = ModelToolResult {
         call_id: ModelToolCallId("json-call".to_string()),
         content: vec![ModelToolResultContent::Json(value)],
-        is_error: true,
+        is_error: Some(true),
     };
     assert_eq!(
         model_tool_result(result.clone(), "json-call"),
@@ -70,6 +71,58 @@ fn neutral_json_result_stays_structured_until_the_adapter_boundary() {
         FunctionCallOutputBody::Text(r#"{"answer":42}"#.into())
     );
     assert_eq!(output.success, Some(false));
+}
+
+#[test]
+fn text_result_adapter_preserves_all_error_status_values() {
+    let payload = ToolPayload::Function {
+        arguments: "{}".into(),
+    };
+
+    for success in [Some(true), Some(false), None] {
+        let result = ToolResult::from_function_call_output(&FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("result".into()),
+            success,
+        })
+        .expect("text output should be canonicalizable");
+        assert_eq!(result.is_error, success.map(|success| !success));
+
+        let (_, output) = output(
+            to_response_item(result, "status-call", &payload).unwrap(),
+            &payload,
+        );
+        assert_eq!(output.body, FunctionCallOutputBody::Text("result".into()));
+        assert_eq!(output.success, success);
+    }
+}
+
+#[test]
+fn unknown_json_and_function_outputs_use_canonical_egress() {
+    let payload = ToolPayload::Function {
+        arguments: "{}".into(),
+    };
+
+    let json_output = JsonToolOutput::with_success(json!({"pending": true}), None);
+    let expected = json_output.to_response_item("json-call", &payload);
+    let result = json_output
+        .to_tool_result()
+        .expect("unknown JSON output should project");
+    assert_eq!(result.is_error, None);
+    assert_eq!(
+        to_response_item(result, "json-call", &payload),
+        Some(expected)
+    );
+
+    let function_output = FunctionToolOutput::from_text("pending".into(), None);
+    let expected = function_output.to_response_item("function-call", &payload);
+    let result = function_output
+        .to_tool_result()
+        .expect("unknown function output should project");
+    assert_eq!(result.is_error, None);
+    assert_eq!(
+        to_response_item(result, "function-call", &payload),
+        Some(expected)
+    );
 }
 
 #[test]

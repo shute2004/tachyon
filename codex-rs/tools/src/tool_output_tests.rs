@@ -11,15 +11,15 @@ use serde_json::json;
 const IMAGE: &str = "https://example.test/image.png";
 const AUDIO: &str = "https://example.test/audio.wav";
 
-fn result(content: Vec<ToolResultContent>, is_error: bool) -> ToolResult {
+fn result(content: Vec<ToolResultContent>, is_error: Option<bool>) -> ToolResult {
     ToolResult { content, is_error }
 }
 
-fn text_result(text: &str, is_error: bool) -> ToolResult {
+fn text_result(text: &str, is_error: Option<bool>) -> ToolResult {
     result(vec![ToolResultContent::Text(text.into())], is_error)
 }
 
-fn json_result(value: serde_json::Value, is_error: bool) -> ToolResult {
+fn json_result(value: serde_json::Value, is_error: Option<bool>) -> ToolResult {
     result(vec![ToolResultContent::Json(value)], is_error)
 }
 
@@ -33,44 +33,47 @@ fn item(value: serde_json::Value) -> FunctionCallOutputContentItem {
 
 #[test]
 fn constructors_and_json_outputs() {
-    assert_eq!(ToolResult::success_text("ok"), text_result("ok", false));
+    assert_eq!(
+        ToolResult::success_text("ok"),
+        text_result("ok", Some(false))
+    );
     assert_eq!(
         ToolResult::error_text("failed"),
-        text_result("failed", true)
+        text_result("failed", Some(true))
     );
     let ok = json!({"answer": 42});
     let error = json!({"error": "failed"});
     assert_eq!(
         ToolResult::success_json(ok.clone()),
-        json_result(ok.clone(), false)
+        json_result(ok.clone(), Some(false))
     );
     assert_eq!(
         ToolResult::error_json(error.clone()),
-        json_result(error.clone(), true)
+        json_result(error.clone(), Some(true))
     );
     assert_eq!(
         JsonToolOutput::with_success(ok.clone(), Some(true)).to_tool_result(),
-        Some(json_result(ok, false))
+        Some(json_result(ok, Some(false)))
     );
     assert_eq!(
         JsonToolOutput::with_success(error.clone(), Some(false)).to_tool_result(),
-        Some(json_result(error, true))
+        Some(json_result(error, Some(true)))
     );
     assert_eq!(
         JsonToolOutput::with_success(json!("unknown"), None).to_tool_result(),
-        None
+        Some(json_result(json!("unknown"), None))
     );
 }
 
 #[test]
 fn function_call_output_projects_content_or_falls_back() {
-    for success in [true, false] {
+    for success in [Some(true), Some(false), None] {
         assert_eq!(
             ToolResult::from_function_call_output(&payload(
                 FunctionCallOutputBody::Text("output".into()),
-                Some(success),
+                success,
             )),
-            Some(text_result("output", !success))
+            Some(text_result("output", success.map(|success| !success)))
         );
     }
 
@@ -84,7 +87,7 @@ fn function_call_output_projects_content_or_falls_back() {
         Some(false),
     );
     let actual = ToolResult::from_function_call_output(&media_payload).unwrap();
-    assert!(actual.is_error);
+    assert_eq!(actual.is_error, Some(true));
     assert!(matches!(
         actual.content.as_slice(),
         [
@@ -105,12 +108,11 @@ fn function_call_output_projects_content_or_falls_back() {
         ]),
         Some(true),
     );
-    let unknown = payload(FunctionCallOutputBody::Text("unknown".into()), None);
     let singleton = payload(
         FunctionCallOutputBody::ContentItems(vec![item(json!({"type":"input_text","text":"one"}))]),
         Some(true),
     );
-    for payload in [encrypted, unknown, singleton] {
+    for payload in [encrypted, singleton] {
         assert_eq!(ToolResult::from_function_call_output(&payload), None);
     }
 }

@@ -136,13 +136,25 @@ fn tool_results_keep_structured_output_out_of_message_content() {
             "path": "README.md",
             "exists": true,
         }))],
-        is_error: false,
+        is_error: Some(false),
     };
 
     assert!(matches!(
         result.content.as_slice(),
         [ModelToolResultContent::Json(_)]
     ));
+}
+
+#[test]
+fn tool_result_error_status_is_tristate() {
+    for is_error in [Some(false), Some(true), None] {
+        let result = ModelToolResult {
+            call_id: ModelToolCallId("call-status".to_string()),
+            content: vec![ModelToolResultContent::Text("result".to_string())],
+            is_error,
+        };
+        assert_eq!(result.is_error, is_error);
+    }
 }
 
 #[test]
