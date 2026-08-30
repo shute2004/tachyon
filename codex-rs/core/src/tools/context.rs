@@ -12,9 +12,16 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
+use codex_tools::DiscoveredFreeformInputFormat;
+use codex_tools::DiscoveredToolAvailability;
+use codex_tools::DiscoveredToolSpec;
+use codex_tools::FreeformTool;
 use codex_tools::LoadableToolSpec;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolResult;
+use codex_tools::default_namespace_description;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
@@ -173,6 +180,18 @@ impl ToolOutput for ToolSearchOutput {
         true
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        let tools = self
+            .tools
+            .iter()
+            .map(discovered_tool_specs)
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Some(ToolResult::success_discovered_tools(tools))
+    }
+
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
         ResponseInputItem::ToolSearchOutput {
             call_id: call_id.to_string(),
@@ -188,6 +207,75 @@ impl ToolOutput for ToolSearchOutput {
                 })
                 .collect(),
         }
+    }
+}
+
+fn discovered_tool_specs(tool: &LoadableToolSpec) -> Option<Vec<DiscoveredToolSpec>> {
+    match tool {
+        LoadableToolSpec::Function(tool) => Some(vec![discovered_function_tool(None, tool)?]),
+        LoadableToolSpec::Namespace(namespace) => {
+            if namespace.tools.is_empty()
+                || namespace.description != default_namespace_description(&namespace.name)
+            {
+                return None;
+            }
+            namespace
+                .tools
+                .iter()
+                .map(|tool| match tool {
+                    ResponsesApiNamespaceTool::Function(tool) => {
+                        discovered_function_tool(Some(namespace.name.clone()), tool)
+                    }
+                    ResponsesApiNamespaceTool::Custom(tool) => {
+                        discovered_freeform_tool(Some(namespace.name.clone()), tool)
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+fn discovered_function_tool(
+    namespace: Option<String>,
+    tool: &ResponsesApiTool,
+) -> Option<DiscoveredToolSpec> {
+    if tool.parameters.has_responses_encrypted_marker() {
+        return None;
+    }
+    Some(DiscoveredToolSpec::Function {
+        namespace,
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_schema: serde_json::to_value(&tool.parameters).ok()?,
+        strict: tool.strict,
+        availability: discovered_tool_availability(tool.defer_loading)?,
+    })
+}
+
+fn discovered_freeform_tool(
+    namespace: Option<String>,
+    tool: &FreeformTool,
+) -> Option<DiscoveredToolSpec> {
+    if tool.format.r#type != "grammar" {
+        return None;
+    }
+    Some(DiscoveredToolSpec::Freeform {
+        namespace,
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_format: DiscoveredFreeformInputFormat::Grammar {
+            syntax: tool.format.syntax.clone(),
+            definition: tool.format.definition.clone(),
+        },
+        availability: discovered_tool_availability(tool.defer_loading)?,
+    })
+}
+
+fn discovered_tool_availability(defer_loading: Option<bool>) -> Option<DiscoveredToolAvailability> {
+    match defer_loading {
+        None => Some(DiscoveredToolAvailability::Immediate),
+        Some(true) => Some(DiscoveredToolAvailability::Deferred),
+        Some(false) => None,
     }
 }
 
