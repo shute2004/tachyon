@@ -33,23 +33,36 @@ mod envelope;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
-pub use envelope::HistoryMetadata;
+
+/// Migration-era metadata persisted beside a Codex/Responses compatibility item.
+///
+/// `client_authored` is host-specific and therefore deliberately remains under the
+/// Codex-branded compatibility name instead of being promoted into a generic history contract.
+/// The fallback token budget is reusable harness behavior, but remains here until a later slice
+/// splits generic metadata from compatibility metadata without changing persisted bytes.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+pub struct CodexHarnessMetadata {
+    /// Whether a developer message was supplied by an app-server client.
+    #[serde(default)]
+    pub client_authored: bool,
+
+    /// Overrides history's fallback truncation budget, including on resume.
+    /// Measured in tokens, with any tool-specific allowance already included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_token_limit_override: Option<usize>,
+}
 
 /// Transitional compatibility alias for Responses-shaped history callers.
 ///
-/// New generic history code should name the envelope independently from its payload and use
-/// `HistoryEnvelope<T>` directly. The Responses payload remains until the next neutralization
-/// slices introduce and migrate a kernel-owned history item representation.
-pub type ResponseItemEnvelope = HistoryEnvelope<ResponseItem>;
-
-/// Transitional compatibility alias for callers that still use the old Codex-branded name.
-pub type CodexHarnessMetadata = HistoryMetadata;
+/// The envelope itself is provider-neutral; both the Responses payload and Codex metadata are
+/// explicit type parameters that later neutralization slices can replace independently.
+pub type ResponseItemEnvelope = HistoryEnvelope<ResponseItem, CodexHarnessMetadata>;
 
 /// Persisted rollout item used by core history and rollout storage.
 #[derive(Debug, Clone)]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
-    ResponseItem(HistoryEnvelope<ResponseItem>),
+    ResponseItem(ResponseItemEnvelope),
     InterAgentCommunication(InterAgentCommunication),
     InterAgentCommunicationMetadata {
         trigger_turn: bool,
@@ -98,7 +111,7 @@ impl JsonSchema for RolloutItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
-    pub replacement_history: Option<Vec<HistoryEnvelope<ResponseItem>>>,
+    pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
     pub mcp_resource_origins: Option<McpResourceOriginCheckpoint>,
     pub window_number: Option<u64>,
     pub first_window_id: Option<String>,
