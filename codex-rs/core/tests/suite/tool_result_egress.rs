@@ -1,25 +1,33 @@
 use anyhow::Result;
 use codex_core::config::Config;
-use codex_extension_api::{ExtensionData, ExtensionRegistryBuilder, ToolContributor};
-use codex_protocol::models::{FunctionCallOutputPayload, ResponseInputItem};
-use codex_tools::{
-    JsonSchema, ResponsesApiTool, ToolCall, ToolExecutor, ToolExecutorFuture, ToolName, ToolOutput,
-    ToolPayload, ToolResult, ToolResultContent, ToolSpec,
-};
-use core_test_support::{responses, skip_if_no_network, test_codex::test_codex};
+use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolContributor;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseInputItem;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolCall;
+use codex_tools::ToolExecutor;
+use codex_tools::ToolExecutorFuture;
+use codex_tools::ToolName;
+use codex_tools::ToolOutput;
+use codex_tools::ToolPayload;
+use codex_tools::ToolResult;
+use codex_tools::ToolSpec;
+use core_test_support::responses;
+use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 const TOOL_NAME: &str = "egress_test_tool";
 const CALL_ID: &str = "egress-test-call";
-struct EgressTestTool {
-    canonical: Option<ToolResult>,
-}
+struct EgressTestTool(Option<ToolResult>);
 impl ToolContributor for EgressTestTool {
     fn tools(&self, _: &ExtensionData, _: &ExtensionData) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
-        vec![Arc::new(Self {
-            canonical: self.canonical.clone(),
-        })]
+        vec![Arc::new(Self(self.0.clone()))]
     }
 }
 impl ToolExecutor<ToolCall> for EgressTestTool {
@@ -39,39 +47,30 @@ impl ToolExecutor<ToolCall> for EgressTestTool {
     }
 
     fn handle(&self, _call: ToolCall) -> ToolExecutorFuture<'_> {
-        let canonical = self.canonical.clone();
-        Box::pin(async move { Ok(Box::new(EgressTestOutput { canonical }) as Box<dyn ToolOutput>) })
+        let output = EgressTestOutput(self.0.clone());
+        Box::pin(async move { Ok(Box::new(output) as Box<dyn ToolOutput>) })
     }
 }
-struct EgressTestOutput {
-    canonical: Option<ToolResult>,
-}
-
+struct EgressTestOutput(Option<ToolResult>);
 impl ToolOutput for EgressTestOutput {
     fn log_output(&self) -> String {
         "legacy".to_string()
     }
-
     fn success_for_logging(&self) -> bool {
         true
     }
-
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
         ResponseInputItem::FunctionCallOutput {
             call_id: call_id.to_string(),
             output: FunctionCallOutputPayload::from_text("legacy".to_string()),
         }
     }
-
     fn to_tool_result(&self) -> Option<ToolResult> {
-        self.canonical.clone()
+        self.0.clone()
     }
 }
 
-async fn assert_tool_result_egress(
-    canonical: Option<ToolResult>,
-    expected_output: &str,
-) -> Result<()> {
+async fn assert_egress(canonical: Option<ToolResult>, expected: &str) -> Result<()> {
     let server = responses::start_mock_server().await;
     let mock = responses::mount_sse_sequence(
         &server,
@@ -88,37 +87,27 @@ async fn assert_tool_result_egress(
         ],
     )
     .await;
-
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    extensions.tool_contributor(Arc::new(EgressTestTool { canonical }));
+    extensions.tool_contributor(Arc::new(EgressTestTool(canonical)));
     let test = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .build_with_auto_env(&server)
         .await?;
     test.submit_text_turn("Call the egress test tool.").await?;
-
     let requests = mock.requests();
     assert_eq!(requests.len(), 2);
     let output = requests[1].function_call_output(CALL_ID)["output"].clone();
-    assert_eq!(output, json!(expected_output));
-
+    assert_eq!(output, json!(expected));
     Ok(())
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_loop_uses_tool_result_egress() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    for (canonical, expected_output) in [
-        (
-            Some(ToolResult {
-                content: vec![ToolResultContent::Text("canonical".to_string())],
-                is_error: false,
-            }),
-            "canonical",
-        ),
+    for (canonical, expected) in [
+        (Some(ToolResult::success_text("canonical")), "canonical"),
         (None, "legacy"),
     ] {
-        assert_tool_result_egress(canonical, expected_output).await?;
+        assert_egress(canonical, expected).await?;
     }
     Ok(())
 }
