@@ -1,14 +1,15 @@
 use codex_protocol::models::ResponseItem;
 
-/// Provider-neutral tool-call families used by conversation-history normalization.
+/// Compatibility-only pairing classes for the current Responses-shaped history payload.
 ///
-/// These values describe the pairing semantics the harness needs from history. They do not expose
-/// Responses item variants, execution status strings, or provider item identifiers.
+/// These values describe which call/output variants share a pairing namespace in the current
+/// compatibility representation. They are not a provider-neutral tool taxonomy and must not be
+/// reused as the semantic classification for a future canonical `HistoryItem`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum HistoryToolFamily {
-    Function,
-    ToolSearch,
-    Custom,
+pub(crate) enum ResponsesToolPairingClass {
+    FunctionCallOutput,
+    ToolSearchOutput,
+    CustomToolCallOutput,
 }
 
 /// Which side of a tool call/result pair an item represents.
@@ -18,79 +19,81 @@ pub(crate) enum HistoryToolSide {
     Output,
 }
 
-/// Read-only pairing semantics projected from the current compatibility history item.
+/// Read-only correlation semantics projected from the current compatibility history item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HistoryToolCorrelation<'a> {
-    pub(crate) family: HistoryToolFamily,
+    /// Migration-only discriminator needed to pair the current Responses-shaped variants.
+    pub(crate) compatibility_pairing_class: ResponsesToolPairingClass,
     pub(crate) side: HistoryToolSide,
     pub(crate) call_id: &'a str,
     /// Some provider-owned outputs legitimately have no matching call in local history.
-    pub(crate) counterpart_required: bool,
+    pub(crate) local_counterpart_required: bool,
 }
 
-/// Projects the current Responses-shaped compatibility item into the smallest tool-correlation
-/// vocabulary required by history normalization.
+/// Projects the current Responses-shaped compatibility item into the correlation facts required by
+/// history normalization plus an explicitly compatibility-only pairing discriminator.
 ///
-/// Keeping this mapping in one place lets normalization operate on harness semantics while the
-/// persisted and model-visible compatibility representation remains unchanged during migration.
+/// Keeping this mapping in one place lets normalization avoid depending on individual Responses
+/// variants for ordinary matching without turning the Responses pairing taxonomy into kernel
+/// history semantics.
 pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrelation<'_>> {
     match item {
         ResponseItem::FunctionCall { call_id, .. } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::Function,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
             side: HistoryToolSide::Call,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         // Local shell calls are paired with FunctionCallOutput in the existing Responses shape.
         ResponseItem::LocalShellCall {
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::Function,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
             side: HistoryToolSide::Call,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         ResponseItem::FunctionCallOutput {
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::Function,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
             side: HistoryToolSide::Output,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         ResponseItem::ToolSearchCall {
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::ToolSearch,
+            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearchOutput,
             side: HistoryToolSide::Call,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         ResponseItem::ToolSearchOutput {
             call_id: Some(call_id),
             execution,
             ..
         } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::ToolSearch,
+            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearchOutput,
             side: HistoryToolSide::Output,
             call_id,
             // Server-owned search outputs may arrive without a client-side call in history.
-            counterpart_required: execution != "server",
+            local_counterpart_required: execution != "server",
         }),
         ResponseItem::CustomToolCall { call_id, .. } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::Custom,
+            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCallOutput,
             side: HistoryToolSide::Call,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         ResponseItem::CustomToolCallOutput { call_id, .. } => Some(HistoryToolCorrelation {
-            family: HistoryToolFamily::Custom,
+            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCallOutput,
             side: HistoryToolSide::Output,
             call_id,
-            counterpart_required: true,
+            local_counterpart_required: true,
         }),
         _ => None,
     }
@@ -102,7 +105,7 @@ mod tests {
     use codex_protocol::models::FunctionCallOutputPayload;
 
     #[test]
-    fn function_call_and_output_share_neutral_correlation() {
+    fn function_call_and_output_share_responses_pairing_class() {
         let call = ResponseItem::FunctionCall {
             id: None,
             name: "shell".to_string(),
@@ -123,12 +126,18 @@ mod tests {
 
         let call = tool_correlation(&call).expect("call correlation");
         let output = tool_correlation(&output).expect("output correlation");
-        assert_eq!(call.family, HistoryToolFamily::Function);
-        assert_eq!(output.family, HistoryToolFamily::Function);
+        assert_eq!(
+            call.compatibility_pairing_class,
+            ResponsesToolPairingClass::FunctionCallOutput
+        );
+        assert_eq!(
+            output.compatibility_pairing_class,
+            ResponsesToolPairingClass::FunctionCallOutput
+        );
         assert_eq!(call.call_id, output.call_id);
         assert_eq!(call.side, HistoryToolSide::Call);
         assert_eq!(output.side, HistoryToolSide::Output);
-        assert!(output.counterpart_required);
+        assert!(output.local_counterpart_required);
     }
 
     #[test]
@@ -143,9 +152,12 @@ mod tests {
         };
 
         let correlation = tool_correlation(&output).expect("tool search correlation");
-        assert_eq!(correlation.family, HistoryToolFamily::ToolSearch);
+        assert_eq!(
+            correlation.compatibility_pairing_class,
+            ResponsesToolPairingClass::ToolSearchOutput
+        );
         assert_eq!(correlation.side, HistoryToolSide::Output);
-        assert!(!correlation.counterpart_required);
+        assert!(!correlation.local_counterpart_required);
     }
 
     #[test]
