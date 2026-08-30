@@ -676,7 +676,7 @@ fn object_has_only_keys(object: &serde_json::Map<String, Value>, allowed: &[&str
     object.keys().all(|key| allowed.contains(&key.as_str()))
 }
 
-fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bool {
+pub(crate) fn schema_has_responses_encrypted_marker(schema: &codex_tools::JsonSchema) -> bool {
     if schema.encrypted.is_some() {
         return true;
     }
@@ -836,6 +836,16 @@ fn model_tool_availability(defer_loading: Option<bool>) -> Option<ModelToolAvail
         Some(true) => Some(ModelToolAvailability::Deferred),
         Some(false) => None,
     }
+}
+
+/// Converts canonical invocation tool declarations to the Codex adapter's client-discovery
+/// output values. Serialization remains inside this provider-specific conversion module.
+pub(super) fn tool_search_output_values_from_model(tools: &[ModelToolSpec]) -> Option<Vec<Value>> {
+    codex_tools_from_model(tools)
+        .ok()?
+        .into_iter()
+        .map(|tool| serde_json::to_value(tool).ok())
+        .collect()
 }
 
 fn codex_tools_from_model(tools: &[ModelToolSpec]) -> Result<Vec<ToolSpec>> {

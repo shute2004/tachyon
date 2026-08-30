@@ -1,16 +1,27 @@
 use super::model_tool_result;
 use super::to_response_item;
+use crate::model_runtime::ir::ModelFreeformInputFormat;
+use crate::model_runtime::ir::ModelToolAvailability;
 use crate::model_runtime::ir::ModelToolCallId;
+use crate::model_runtime::ir::ModelToolPurpose;
 use crate::model_runtime::ir::ModelToolResult;
 use crate::model_runtime::ir::ModelToolResultContent;
+use crate::model_runtime::ir::ModelToolSpec;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolSearchOutput;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseInputItem;
+use codex_tools::FreeformTool;
+use codex_tools::FreeformToolFormat;
 use codex_tools::JsonToolOutput;
+use codex_tools::LoadableToolSpec;
+use codex_tools::ResponsesApiNamespace;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use codex_tools::ToolPayload;
 use codex_tools::ToolResult;
 use codex_tools::ToolResultContent;
@@ -174,4 +185,144 @@ fn mixed_text_image_audio_output_preserves_order_and_image_detail() {
         assert_eq!(output.body, FunctionCallOutputBody::ContentItems(items));
         assert_eq!(output.success, Some(false));
     }
+}
+
+#[test]
+fn discovered_tool_result_adapter_preserves_tool_order_and_wire_shape() {
+    let root = ResponsesApiTool {
+        name: "lookup".to_string(),
+        description: "Look up a record".to_string(),
+        strict: true,
+        defer_loading: Some(true),
+        parameters: serde_json::from_value(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false,
+        }))
+        .unwrap(),
+        output_schema: None,
+    };
+    let namespace_function = ResponsesApiTool {
+        name: "get_event".to_string(),
+        description: "Get a calendar event".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: serde_json::from_value(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }))
+        .unwrap(),
+        output_schema: None,
+    };
+    let namespace_freeform = FreeformTool {
+        name: "search_events".to_string(),
+        description: "Search calendar events".to_string(),
+        defer_loading: Some(true),
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "lark".to_string(),
+            definition: "start: /.+/".to_string(),
+        },
+    };
+    let output = ToolSearchOutput {
+        tools: vec![
+            LoadableToolSpec::Function(root),
+            LoadableToolSpec::Namespace(ResponsesApiNamespace {
+                name: "calendar".to_string(),
+                description: "Tools in the calendar namespace.".to_string(),
+                tools: vec![
+                    ResponsesApiNamespaceTool::Function(namespace_function),
+                    ResponsesApiNamespaceTool::Custom(namespace_freeform),
+                ],
+            }),
+        ],
+    };
+    let payload = ToolPayload::ToolSearch {
+        arguments: serde_json::from_value(json!({"query": "calendar"})).unwrap(),
+    };
+
+    let result = output
+        .to_tool_result()
+        .expect("valid discovered tools should project");
+    assert_eq!(result.is_error, Some(false));
+    let model_result = model_tool_result(result.clone(), "search-1").expect("model result");
+    let [ModelToolResultContent::DiscoveredTools(tools)] = model_result.content.as_slice() else {
+        panic!("expected discovered tools content");
+    };
+    assert!(matches!(
+        tools.as_slice(),
+        [
+            ModelToolSpec::Function {
+                namespace: None,
+                name,
+                strict: true,
+                availability: ModelToolAvailability::Deferred,
+                purpose: ModelToolPurpose::Invocation,
+                ..
+            },
+            ModelToolSpec::Function {
+                namespace: Some(namespace),
+                name: function_name,
+                availability: ModelToolAvailability::Immediate,
+                purpose: ModelToolPurpose::Invocation,
+                ..
+            },
+            ModelToolSpec::Freeform {
+                namespace: Some(freeform_namespace),
+                name: freeform_name,
+                input_format: ModelFreeformInputFormat::Grammar { syntax, definition },
+                availability: ModelToolAvailability::Deferred,
+                purpose: ModelToolPurpose::Invocation,
+                ..
+            },
+        ] if name == "lookup"
+            && namespace == "calendar"
+            && function_name == "get_event"
+            && freeform_namespace == "calendar"
+            && freeform_name == "search_events"
+            && syntax == "lark"
+            && definition == "start: /.+/"
+    ));
+
+    let actual = to_response_item(result, "search-1", &payload).expect("adapter output");
+    assert_eq!(actual, output.to_response_item("search-1", &payload));
+
+    let empty = ToolSearchOutput { tools: Vec::new() };
+    let empty_result = empty
+        .to_tool_result()
+        .expect("empty discovery should project");
+    assert_eq!(
+        to_response_item(empty_result, "search-empty", &payload),
+        Some(empty.to_response_item("search-empty", &payload))
+    );
+}
+
+#[test]
+fn discovered_tools_only_encode_for_known_successful_search_results() {
+    let discovered = ToolResult::success_discovered_tools(vec![]);
+    let search_payload = ToolPayload::ToolSearch {
+        arguments: serde_json::from_value(json!({"query": "tools"})).unwrap(),
+    };
+    assert!(to_response_item(discovered.clone(), "search-ok", &search_payload).is_some());
+
+    for is_error in [Some(true), None] {
+        let result = ToolResult {
+            content: discovered.content.clone(),
+            is_error,
+        };
+        assert_eq!(
+            to_response_item(result, "search-not-success", &search_payload),
+            None
+        );
+    }
+
+    let function_payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    assert_eq!(
+        to_response_item(discovered, "function-call", &function_payload),
+        None
+    );
 }

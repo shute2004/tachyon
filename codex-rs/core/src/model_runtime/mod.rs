@@ -37,6 +37,7 @@ use codex_protocol::error::Result;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+pub(crate) use codex_request::schema_has_responses_encrypted_marker;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 use ir::ModelRequest;

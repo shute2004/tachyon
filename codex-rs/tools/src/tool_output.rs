@@ -59,6 +59,13 @@ impl ToolResult {
         }
     }
 
+    pub fn success_discovered_tools(tools: Vec<DiscoveredToolSpec>) -> Self {
+        Self {
+            content: vec![ToolResultContent::DiscoveredTools(tools)],
+            is_error: Some(false),
+        }
+    }
+
     pub fn from_function_call_output(payload: &FunctionCallOutputPayload) -> Option<Self> {
         let content = match &payload.body {
             FunctionCallOutputBody::Text(text) => vec![ToolResultContent::Text(text.clone())],
@@ -87,6 +94,12 @@ impl ToolResult {
 pub enum ToolResultContent {
     Text(String),
     Json(JsonValue),
+    /// Semantic tool declarations returned by a client-side discovery operation.
+    ///
+    /// This is deliberately separate from `LoadableToolSpec` and does not carry a provider wire
+    /// representation. The Codex adapter projects it into its Responses-shaped output only at the
+    /// model-runtime boundary.
+    DiscoveredTools(Vec<DiscoveredToolSpec>),
     Image {
         uri: String,
         detail: Option<ToolResultImageDetail>,
@@ -94,6 +107,39 @@ pub enum ToolResultContent {
     Audio {
         uri: String,
     },
+}
+
+/// A tool declaration exposed by a client-side discovery result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiscoveredToolSpec {
+    Function {
+        namespace: Option<String>,
+        name: String,
+        description: String,
+        input_schema: JsonValue,
+        strict: bool,
+        availability: DiscoveredToolAvailability,
+    },
+    Freeform {
+        namespace: Option<String>,
+        name: String,
+        description: String,
+        input_format: DiscoveredFreeformInputFormat,
+        availability: DiscoveredToolAvailability,
+    },
+}
+
+/// Whether a discovered tool is immediately visible or deferred until discovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoveredToolAvailability {
+    Immediate,
+    Deferred,
+}
+
+/// Input constraint for a discovered free-form tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscoveredFreeformInputFormat {
+    Grammar { syntax: String, definition: String },
 }
 
 /// Image fidelity hint that does not assume a provider wire representation.
