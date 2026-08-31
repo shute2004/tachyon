@@ -34,11 +34,19 @@ mod item;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
-pub use item::{
-    HistoryImageDetail, HistoryItem, HistoryMediaSource, HistoryMessage, HistoryMessageContent,
-    HistoryMessagePhase, HistoryMessageRole, HistoryReasoning, HistoryToolCall, HistoryToolCallId,
-    HistoryToolInput, HistoryToolResult, HistoryToolResultContent,
-};
+pub use item::HistoryImageDetail;
+pub use item::HistoryItem;
+pub use item::HistoryMediaSource;
+pub use item::HistoryMessage;
+pub use item::HistoryMessageContent;
+pub use item::HistoryMessagePhase;
+pub use item::HistoryMessageRole;
+pub use item::HistoryReasoning;
+pub use item::HistoryToolCall;
+pub use item::HistoryToolCallId;
+pub use item::HistoryToolInput;
+pub use item::HistoryToolResult;
+pub use item::HistoryToolResultContent;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
