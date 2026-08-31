@@ -32,6 +32,7 @@ use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use tempfile::TempDir;
 use test_case::test_case;
 
 struct RecordedHistory {
@@ -56,6 +57,18 @@ struct ExtensionOwnedAppsServer {
     url: String,
 }
 
+#[derive(Clone, Copy)]
+enum McpServerKind {
+    Config,
+    Plugin,
+    SelectedPlugin,
+}
+
+struct SelectedPluginMcpServer {
+    command: String,
+    environment_id: String,
+}
+
 impl McpServerContributor<Config> for ExtensionOwnedAppsServer {
     fn id(&self) -> &'static str {
         "extension_owned_apps_lifecycle_test"
@@ -70,6 +83,34 @@ impl McpServerContributor<Config> for ExtensionOwnedAppsServer {
                 .expect("test Apps MCP server config should be valid");
             vec![McpServerContribution::Set {
                 name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                config: Box::new(config),
+            }]
+        })
+    }
+}
+
+impl McpServerContributor<Config> for SelectedPluginMcpServer {
+    fn id(&self) -> &'static str {
+        "selected_plugin_lifecycle_test"
+    }
+
+    fn contribute<'a>(
+        &'a self,
+        _context: McpServerContributionContext<'a, Config>,
+    ) -> ExtensionFuture<'a, Vec<McpServerContribution>> {
+        Box::pin(async move {
+            let config = serde_json::from_value(json!({
+                "command": self.command,
+                "environment_id": self.environment_id,
+                "enabled_tools": ["echo"],
+                "startup_timeout_sec": 10,
+            }))
+            .expect("selected plugin MCP server config should be valid");
+            vec![McpServerContribution::SelectedPlugin {
+                name: "selected_lifecycle".to_string(),
+                plugin_id: "selected-plugin@test".to_string(),
+                plugin_display_name: "selected-plugin".to_string(),
+                selection_order: 0,
                 config: Box::new(config),
             }]
         })
@@ -280,6 +321,111 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
             .pointer("/params/name")
             .and_then(Value::as_str),
         Some("calendar_list_events")
+    );
+
+    Ok(())
+}
+
+#[test_case(McpServerKind::Config, McpToolSource::Config; "configured_server")]
+#[test_case(
+    McpServerKind::Plugin,
+    McpToolSource::Plugin {
+        id: "sample@test".to_string(),
+    };
+    "plugin_server"
+)]
+#[test_case(McpServerKind::SelectedPlugin, McpToolSource::SelectedPlugin; "selected_plugin_server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_start_receives_mcp_provenance_categories(
+    server_kind: McpServerKind,
+    expected_source: McpToolSource,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "requires a host-built test_stdio_server binary");
+
+    let server = responses::start_mock_server().await;
+    let (server_name, namespace) = match server_kind {
+        McpServerKind::Config => ("configured_lifecycle", "mcp__configured_lifecycle"),
+        McpServerKind::Plugin => ("sample", "mcp__sample"),
+        McpServerKind::SelectedPlugin => ("selected_lifecycle", "mcp__selected_lifecycle"),
+    };
+    let call_id = "mcp-provenance-category-call";
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_function_call_with_namespace(call_id, namespace, "echo", "{}"),
+                responses::ev_completed("first-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("assistant-1", "done"),
+                responses::ev_completed("second-response"),
+            ]),
+        ],
+    )
+    .await;
+
+    let command = super::rmcp_client::remote_aware_stdio_server_bin()?;
+    let environment_id = super::rmcp_client::remote_aware_environment_id();
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    let recorder = Arc::new(ConversationHistoryRecorder::default());
+    extensions.tool_lifecycle_contributor(recorder.clone());
+    if matches!(server_kind, McpServerKind::SelectedPlugin) {
+        extensions.mcp_server_contributor(Arc::new(SelectedPluginMcpServer {
+            command: command.clone(),
+            environment_id: environment_id.clone(),
+        }));
+    }
+
+    let mut builder = test_codex().with_extensions(Arc::new(extensions.build()));
+    if matches!(server_kind, McpServerKind::Config) {
+        let server_config = serde_json::from_value(json!({
+            "command": command,
+            "environment_id": environment_id,
+            "enabled_tools": ["echo"],
+            "startup_timeout_sec": 10,
+        }))?;
+        builder = builder.with_config(move |config| {
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(server_name.to_string(), server_config);
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("configured MCP server should be valid");
+        });
+    } else if matches!(server_kind, McpServerKind::Plugin) {
+        let home = Arc::new(TempDir::new()?);
+        let plugin_root = super::plugins::write_sample_plugin_manifest_and_config(home.as_ref());
+        fs::write(
+            plugin_root.join(".mcp.json"),
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    server_name: {
+                        "command": command,
+                        "environment_id": environment_id,
+                        "enabled_tools": ["echo"],
+                        "startup_timeout_sec": 10,
+                    },
+                },
+            }))?,
+        )?;
+        builder = builder.with_home(home);
+    }
+
+    let test = builder.build_with_auto_env(&server).await?;
+    wait_for_mcp_server(&test.codex, server_name).await?;
+    test.submit_text_turn("Call the MCP echo tool.").await?;
+
+    let histories = recorder
+        .histories
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let [history] = histories.as_slice() else {
+        panic!("expected one tool start, got {}", histories.len());
+    };
+    assert_eq!(
+        history.mcp_tool,
+        Some((server_name.to_string(), None, expected_source)),
     );
 
     Ok(())
