@@ -1,8 +1,5 @@
 //! Model-history and persisted-rollout domain types.
 
-use std::borrow::Borrow;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,17 +29,17 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de::Error as _;
 
-/// A model-history item with room for history-only metadata.
-///
-/// Persistence keeps the response item intact and stores its metadata separately.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResponseItemEnvelope {
-    pub item: ResponseItem,
-    pub metadata: Option<CodexHarnessMetadata>,
-}
+mod envelope;
+mod rollout_payload;
 
-/// Metadata owned by the Codex harness and persisted with a response item.
+pub use envelope::HistoryEnvelope;
+
+/// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
+/// `client_authored` is host-specific and therefore deliberately remains under the
+/// Codex-branded compatibility name instead of being promoted into a generic history contract.
+/// The fallback token budget is reusable harness behavior, but remains here until a later slice
+/// splits generic metadata from compatibility metadata without changing persisted bytes.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
@@ -55,46 +52,11 @@ pub struct CodexHarnessMetadata {
     pub fallback_token_limit_override: Option<usize>,
 }
 
-impl ResponseItemEnvelope {
-    /// Wraps a raw Responses API item for persisted history.
-    pub fn new(item: ResponseItem) -> Self {
-        Self {
-            item,
-            metadata: None,
-        }
-    }
-
-    /// Unwraps the raw Responses API item.
-    pub fn into_item(self) -> ResponseItem {
-        self.item
-    }
-}
-
-impl From<ResponseItem> for ResponseItemEnvelope {
-    fn from(item: ResponseItem) -> Self {
-        Self::new(item)
-    }
-}
-
-impl Deref for ResponseItemEnvelope {
-    type Target = ResponseItem;
-
-    fn deref(&self) -> &Self::Target {
-        &self.item
-    }
-}
-
-impl DerefMut for ResponseItemEnvelope {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.item
-    }
-}
-
-impl Borrow<ResponseItem> for ResponseItemEnvelope {
-    fn borrow(&self) -> &ResponseItem {
-        &self.item
-    }
-}
+/// Transitional compatibility alias for Responses-shaped history callers.
+///
+/// The envelope itself is provider-neutral; both the Responses payload and Codex metadata are
+/// explicit type parameters that later neutralization slices can replace independently.
+pub type ResponseItemEnvelope = HistoryEnvelope<ResponseItem, CodexHarnessMetadata>;
 
 /// Persisted rollout item used by core history and rollout storage.
 #[derive(Debug, Clone)]
@@ -145,8 +107,6 @@ impl JsonSchema for RolloutItem {
         rollout_payload::RolloutItemWire::json_schema(generator)
     }
 }
-
-mod rollout_payload;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
