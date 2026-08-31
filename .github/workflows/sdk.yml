@@ -90,6 +90,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          codex_target="//codex-rs/cli:codex"
+          code_mode_host_target="//codex-rs/code-mode-host:codex-code-mode-host"
+
           # Use the shared CI wrapper so fork PRs fall back cleanly when
           # BuildBuddy credentials are unavailable. This workflow needs the
           # built `codex` binary on disk afterwards, so ask the wrapper to
@@ -101,34 +104,45 @@ jobs:
             --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
             --build_metadata=TAG_job=sdk \
             -- \
-            //codex-rs/cli:codex
+            "${codex_target}" \
+            "${code_mode_host_target}"
 
-          # Resolve the exact output file using the same wrapper/config path as
-          # the build instead of guessing which Bazel convenience symlink is
+          # Resolve each exact output using the same wrapper/config path as the
+          # build instead of guessing which Bazel convenience symlink is
           # available on the runner.
-          cquery_output="$(
-            ./.github/scripts/run-bazel-ci.sh \
-              -- \
-              cquery \
-              --output=files \
-              -- \
-              //codex-rs/cli:codex \
-              | grep -E '^(/|bazel-out/)' \
-              | tail -n 1
-          )"
-          if [[ "${cquery_output}" = /* ]]; then
-            codex_bazel_output_path="${cquery_output}"
-          else
-            codex_bazel_output_path="${GITHUB_WORKSPACE}/${cquery_output}"
-          fi
-          if [[ -z "${codex_bazel_output_path}" ]]; then
-            echo "Bazel did not report an output path for //codex-rs/cli:codex." >&2
-            exit 1
-          fi
-          if [[ ! -e "${codex_bazel_output_path}" ]]; then
-            echo "Unable to locate the Bazel-built codex binary at ${codex_bazel_output_path}." >&2
-            exit 1
-          fi
+          resolve_bazel_output_path() {
+            local target="$1"
+            local binary_name="$2"
+            local cquery_output
+            cquery_output="$(
+              ./.github/scripts/run-bazel-ci.sh \
+                -- \
+                cquery \
+                --output=files \
+                -- \
+                "${target}" \
+                | grep -E '^(/|bazel-out/)' \
+                | tail -n 1
+            )"
+            if [[ -z "${cquery_output}" ]]; then
+              echo "Bazel did not report an output path for ${target}." >&2
+              exit 1
+            fi
+            local output_path
+            if [[ "${cquery_output}" = /* ]]; then
+              output_path="${cquery_output}"
+            else
+              output_path="${GITHUB_WORKSPACE}/${cquery_output}"
+            fi
+            if [[ ! -e "${output_path}" ]]; then
+              echo "Unable to locate the Bazel-built ${binary_name} binary at ${output_path}." >&2
+              exit 1
+            fi
+            printf '%s\n' "${output_path}"
+          }
+
+          codex_bazel_output_path="$(resolve_bazel_output_path "${codex_target}" "codex")"
+          code_mode_host_bazel_output_path="$(resolve_bazel_output_path "${code_mode_host_target}" "codex-code-mode-host")"
 
           # Stage the binary into the workspace and point the SDK tests at that
           # stable path. The tests spawn `codex` directly many times, so using a
@@ -137,6 +151,7 @@ jobs:
           install_dir="${GITHUB_WORKSPACE}/.tmp/sdk-ci"
           mkdir -p "${install_dir}"
           install -m 755 "${codex_bazel_output_path}" "${install_dir}/codex"
+          install -m 755 "${code_mode_host_bazel_output_path}" "${install_dir}/codex-code-mode-host"
           echo "CODEX_EXEC_PATH=${install_dir}/codex" >> "$GITHUB_ENV"
 
       - name: Warm up Bazel-built codex
