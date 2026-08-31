@@ -47,10 +47,10 @@ jobs:
     # Keep the Bazel/TypeScript SDK validation required, but run it on public
     # GitHub infrastructure. The Bazel wrapper already has an unauthenticated
     # fallback when the BuildBuddy secret is unavailable. A cold local Bazel
-    # build on a cold standard hosted runner can exceed three hours, so leave enough
-    # time for the full V8 build without reducing SDK test coverage.
+    # A cold standard hosted runner can approach the hosted-runner execution limit,
+    # so allow that full window without reducing SDK test coverage.
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 360
     environment:
       name: bazel
       deployment: false
