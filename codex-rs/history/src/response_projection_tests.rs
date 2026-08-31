@@ -279,6 +279,10 @@ fn function_calls_require_plain_valid_json_and_nonempty_call_ids() {
             HistoryProjectionFallback::EncryptedFunctionArguments,
         ),
         (
+            function_call("call-1", "{}", Some(vec![String::new()])),
+            HistoryProjectionFallback::EncryptedFunctionArguments,
+        ),
+        (
             function_call("", "{}", None),
             HistoryProjectionFallback::MissingFunctionCallId,
         ),

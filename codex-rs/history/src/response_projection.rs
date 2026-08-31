@@ -140,7 +140,7 @@ fn project_item(item: &ResponseItem) -> Result<HistoryItem, HistoryProjectionFal
             }
             if encrypted_function_args
                 .as_ref()
-                .is_some_and(|parts| parts.iter().any(|part| !part.is_empty()))
+                .is_some_and(|parts| !parts.is_empty())
             {
                 return Err(HistoryProjectionFallback::EncryptedFunctionArguments);
             }
