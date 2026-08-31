@@ -7,8 +7,8 @@ use std::process::Stdio;
 
 use codex_history::HistoryItem;
 use codex_history::HistoryItemProjection;
-use codex_history::HistoryMessageContent;
 use codex_history::HistoryMessage;
+use codex_history::HistoryMessageContent;
 use codex_history::HistoryMessageRole;
 use codex_history::project_response_item;
 use codex_protocol::models::ContentItem;

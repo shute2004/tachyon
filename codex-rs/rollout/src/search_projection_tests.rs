@@ -2,10 +2,10 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::HistoryItemProjection;
 use codex_history::HistoryProjectionFallback;
 use codex_history::project_response_item;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ResponseItem;
 use serde_json::json;
 
 use super::conversation_text_from_item;
@@ -37,7 +37,10 @@ fn canonical_user_and_assistant_messages_use_projected_text() {
             }],
         ));
 
-        assert_eq!(conversation_text_from_item(&item), Some(expected.to_string()));
+        assert_eq!(
+            conversation_text_from_item(&item),
+            Some(expected.to_string())
+        );
     }
 }
 
@@ -147,5 +150,8 @@ fn projected_non_message_and_unsupported_items_are_not_searchable() {
         }],
         internal_chat_message_metadata_passthrough: None,
     });
-    assert_eq!(conversation_text_from_item(&unsupported_agent_message), None);
+    assert_eq!(
+        conversation_text_from_item(&unsupported_agent_message),
+        None
+    );
 }
