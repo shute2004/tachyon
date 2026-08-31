@@ -402,11 +402,6 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                     .requirements()
                     .auto_review_required_for_model(&model.slug)
                 {
-                    record_fast_decision(
-                        extension_metrics.as_deref(),
-                        "deferred",
-                        "required_model",
-                    );
                     return None;
                 }
             }
