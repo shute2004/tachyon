@@ -50,7 +50,7 @@ jobs:
     # build on a standard hosted runner exceeds the inherited 10-minute budget,
     # so allow the same order of runtime as the repository's Bazel CI jobs.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     environment:
       name: bazel
       deployment: false
