@@ -30,9 +30,15 @@ use serde::Serializer;
 use serde::de::Error as _;
 
 mod envelope;
+mod item;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
+pub use item::{
+    HistoryImageDetail, HistoryItem, HistoryMediaSource, HistoryMessage, HistoryMessageContent,
+    HistoryMessagePhase, HistoryMessageRole, HistoryReasoning, HistoryToolCall, HistoryToolCallId,
+    HistoryToolInput, HistoryToolResult, HistoryToolResultContent,
+};
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
