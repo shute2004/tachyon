@@ -23,7 +23,10 @@ use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolTelemetryTags;
+use codex_config::McpServerConfig;
 use codex_extension_api::McpToolContext;
+use codex_extension_api::McpToolSource;
+use codex_mcp::McpServerSource;
 use codex_mcp::ToolInfo;
 use codex_protocol::mcp::is_node_repl_backed_server;
 use codex_protocol::user_input::UserInput;
@@ -116,6 +119,32 @@ fn ensure_mcp_prefix(name: &str) -> String {
     }
 }
 
+fn classify_mcp_tool_source(
+    call: &codex_mcp::PreparedMcpCall,
+    configured_server: Option<&McpServerConfig>,
+) -> McpToolSource {
+    let tool = call.tool_info();
+    if tool.connector_id.is_some() && call.is_host_owned_apps() {
+        McpToolSource::Connector
+    } else if call.is_selected_plugin_server() {
+        McpToolSource::SelectedPlugin
+    } else if let Some(id) = call.plugin_id() {
+        McpToolSource::Plugin { id: id.to_owned() }
+    } else if call
+        .config()
+        .mcp_server_catalog
+        .server(call.server_name())
+        .is_some_and(|server| {
+            matches!(server.source(), McpServerSource::Config)
+                && configured_server.is_some_and(|configured| server.config() == configured)
+        })
+    {
+        McpToolSource::Config
+    } else {
+        McpToolSource::Other
+    }
+}
+
 impl ToolExecutor<ToolInvocation> for McpHandler {
     fn tool_name(&self) -> ToolName {
         self.tool_info.canonical_tool_name()
@@ -182,14 +211,17 @@ impl McpHandler {
             )
             .await;
         let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
-            McpToolContext::from_prepared_call(
-                call,
-                invocation
-                    .turn
-                    .config
-                    .mcp_servers
-                    .get()
-                    .get(call.server_name()),
+            McpToolContext::new(
+                call.tool_info().clone(),
+                classify_mcp_tool_source(
+                    call,
+                    invocation
+                        .turn
+                        .config
+                        .mcp_servers
+                        .get()
+                        .get(call.server_name()),
+                ),
             )
         });
         notify_tool_start(&invocation, mcp_tool.as_ref()).await;
