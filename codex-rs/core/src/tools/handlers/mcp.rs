@@ -25,6 +25,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolTelemetryTags;
 use codex_config::McpServerConfig;
 use codex_extension_api::McpToolContext;
+use codex_extension_api::McpToolInfo;
 use codex_extension_api::McpToolSource;
 use codex_mcp::McpServerSource;
 use codex_mcp::ToolInfo;
@@ -211,8 +212,20 @@ impl McpHandler {
             )
             .await;
         let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
+            let tool = call.tool_info();
             McpToolContext::new(
-                call.tool_info().clone(),
+                McpToolInfo {
+                    server_name: tool.server_name.clone(),
+                    tool_name: tool.tool.name.to_string(),
+                    callable_name: tool.callable_name.clone(),
+                    callable_namespace: tool.callable_namespace.clone(),
+                    namespace_description: tool.namespace_description.clone(),
+                    supports_parallel_tool_calls: tool.supports_parallel_tool_calls,
+                    server_origin: tool.server_origin.clone(),
+                    connector_id: tool.connector_id.clone(),
+                    connector_name: tool.connector_name.clone(),
+                    plugin_display_names: tool.plugin_display_names.clone(),
+                },
                 classify_mcp_tool_source(
                     call,
                     invocation

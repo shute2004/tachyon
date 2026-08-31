@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
+use codex_extension_api::McpToolInfo;
 use codex_extension_api::McpToolSource;
 use codex_extension_api::ResponseItem;
 use codex_extension_api::ToolLifecycleContributor;
@@ -39,7 +40,7 @@ struct RecordedHistory {
     call_id: String,
     arguments: String,
     items: Vec<ResponseItem>,
-    mcp_tool: Option<(String, Option<String>, McpToolSource)>,
+    mcp_tool: Option<(McpToolInfo, McpToolSource)>,
 }
 
 #[derive(Default)]
@@ -127,13 +128,9 @@ impl ToolLifecycleContributor for ConversationHistoryRecorder {
                     call_id: input.call_id.to_owned(),
                     arguments: input.payload.log_payload().into_owned(),
                     items: input.conversation_history.items().cloned().collect(),
-                    mcp_tool: input.mcp_tool.map(|tool| {
-                        (
-                            tool.tool_info().server_name.clone(),
-                            tool.tool_info().connector_id.clone(),
-                            tool.source().clone(),
-                        )
-                    }),
+                    mcp_tool: input
+                        .mcp_tool
+                        .map(|tool| (tool.tool_info().clone(), tool.source().clone())),
                 });
         })
     }
@@ -259,6 +256,7 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
 
     let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount(&server).await?;
+    let server_origin = Some(apps_server.chatgpt_base_url.clone());
     let call_id = "calendar-lifecycle-call";
     responses::mount_sse_sequence(
         &server,
@@ -288,7 +286,7 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
             url: format!("{}/api/codex/ps/mcp", apps_server.chatgpt_base_url),
         }));
     }
-    let test = apps_enabled_builder(apps_server.chatgpt_base_url)
+    let test = apps_enabled_builder(apps_server.chatgpt_base_url.clone())
         .with_extensions(Arc::new(extensions.build()))
         .build_with_auto_env(&server)
         .await?;
@@ -308,8 +306,20 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
         assert_eq!(
             history.mcp_tool,
             Some((
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                Some("calendar".to_string()),
+                McpToolInfo {
+                    server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                    tool_name: "calendar_list_events".to_string(),
+                    callable_name: SEARCH_CALENDAR_LIST_TOOL.to_string(),
+                    callable_namespace: SEARCH_CALENDAR_NAMESPACE.to_string(),
+                    namespace_description: Some(
+                        "Plan events and manage your calendar.".to_string(),
+                    ),
+                    supports_parallel_tool_calls: false,
+                    server_origin,
+                    connector_id: Some("calendar".to_string()),
+                    connector_name: Some("Calendar".to_string()),
+                    plugin_display_names: Vec::new(),
+                },
                 expected_source,
             )),
         );
@@ -425,7 +435,27 @@ async fn tool_start_receives_mcp_provenance_categories(
     };
     assert_eq!(
         history.mcp_tool,
-        Some((server_name.to_string(), None, expected_source)),
+        Some((
+            McpToolInfo {
+                server_name: server_name.to_string(),
+                tool_name: "echo".to_string(),
+                callable_name: "echo".to_string(),
+                callable_namespace: namespace.to_string(),
+                namespace_description: Some(
+                    "Use these tools to exercise the rmcp test server.".to_string(),
+                ),
+                supports_parallel_tool_calls: false,
+                server_origin: Some("stdio".to_string()),
+                connector_id: None,
+                connector_name: None,
+                plugin_display_names: match server_kind {
+                    McpServerKind::Config => Vec::new(),
+                    McpServerKind::Plugin => vec!["sample".to_string()],
+                    McpServerKind::SelectedPlugin => vec!["selected-plugin".to_string()],
+                },
+            },
+            expected_source,
+        )),
     );
 
     Ok(())
