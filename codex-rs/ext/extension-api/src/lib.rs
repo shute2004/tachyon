@@ -4,6 +4,43 @@ mod registry;
 mod state;
 mod user_instructions;
 
+/// Immutable MCP tool metadata exposed to extension lifecycle contributors.
+///
+/// This is a snapshot of the exact MCP call selected by the host. It keeps the
+/// raw server/tool identity needed for correlation alongside the model-visible
+/// callable name, while leaving the executable MCP client, raw tool definition,
+/// and provider-specific file-input metadata inside the host runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpToolInfo {
+    /// Raw MCP server name used to route the call.
+    pub server_name: String,
+    /// Raw MCP tool name used by the protocol call.
+    pub tool_name: String,
+    /// Model-visible callable name.
+    pub callable_name: String,
+    /// Model-visible callable namespace.
+    pub callable_namespace: String,
+    /// Model-visible namespace description, when provided by the server or connector.
+    pub namespace_description: Option<String>,
+    /// Whether the server advertises support for parallel tool calls.
+    pub supports_parallel_tool_calls: bool,
+    /// MCP server origin used for telemetry and diagnostics, when known.
+    pub server_origin: Option<String>,
+    /// Connector identity, when the tool came from a connector-backed MCP server.
+    pub connector_id: Option<String>,
+    /// Connector display name, when the tool came from a connector-backed MCP server.
+    pub connector_name: Option<String>,
+    /// Display names of plugins that expose or include this tool.
+    pub plugin_display_names: Vec<String>,
+}
+
+impl McpToolInfo {
+    /// Returns the model-visible callable name with its namespace.
+    pub fn canonical_tool_name(&self) -> ToolName {
+        ToolName::namespaced(self.callable_namespace.clone(), self.callable_name.clone())
+    }
+}
+
 pub use capabilities::AgentSpawnFuture;
 pub use capabilities::AgentSpawner;
 pub use capabilities::ConversationHistorySnapshot;
@@ -17,7 +54,6 @@ pub use capabilities::NoopResponseItemInjector;
 pub use capabilities::ResponseItemInjectionFuture;
 pub use capabilities::ResponseItemInjector;
 pub use codex_context_fragments::ContextualUserFragment;
-pub use codex_mcp::ToolInfo as McpToolInfo;
 pub use codex_protocol::models::ContentItemKind;
 pub use codex_protocol::models::ResponseItem;
 pub use codex_protocol::security_risk::SecurityRiskScore;
