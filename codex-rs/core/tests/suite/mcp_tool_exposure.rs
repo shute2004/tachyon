@@ -6,6 +6,7 @@ use codex_core::config::Config;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::McpResourceAccess;
 use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
@@ -15,7 +16,6 @@ use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
-use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -70,8 +70,8 @@ use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
-struct McpResourceClientCapture {
-    client: Arc<Mutex<Option<McpResourceClient>>>,
+struct McpResourceAccessCapture {
+    client: Arc<Mutex<Option<Arc<dyn McpResourceAccess>>>>,
 }
 
 struct CoalescingMcpContributor {
@@ -238,7 +238,7 @@ fn completed_response_sequence(count: usize) -> Vec<String> {
         .collect()
 }
 
-impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
+impl ThreadLifecycleContributor<Config> for McpResourceAccessCapture {
     fn on_thread_start<'a>(
         &'a self,
         input: ThreadStartInput<'a, Config>,
@@ -251,7 +251,7 @@ impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
             *self
                 .client
                 .lock()
-                .expect("capture lock should not be poisoned") = Some(client.as_ref().clone());
+                .expect("capture lock should not be poisoned") = Some(Arc::clone(client));
         })
     }
 }
@@ -665,7 +665,7 @@ async fn out_of_band_resource_read_reconciles_the_published_mcp_runtime() -> Res
 
     let captured_client = Arc::new(Mutex::new(None));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    extensions.thread_lifecycle_contributor(Arc::new(McpResourceClientCapture {
+    extensions.thread_lifecycle_contributor(Arc::new(McpResourceAccessCapture {
         client: Arc::clone(&captured_client),
     }));
     let test = core_test_support::test_codex::test_codex()
