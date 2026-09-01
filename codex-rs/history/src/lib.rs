@@ -31,6 +31,7 @@ use serde::de::Error as _;
 
 mod envelope;
 mod item;
+mod response_projection;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
@@ -47,6 +48,9 @@ pub use item::HistoryToolCallId;
 pub use item::HistoryToolInput;
 pub use item::HistoryToolResult;
 pub use item::HistoryToolResultContent;
+pub use response_projection::HistoryItemProjection;
+pub use response_projection::HistoryProjectionFallback;
+pub use response_projection::project_response_item;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
@@ -408,3 +412,7 @@ fn multi_agent_version_from_items(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "response_projection_tests.rs"]
+mod response_projection_tests;
