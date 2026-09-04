@@ -10,6 +10,8 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_config::AppToolApproval;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::Resource as NeutralResource;
+use codex_protocol::mcp::ResourceTemplate as NeutralResourceTemplate;
 use codex_protocol::models::PermissionProfile;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
@@ -24,7 +26,11 @@ use tokio::sync::RwLock;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
+use crate::resource_client::McpResourcePage;
 use crate::resource_client::McpResourceReadResult;
+use crate::resource_client::McpResourceTemplatePage;
+use crate::resource_client::resource_from_rmcp;
+use crate::resource_client::resource_template_from_rmcp;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
@@ -121,6 +127,46 @@ impl McpBinding {
         self.clients.list_all_resources(include_server).await
     }
 
+    /// Lists one resource page through the exact clients and connections captured by this
+    /// binding, converting the protocol result to the provider-neutral resource shape.
+    pub async fn list_resources_by_cursor(
+        &self,
+        server: &str,
+        cursor: Option<String>,
+    ) -> Result<McpResourcePage> {
+        let params =
+            cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
+        let result = self.list_resources(server, params).await?;
+        let resources = result
+            .resources
+            .into_iter()
+            .map(resource_from_rmcp)
+            .collect::<Result<Vec<NeutralResource>>>()?;
+        Ok(McpResourcePage {
+            resources,
+            next_cursor: result.next_cursor,
+        })
+    }
+
+    /// Lists resources through the exact clients captured by this binding, converting each
+    /// server's results to the provider-neutral resource shape.
+    pub async fn list_all_resources_neutral(
+        &self,
+        include_server: impl Fn(&str) -> bool,
+    ) -> Result<HashMap<String, Vec<NeutralResource>>> {
+        self.list_all_resources(include_server)
+            .await
+            .into_iter()
+            .map(|(server, resources)| {
+                let resources = resources
+                    .into_iter()
+                    .map(resource_from_rmcp)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((server, resources))
+            })
+            .collect()
+    }
+
     pub async fn list_resource_templates(
         &self,
         server: &str,
@@ -142,6 +188,46 @@ impl McpBinding {
         self.clients
             .list_all_resource_templates(include_server)
             .await
+    }
+
+    /// Lists one resource-template page through the exact clients and connections captured by
+    /// this binding, converting the protocol result to the provider-neutral shape.
+    pub async fn list_resource_templates_by_cursor(
+        &self,
+        server: &str,
+        cursor: Option<String>,
+    ) -> Result<McpResourceTemplatePage> {
+        let params =
+            cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
+        let result = self.list_resource_templates(server, params).await?;
+        let resource_templates = result
+            .resource_templates
+            .into_iter()
+            .map(resource_template_from_rmcp)
+            .collect::<Result<Vec<NeutralResourceTemplate>>>()?;
+        Ok(McpResourceTemplatePage {
+            resource_templates,
+            next_cursor: result.next_cursor,
+        })
+    }
+
+    /// Lists resource templates through the exact clients captured by this binding, converting
+    /// each server's results to the provider-neutral shape.
+    pub async fn list_all_resource_templates_neutral(
+        &self,
+        include_server: impl Fn(&str) -> bool,
+    ) -> Result<HashMap<String, Vec<NeutralResourceTemplate>>> {
+        self.list_all_resource_templates(include_server)
+            .await
+            .into_iter()
+            .map(|(server, resource_templates)| {
+                let resource_templates = resource_templates
+                    .into_iter()
+                    .map(resource_template_from_rmcp)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((server, resource_templates))
+            })
+            .collect()
     }
 
     pub async fn read_resource(
