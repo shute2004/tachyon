@@ -42,6 +42,9 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::LocalShellAction;
+use codex_protocol::models::LocalShellExecAction;
+use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
@@ -1515,6 +1518,31 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         output: FunctionCallOutputPayload::from_text("parent notification".to_string()),
         internal_chat_message_metadata_passthrough: None,
     };
+    let encrypted_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "encrypted-reasoning")),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("encrypted reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let local_shell_call = ResponseItem::LocalShellCall {
+        id: None,
+        call_id: Some("local-shell-call".to_string()),
+        status: LocalShellStatus::Completed,
+        action: LocalShellAction::Exec(LocalShellExecAction {
+            command: vec!["echo".to_string(), "ignored".to_string()],
+            timeout_ms: None,
+            working_directory: None,
+            env: None,
+            user: None,
+        }),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let compaction = ResponseItem::Compaction {
+        id: Some(ResponseItemId::with_suffix("cmp", "fork-fallback")),
+        encrypted_content: "compaction fallback".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
     parent_thread
         .session
         .record_conversation_items(
@@ -1573,6 +1601,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 assistant_message("parent commentary", Some(MessagePhase::Commentary)),
                 assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
                 standalone_output,
+                encrypted_reasoning,
+                local_shell_call,
+                compaction,
                 assistant_message("parent unknown phase", /*phase*/ None),
                 ResponseItem::Reasoning {
                     id: Some(ResponseItemId::with_suffix("rs", "parent-reasoning")),
