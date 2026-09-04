@@ -1312,7 +1312,8 @@ impl Session {
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             session_extension_data.insert(analytics_events_client.clone());
-            let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+            let mcp_resource_access: Arc<dyn codex_extension_api::McpResourceAccess> =
+                Arc::new(McpResourceAccessAdapter::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
             for contributor in extensions.thread_lifecycle_contributors() {
@@ -1321,7 +1322,7 @@ impl Session {
                     session_source: &session_configuration.session_source,
                     persistent_thread_state_available: state_db_ctx.is_some(),
                     environments: environment_selections,
-                    mcp_resource_client: Some(Arc::clone(&mcp_resource_client)),
+                    mcp_resource_client: Some(Arc::clone(&mcp_resource_access)),
                     extension_metrics: Some(Arc::clone(&extension_metrics)),
                     session_store: &session_extension_data,
                     thread_store: &thread_extension_data,

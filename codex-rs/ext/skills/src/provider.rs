@@ -10,7 +10,7 @@ use crate::HostSkillsSnapshot;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
-use codex_mcp::McpResourceClient;
+use codex_extension_api::McpResourceAccess;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 use crate::catalog::SkillAuthority;
@@ -37,7 +37,7 @@ pub struct SkillListQuery {
     pub include_host_skills: bool,
     pub include_bundled_skills: bool,
     pub include_orchestrator_skills: bool,
-    pub mcp_resources: Option<Arc<McpResourceClient>>,
+    pub mcp_resources: Option<Arc<dyn McpResourceAccess>>,
     /// Present only when the opt-in high-level executor discovery path is selected.
     pub executor_capability_discovery: Option<ExecutorCapabilityDiscoverySnapshot>,
 }
@@ -50,7 +50,7 @@ pub struct SkillReadRequest {
     pub resolved_executor_roots: Vec<ResolvedSelectedCapabilityRoot>,
     pub sandbox: Option<FileSystemSandboxContext>,
     pub host_snapshot: Option<Arc<HostSkillsSnapshot>>,
-    pub mcp_resources: Option<Arc<McpResourceClient>>,
+    pub mcp_resources: Option<Arc<dyn McpResourceAccess>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

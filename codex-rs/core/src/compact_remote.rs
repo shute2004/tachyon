@@ -373,6 +373,33 @@ pub(crate) async fn process_annotated_compacted_history(
 ///   messages. Legacy warning fragments are filtered by `parse_turn_item` before they reach this
 ///   check.
 pub(crate) fn should_keep_compacted_history_item(item: &ResponseItem) -> bool {
+    match codex_history::project_response_item(ResponseItemEnvelope::new(item.clone())) {
+        codex_history::HistoryItemProjection::Canonical {
+            item: codex_history::HistoryItem::Message(message),
+            compatibility,
+        } => match message.role {
+            codex_history::HistoryMessageRole::Developer
+            | codex_history::HistoryMessageRole::System => false,
+            codex_history::HistoryMessageRole::Assistant => true,
+            codex_history::HistoryMessageRole::User => matches!(
+                crate::event_mapping::parse_turn_item(&compatibility.item),
+                Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
+            ),
+        },
+        codex_history::HistoryItemProjection::Canonical {
+            item:
+                codex_history::HistoryItem::Reasoning(_)
+                | codex_history::HistoryItem::ToolCall(_)
+                | codex_history::HistoryItem::ToolResult(_),
+            ..
+        } => false,
+        codex_history::HistoryItemProjection::Fallback { compatibility, .. } => {
+            should_keep_compacted_history_item_raw(&compatibility.item)
+        }
+    }
+}
+
+fn should_keep_compacted_history_item_raw(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { role, .. } if role == "developer" => false,
         ResponseItem::Message { role, .. } if role == "user" => {

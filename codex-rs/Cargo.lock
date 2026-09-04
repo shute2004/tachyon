@@ -2296,6 +2296,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-attachment-store"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "codex-utils-image",
+ "pretty_assertions",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "codex-aws-auth"
 version = "0.0.0"
 dependencies = [
@@ -2765,6 +2776,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-apply-patch",
  "codex-async-utils",
+ "codex-attachment-store",
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
@@ -3134,7 +3146,6 @@ dependencies = [
  "codex-config",
  "codex-context-fragments",
  "codex-exec-server-protocol",
- "codex-mcp",
  "codex-protocol",
  "codex-tools",
  "codex-utils-absolute-path",
@@ -3622,12 +3633,15 @@ dependencies = [
 name = "codex-mcp-extension"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "axum",
  "codex-config",
  "codex-connectors",
  "codex-connectors-extension",
  "codex-core",
  "codex-core-plugins",
  "codex-exec-server",
+ "codex-exec-server-test-support",
  "codex-extension-api",
  "codex-features",
  "codex-login",
@@ -3636,11 +3650,13 @@ dependencies = [
  "codex-protocol",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "futures",
  "pretty_assertions",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -4783,6 +4799,7 @@ dependencies = [
  "codex-core",
  "codex-extension-api",
  "codex-extension-items",
+ "codex-history",
  "codex-login",
  "codex-model-provider",
  "codex-model-provider-info",
