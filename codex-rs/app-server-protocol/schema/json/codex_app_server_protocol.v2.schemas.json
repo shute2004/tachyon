@@ -13979,10 +13979,18 @@
     "ResourceTemplate": {
       "description": "A template description for resources available on the server.",
       "properties": {
+        "_meta": true,
         "annotations": true,
         "description": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "icons": {
+          "items": true,
+          "type": [
+            "array",
             "null"
           ]
         },
