@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use crate::context::ContextualUserFragment;
 use crate::context::UnsupportedMedia;
+use crate::context_manager::history_item::HistoryToolSide;
+use crate::context_manager::history_item::ResponsesToolPairingClass;
+use crate::context_manager::history_item::tool_correlation;
 use crate::util::error_or_panic;
 use tracing::info;
 
@@ -19,29 +22,14 @@ use tracing::info;
 const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
 
 pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>) {
-    let mut function_output_ids = HashSet::new();
-    let mut tool_search_output_ids = HashSet::new();
-    let mut custom_tool_output_ids = HashSet::new();
-    for envelope in items.iter() {
-        match &envelope.item {
-            ResponseItem::FunctionCallOutput {
-                call_id: Some(call_id),
-                ..
-            } => {
-                function_output_ids.insert(call_id.as_str());
-            }
-            ResponseItem::ToolSearchOutput {
-                call_id: Some(call_id),
-                ..
-            } => {
-                tool_search_output_ids.insert(call_id.as_str());
-            }
-            ResponseItem::CustomToolCallOutput { call_id, .. } => {
-                custom_tool_output_ids.insert(call_id.as_str());
-            }
-            _ => {}
-        }
-    }
+    let output_keys = items
+        .iter()
+        .filter_map(|envelope| {
+            let correlation = tool_correlation(&envelope.item)?;
+            (correlation.side == HistoryToolSide::Output)
+                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
+        })
+        .collect::<HashSet<_>>();
 
     // Collect synthetic outputs to insert immediately after their calls.
     // Store the insertion position (index of call) alongside the item so
@@ -49,10 +37,20 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
     let mut missing_outputs_to_insert: Vec<(usize, ResponseItemEnvelope)> = Vec::new();
 
     for (idx, envelope) in items.iter().enumerate() {
+        let Some(correlation) = tool_correlation(&envelope.item) else {
+            continue;
+        };
+        if correlation.side != HistoryToolSide::Call
+            || output_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
+        {
+            continue;
+        }
+
+        // Construction remains in the Responses compatibility layer for now. Matching above uses
+        // generic call/result correlation facts plus an explicitly compatibility-only Responses
+        // pairing class, so the latter cannot be mistaken for the future canonical history taxonomy.
         match &envelope.item {
-            ResponseItem::FunctionCall { id, call_id, .. }
-                if !function_output_ids.contains(call_id.as_str()) =>
-            {
+            ResponseItem::FunctionCall { id, call_id, .. } => {
                 info!("Function call output is missing for call id: {call_id}");
                 missing_outputs_to_insert.push((
                     idx,
@@ -70,7 +68,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                 id,
                 call_id: Some(call_id),
                 ..
-            } if !tool_search_output_ids.contains(call_id.as_str()) => {
+            } => {
                 info!("Tool search output is missing for call id: {call_id}");
                 missing_outputs_to_insert.push((
                     idx,
@@ -84,9 +82,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                     }),
                 ));
             }
-            ResponseItem::CustomToolCall { id, call_id, .. }
-                if !custom_tool_output_ids.contains(call_id.as_str()) =>
-            {
+            ResponseItem::CustomToolCall { id, call_id, .. } => {
                 error_or_panic(format!(
                     "Custom tool call output is missing for call id: {call_id}"
                 ));
@@ -101,12 +97,12 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                     }),
                 ));
             }
-            // LocalShellCall is represented in upstream streams by a FunctionCallOutput
+            // LocalShellCall is represented in upstream streams by a FunctionCallOutput.
             ResponseItem::LocalShellCall {
                 id,
                 call_id: Some(call_id),
                 ..
-            } if !function_output_ids.contains(call_id.as_str()) => {
+            } => {
                 error_or_panic(format!(
                     "Local shell call output is missing for call id: {call_id}"
                 ));
@@ -125,11 +121,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
             _ => {}
         }
     }
-    drop((
-        function_output_ids,
-        tool_search_output_ids,
-        custom_tool_output_ids,
-    ));
+    drop(output_keys);
 
     // Insert synthetic outputs in reverse index order to avoid re-indexing.
     for (idx, output_item) in missing_outputs_to_insert.into_iter().rev() {
@@ -153,62 +145,44 @@ fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseIt
 }
 
 pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
-    let mut function_call_ids = HashSet::new();
-    let mut tool_search_call_ids = HashSet::new();
-    let mut custom_tool_call_ids = HashSet::new();
-    for envelope in items.iter() {
-        match &envelope.item {
-            ResponseItem::FunctionCall { call_id, .. }
-            | ResponseItem::LocalShellCall {
-                call_id: Some(call_id),
-                ..
-            } => {
-                function_call_ids.insert(call_id.as_str());
-            }
-            ResponseItem::ToolSearchCall {
-                call_id: Some(call_id),
-                ..
-            } => {
-                tool_search_call_ids.insert(call_id.as_str());
-            }
-            ResponseItem::CustomToolCall { call_id, .. } => {
-                custom_tool_call_ids.insert(call_id.as_str());
-            }
-            _ => {}
-        }
-    }
+    let call_keys = items
+        .iter()
+        .filter_map(|envelope| {
+            let correlation = tool_correlation(&envelope.item)?;
+            (correlation.side == HistoryToolSide::Call)
+                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
+        })
+        .collect::<HashSet<_>>();
 
     let mut orphan_positions = Vec::new();
     for (position, envelope) in items.iter().enumerate() {
-        match &envelope.item {
-            ResponseItem::FunctionCallOutput {
-                call_id: Some(call_id),
-                ..
-            } if !function_call_ids.contains(call_id.as_str()) => {
-                error_or_panic(format!(
-                    "Orphan function call output for call id: {call_id}"
-                ));
-                orphan_positions.push(position);
-            }
-            ResponseItem::CustomToolCallOutput { call_id, .. }
-                if !custom_tool_call_ids.contains(call_id.as_str()) =>
-            {
-                error_or_panic(format!(
-                    "Orphan custom tool call output for call id: {call_id}"
-                ));
-                orphan_positions.push(position);
-            }
-            ResponseItem::ToolSearchOutput {
-                call_id: Some(call_id),
-                execution,
-                ..
-            } if execution != "server" && !tool_search_call_ids.contains(call_id.as_str()) => {
-                error_or_panic(format!("Orphan tool search output for call id: {call_id}"));
-                orphan_positions.push(position);
-            }
-            _ => {}
+        let Some(correlation) = tool_correlation(&envelope.item) else {
+            continue;
+        };
+        if correlation.side != HistoryToolSide::Output
+            || !correlation.local_counterpart_required
+            || call_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
+        {
+            continue;
         }
+
+        match correlation.compatibility_pairing_class {
+            ResponsesToolPairingClass::FunctionCallOutput => error_or_panic(format!(
+                "Orphan function call output for call id: {}",
+                correlation.call_id
+            )),
+            ResponsesToolPairingClass::CustomToolCallOutput => error_or_panic(format!(
+                "Orphan custom tool call output for call id: {}",
+                correlation.call_id
+            )),
+            ResponsesToolPairingClass::ToolSearchOutput => error_or_panic(format!(
+                "Orphan tool search output for call id: {}",
+                correlation.call_id
+            )),
+        }
+        orphan_positions.push(position);
     }
+    drop(call_keys);
 
     if !orphan_positions.is_empty() {
         let mut orphan_positions = orphan_positions.into_iter().peekable();
@@ -225,103 +199,100 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
 }
 
 pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, item: &ResponseItem) {
-    match item {
-        ResponseItem::FunctionCall { call_id, .. } => {
-            remove_first_matching(items, |i| {
-                matches!(
-                    i,
-                    ResponseItem::FunctionCallOutput {
-                        call_id: Some(existing),
-                        ..
-                    } if existing == call_id
-                )
-            });
+    let Some(correlation) = tool_correlation(item) else {
+        return;
+    };
+    let counterpart_side = match correlation.side {
+        HistoryToolSide::Call => HistoryToolSide::Output,
+        HistoryToolSide::Output => HistoryToolSide::Call,
+    };
+
+    // Function outputs historically prefer a FunctionCall over LocalShellCall when malformed
+    // history contains both with the same call ID. Preserve that edge-case ordering while the
+    // compatibility representation still distinguishes those two call variants.
+    if let ResponseItem::FunctionCallOutput {
+        call_id: Some(call_id),
+        ..
+    } = item
+    {
+        if let Some(pos) = items.iter().position(|envelope| {
+            matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
+        }) {
+            items.remove(pos);
+            return;
         }
-        ResponseItem::FunctionCallOutput {
-            call_id: Some(call_id),
-            ..
-        } => {
-            if let Some(pos) = items.iter().position(|envelope| {
-                matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
-            }) {
-                items.remove(pos);
-            } else if let Some(pos) = items.iter().position(|envelope| {
-                matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
-            }) {
-                items.remove(pos);
-            }
+        if let Some(pos) = items.iter().position(|envelope| {
+            matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
+        }) {
+            items.remove(pos);
         }
-        ResponseItem::ToolSearchCall {
-            call_id: Some(call_id),
-            ..
-        } => {
-            remove_first_matching(items, |i| {
-                matches!(
-                    i,
-                    ResponseItem::ToolSearchOutput {
-                        call_id: Some(existing),
-                        ..
-                    } if existing == call_id
-                )
-            });
-        }
-        ResponseItem::ToolSearchOutput {
-            call_id: Some(call_id),
-            ..
-        } => {
-            remove_first_matching(
-                items,
-                |i| {
-                    matches!(
-                        i,
-                        ResponseItem::ToolSearchCall {
-                            call_id: Some(existing),
-                            ..
-                        } if existing == call_id
-                    )
-                },
-            );
-        }
-        ResponseItem::CustomToolCall { call_id, .. } => {
-            remove_first_matching(items, |i| {
-                matches!(
-                    i,
-                    ResponseItem::CustomToolCallOutput {
-                        call_id: existing, ..
-                    } if existing == call_id
-                )
-            });
-        }
-        ResponseItem::CustomToolCallOutput { call_id, .. } => {
-            remove_first_matching(
-                items,
-                |i| matches!(i, ResponseItem::CustomToolCall { call_id: existing, .. } if existing == call_id),
-            );
-        }
-        ResponseItem::LocalShellCall {
-            call_id: Some(call_id),
-            ..
-        } => {
-            remove_first_matching(items, |i| {
-                matches!(
-                    i,
-                    ResponseItem::FunctionCallOutput {
-                        call_id: Some(existing),
-                        ..
-                    } if existing == call_id
-                )
-            });
-        }
-        _ => {}
+        return;
+    }
+
+    if let Some(pos) = items.iter().position(|envelope| {
+        tool_correlation(&envelope.item).is_some_and(|candidate| {
+            candidate.compatibility_pairing_class == correlation.compatibility_pairing_class
+                && candidate.side == counterpart_side
+                && candidate.call_id == correlation.call_id
+        })
+    }) {
+        items.remove(pos);
     }
 }
 
-fn remove_first_matching<F>(items: &mut Vec<ResponseItemEnvelope>, predicate: F)
-where
-    F: Fn(&ResponseItem) -> bool,
-{
-    if let Some(pos) = items.iter().position(|envelope| predicate(&envelope.item)) {
-        items.remove(pos);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::LocalShellAction;
+    use codex_protocol::models::LocalShellExecAction;
+    use codex_protocol::models::LocalShellStatus;
+
+    #[test]
+    fn function_output_removal_prefers_function_call_over_local_shell_call() {
+        let call_id = "shared-call";
+        let mut items = vec![
+            ResponseItemEnvelope::new(ResponseItem::LocalShellCall {
+                id: None,
+                call_id: Some(call_id.to_string()),
+                status: LocalShellStatus::Completed,
+                action: LocalShellAction::Exec(LocalShellExecAction {
+                    command: vec!["echo".to_string(), "local".to_string()],
+                    timeout_ms: None,
+                    working_directory: None,
+                    env: None,
+                    user: None,
+                }),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+                id: None,
+                name: "do_it".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: call_id.to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        ];
+        let output = ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        remove_corresponding_for(&mut items, &output);
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0].item,
+            ResponseItem::LocalShellCall {
+                call_id: Some(remaining_call_id),
+                ..
+            } if remaining_call_id.as_str() == call_id
+        ));
     }
 }
 

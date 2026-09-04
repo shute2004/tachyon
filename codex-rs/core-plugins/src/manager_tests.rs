@@ -75,6 +75,9 @@ use wiremock::matchers::query_param;
 
 const MAX_CAPABILITY_SUMMARY_DESCRIPTION_LEN: usize = 1024;
 
+#[path = "marketplace_policy/curated_loading_tests.rs"]
+mod curated_marketplace_policy;
+
 fn unrestricted_config_layer_stack() -> ConfigLayerStack {
     ConfigLayerStack::default()
 }
@@ -1113,7 +1116,7 @@ async fn load_plugins_applies_plugin_mcp_server_policy() {
       "default_tools_approval_mode": "prompt",
       "enabled_tools": ["read", "search"],
       "tools": {
-        "search": { "approval_mode": "prompt" }
+        "search": { "approval_mode": "prompt", "output_token_limit": 8000 }
       }
     }
   }
@@ -1134,6 +1137,7 @@ disabled_tools = ["delete"]
 
 [plugins."sample@test".mcp_servers.sample.tools.search]
 approval_mode = "approve"
+output_token_limit = 12000
 "#;
 
     let outcome =
@@ -1154,6 +1158,7 @@ approval_mode = "approve"
         server.tools.get("search"),
         Some(&McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            output_token_limit: std::num::NonZeroUsize::new(8_000),
         })
     );
 }

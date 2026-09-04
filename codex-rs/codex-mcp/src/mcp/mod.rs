@@ -400,6 +400,27 @@ pub fn tool_plugin_provenance(config: &McpConfig) -> ToolPluginProvenance {
     ToolPluginProvenance::from_config(config)
 }
 
+pub(crate) fn read_resource_request_params(
+    uri: &str,
+    connector_id: Option<&str>,
+) -> ReadResourceRequestParams {
+    let mut params = ReadResourceRequestParams::new(uri.to_string());
+    if let Some(connector_id) = connector_id {
+        params.meta = Some(
+            serde_json::Map::from_iter([(
+                "x-codex-turn-metadata".to_string(),
+                serde_json::json!({
+                    "mcp_request_meta": {
+                        "selected_connector_ids": [connector_id],
+                    },
+                }),
+            )])
+            .into(),
+        );
+    }
+    params
+}
+
 pub async fn read_mcp_resource(
     config: &McpConfig,
     auth: Option<&CodexAuth>,
@@ -407,7 +428,8 @@ pub async fn read_mcp_resource(
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     tool_catalog_cache: crate::McpToolCatalogCache,
     server: &str,
-    params: ReadResourceRequestParams,
+    uri: &str,
+    connector_id: Option<&str>,
 ) -> anyhow::Result<ReadResourceResult> {
     let mut mcp_servers = effective_mcp_servers(config, auth);
     mcp_servers.retain(|name, _| name == server);
@@ -439,6 +461,7 @@ pub async fn read_mcp_resource(
     )
     .await;
 
+    let params = read_resource_request_params(uri, connector_id);
     let result = manager.read_resource(server, params).await;
     cancel_token.cancel();
     result

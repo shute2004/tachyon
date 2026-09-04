@@ -1536,30 +1536,43 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation() {
 }
 
 #[test]
-fn mcp_tool_call_thread_id_meta_is_added_to_request_meta() {
+fn mcp_tool_call_ids_are_added_to_request_meta() {
+    let item_id = ResponseItemId::from_server("fc-live".to_string());
+
     assert_eq!(
-        with_mcp_tool_call_thread_id_meta(
+        with_mcp_tool_call_ids_meta(
             Some(serde_json::json!({
                 "source": "test-client",
                 "threadId": "stale-thread",
+                "itemId": "stale-item",
             })),
             "thread-live",
+            Some(&item_id),
         ),
         Some(serde_json::json!({
             "source": "test-client",
             "threadId": "thread-live",
+            "itemId": "fc-live",
         }))
     );
 
     assert_eq!(
-        with_mcp_tool_call_thread_id_meta(/*meta*/ None, "thread-live"),
+        with_mcp_tool_call_ids_meta(
+            /*meta*/ None,
+            "thread-live",
+            /*originating_item_id*/ None,
+        ),
         Some(serde_json::json!({
             "threadId": "thread-live",
         }))
     );
 
     assert_eq!(
-        with_mcp_tool_call_thread_id_meta(Some(serde_json::json!("invalid-meta")), "thread-live"),
+        with_mcp_tool_call_ids_meta(
+            Some(serde_json::json!("invalid-meta")),
+            "thread-live",
+            /*originating_item_id*/ None,
+        ),
         Some(serde_json::json!("invalid-meta"))
     );
 }
@@ -1970,6 +1983,7 @@ async fn persist_custom_mcp_tool_approval_writes_tool_override() {
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains("[mcp_servers.docs.tools.search]"));
@@ -2187,6 +2201,7 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config_for_custom_serve
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert_eq!(mcp_tool_approval_is_remembered(&session, &key).await, true);
@@ -2236,6 +2251,7 @@ enabled = true
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains(r#"[plugins."sample@test".mcp_servers.sample.tools.search]"#));
@@ -2291,6 +2307,7 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
         tool,
         &McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Approve),
+            ..Default::default()
         }
     );
     assert!(contents.contains("[mcp_servers.docs.tools.search]"));

@@ -8,21 +8,22 @@ use anyhow::anyhow;
 use codex_protocol::mcp::Resource;
 use codex_protocol::mcp::ResourceContent;
 use codex_rmcp_client::CancellableEventStreamRequest;
+use codex_rmcp_client::RmcpClient;
 use rmcp::model::GetMeta;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ServerResult;
 use rmcp::service::ServiceError;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
+use crate::McpEventStreamOpener;
 use crate::McpRuntime;
 use crate::connection_manager::McpConnectionSet;
-use crate::connection_manager::McpServerConnection;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 
 /// One page of resources returned by an MCP server.
@@ -34,8 +35,17 @@ pub struct McpResourcePage {
     pub next_cursor: Option<String>,
 }
 
-/// Contents returned after reading one MCP resource.
+/// One page of resource templates returned by an MCP server.
 #[derive(Clone, Debug, PartialEq)]
+pub struct McpResourceTemplatePage {
+    /// Resource templates advertised on this page.
+    pub resource_templates: Vec<codex_protocol::mcp::ResourceTemplate>,
+    /// Opaque cursor to supply when requesting the next page.
+    pub next_cursor: Option<String>,
+}
+
+/// Contents returned after reading one MCP resource.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct McpResourceReadResult {
     /// Text or blob content returned for the requested resource.
     pub contents: Vec<ResourceContent>,
@@ -69,11 +79,34 @@ pub struct McpEventNotification {
 pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
     runtime_handle: Handle,
-    connection: Option<Arc<McpServerConnection>>,
-    hosted_event_server_removals: watch::Receiver<()>,
+    client: Option<Arc<RmcpClient>>,
+    cancel_event_streams_on_server_removal: watch::Receiver<()>,
 }
 
 impl McpEventStream {
+    pub(crate) async fn open(
+        client: Arc<RmcpClient>,
+        cancel_event_streams_on_server_removal: watch::Receiver<()>,
+        event_name: &str,
+        arguments: &Value,
+        request_meta: Option<&Map<String, Value>>,
+    ) -> Result<Self> {
+        let mut params = json!({ "name": event_name, "arguments": arguments });
+        if let Some(request_meta) = request_meta {
+            params["_meta"] = Value::Object(request_meta.clone());
+        }
+        let request = client
+            .send_event_stream_request(Some(params))
+            .await
+            .context("events/stream request failed")?;
+        Ok(Self {
+            request: Some(request),
+            runtime_handle: Handle::current(),
+            client: Some(client),
+            cancel_event_streams_on_server_removal,
+        })
+    }
+
     /// Receives the next raw lifecycle notification for this subscription.
     pub async fn recv(&mut self) -> Result<Option<McpEventNotification>> {
         let Some(request) = self.request.as_mut() else {
@@ -83,7 +116,7 @@ impl McpEventStream {
         tokio::select! {
             biased;
 
-            Ok(()) = self.hosted_event_server_removals.changed() => {
+            Ok(()) = self.cancel_event_streams_on_server_removal.changed() => {
                 self.cancel();
                 Err(anyhow!("hosted MCP event server was removed"))
             }
@@ -100,7 +133,7 @@ impl McpEventStream {
             }
             response = &mut request.handle.rx => {
                 self.request = None;
-                self.connection = None;
+                self.client = None;
 
                 match response {
                     Ok(Ok(_))
@@ -120,14 +153,14 @@ impl McpEventStream {
         }) = self.request.take()
         {
             drop(notifications);
-            let connection = self.connection.take();
+            let client = self.client.take();
             self.runtime_handle.spawn(async move {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     handle.cancel(Some("event subscription closed".to_string())),
                 )
                 .await;
-                drop(connection);
+                drop(client);
             });
         }
     }
@@ -215,7 +248,17 @@ impl McpResourceClient {
 
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
-        let params = ReadResourceRequestParams::new(uri.to_string());
+        self.read_resource_with_connector(server, uri, None).await
+    }
+
+    /// Reads one resource from the named server with an optional connector scope.
+    pub async fn read_resource_with_connector(
+        &self,
+        server: &str,
+        uri: &str,
+        connector_id: Option<&str>,
+    ) -> Result<McpResourceReadResult> {
+        let params = crate::mcp::read_resource_request_params(uri, connector_id);
         let result = self
             .runtime
             .latest_connections()
@@ -229,7 +272,7 @@ impl McpResourceClient {
         Ok(McpResourceReadResult { contents })
     }
 
-    /// Lists the events advertised by the hosted Plugin Runtime.
+    /// Lists the events advertised by the MCP event server.
     pub async fn list_events(&self) -> Result<McpEventCatalogSnapshot> {
         let (connections, _) = self
             .runtime
@@ -242,7 +285,7 @@ impl McpResourceClient {
             .client
             .send_custom_request_with_timeout("events/list", /*params*/ None, request_timeout)
             .await
-            .context("events/list failed for hosted Plugin Runtime")?;
+            .context("events/list request failed")?;
         let ServerResult::CustomResult(result) = result else {
             return Err(anyhow!("events/list returned an unexpected MCP result"));
         };
@@ -263,41 +306,50 @@ impl McpResourceClient {
         arguments: &Value,
         request_meta: Option<&Map<String, Value>>,
     ) -> Result<McpEventStream> {
-        let mut params = json!({
-            "name": event_name,
-            "arguments": arguments,
-        });
-        if let Some(request_meta) = request_meta {
-            params["_meta"] = Value::Object(request_meta.clone());
-        }
-
         let (connections, hosted_event_server_removals) = self
             .runtime
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
-        let (managed, _, connection) = connections
-            .client_with_connection_by_name(CODEX_APPS_MCP_SERVER_NAME)
+        let (managed, _) = connections
+            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
             .await?;
-        let request = managed
-            .client
-            .send_event_stream_request(Some(params))
-            .await
-            .context("events/stream failed for hosted Plugin Runtime")?;
-
-        Ok(McpEventStream {
-            request: Some(request),
-            runtime_handle: Handle::current(),
-            connection: Some(connection),
+        McpEventStream::open(
+            managed.client,
             hosted_event_server_removals,
-        })
+            event_name,
+            arguments,
+            request_meta,
+        )
+        .await
+    }
+
+    /// Creates an event stream opener using the task's event server settings.
+    pub fn event_stream_opener(&self) -> Result<McpEventStreamOpener> {
+        self.runtime.event_stream_opener()
+    }
+
+    /// Forwards event server removal to the owner of the task's subscriptions.
+    pub fn forward_event_server_removals_to(&self, cancellation: watch::Sender<()>) {
+        self.runtime.forward_event_server_removals_to(cancellation);
     }
 }
 
-fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
+pub(crate) fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
     let value = serde_json::to_value(resource).context("failed to serialize MCP resource")?;
     Resource::from_mcp_value(value).context("failed to convert MCP resource")
 }
 
-fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<ResourceContent> {
+pub(crate) fn resource_template_from_rmcp(
+    resource_template: rmcp::model::ResourceTemplate,
+) -> Result<codex_protocol::mcp::ResourceTemplate> {
+    let value = serde_json::to_value(resource_template)
+        .context("failed to serialize MCP resource template")?;
+    codex_protocol::mcp::ResourceTemplate::from_mcp_value(value)
+        .context("failed to convert MCP resource template")
+}
+
+pub(crate) fn resource_content_from_rmcp(
+    content: rmcp::model::ResourceContents,
+) -> Result<ResourceContent> {
     let value =
         serde_json::to_value(content).context("failed to serialize MCP resource content")?;
     serde_json::from_value(value).context("failed to convert MCP resource content")
