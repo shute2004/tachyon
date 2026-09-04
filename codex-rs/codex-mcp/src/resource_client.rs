@@ -10,10 +10,10 @@ use codex_protocol::mcp::ResourceContent;
 use codex_rmcp_client::CancellableEventStreamRequest;
 use rmcp::model::GetMeta;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ServerResult;
 use rmcp::service::ServiceError;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -35,7 +35,7 @@ pub struct McpResourcePage {
 }
 
 /// Contents returned after reading one MCP resource.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct McpResourceReadResult {
     /// Text or blob content returned for the requested resource.
     pub contents: Vec<ResourceContent>,
@@ -215,7 +215,17 @@ impl McpResourceClient {
 
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
-        let params = ReadResourceRequestParams::new(uri.to_string());
+        self.read_resource_with_connector(server, uri, None).await
+    }
+
+    /// Reads one resource from the named server with an optional connector scope.
+    pub async fn read_resource_with_connector(
+        &self,
+        server: &str,
+        uri: &str,
+        connector_id: Option<&str>,
+    ) -> Result<McpResourceReadResult> {
+        let params = crate::mcp::read_resource_request_params(uri, connector_id);
         let result = self
             .runtime
             .latest_connections()

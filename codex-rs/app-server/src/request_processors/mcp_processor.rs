@@ -2,7 +2,6 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_core::McpManager;
 use codex_mcp::McpServerSource;
-use codex_mcp::ReadResourceRequestParams;
 use codex_mcp::resolve_oauth_callback;
 
 use crate::thread_state::ThreadStateManager;
@@ -454,21 +453,6 @@ impl McpRequestProcessor {
             return Err(invalid_request("originCallId requires threadId"));
         }
 
-        let mut resource_params = ReadResourceRequestParams::new(uri);
-        if let Some(connector_id) = connector_id {
-            resource_params.meta = Some(
-                serde_json::Map::from_iter([(
-                    "x-codex-turn-metadata".to_string(),
-                    serde_json::json!({
-                        "mcp_request_meta": {
-                            "selected_connector_ids": [connector_id],
-                        },
-                    }),
-                )])
-                .into(),
-            );
-        }
-
         let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
         let mcp_manager = self.thread_manager.mcp_manager();
         let mcp_config = mcp_manager.runtime_config(&config).await;
@@ -491,7 +475,8 @@ impl McpRequestProcessor {
                 codex_apps_tools_cache,
                 tool_catalog_cache,
                 &server,
-                resource_params,
+                &uri,
+                connector_id.as_deref(),
             )
             .await
             .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from));

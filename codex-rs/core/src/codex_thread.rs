@@ -65,7 +65,6 @@ use codex_thread_store::ThreadStoreResult;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
-use rmcp::model::ReadResourceRequestParams;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -862,25 +861,9 @@ impl CodexThread {
         connector_id: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
-        let mut params = ReadResourceRequestParams::new(uri);
-        if let Some(connector_id) = connector_id {
-            params.meta = Some(
-                serde_json::Map::from_iter([(
-                    "x-codex-turn-metadata".to_string(),
-                    serde_json::json!({
-                        "mcp_request_meta": {
-                            "selected_connector_ids": [connector_id],
-                        },
-                    }),
-                )])
-                .into(),
-            );
-        }
-        let result = self
-            .session
-            .services
-            .mcp_runtime
-            .latest_read_resource(server, params)
+        let result =
+            codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
+            .read_resource_with_connector(server, uri, connector_id)
             .await?;
 
         Ok(serde_json::to_value(result)?)
