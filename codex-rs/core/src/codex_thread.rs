@@ -863,8 +863,8 @@ impl CodexThread {
         self.session.refresh_mcp_if_dirty().await;
         let result =
             codex_mcp::McpResourceClient::new(Arc::clone(&self.session.services.mcp_runtime))
-            .read_resource_with_connector(server, uri, connector_id)
-            .await?;
+                .read_resource_with_connector(server, uri, connector_id)
+                .await?;
 
         Ok(serde_json::to_value(result)?)
     }
