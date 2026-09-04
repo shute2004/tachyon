@@ -23,6 +23,8 @@ use codex_agent_graph_store::LocalAgentGraphStore;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::TurnStatus;
+use codex_attachment_store::AttachmentStore;
+use codex_attachment_store::InlineAttachmentStore;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::DisabledCodeModeSessionProvider;
 use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
@@ -353,6 +355,7 @@ pub(crate) struct ThreadManagerState {
     code_mode_session_provider: Arc<dyn CodeModeSessionProvider>,
     extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+    attachment_store: Arc<dyn AttachmentStore>,
     thread_store: Arc<dyn ThreadStore>,
     agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
@@ -421,6 +424,11 @@ pub fn local_agent_graph_store_from_state_db(
     })
 }
 
+/// Constructs the default attachment store that preserves attachments inline.
+pub fn inline_attachment_store() -> Arc<dyn AttachmentStore> {
+    Arc::new(InlineAttachmentStore)
+}
+
 impl ThreadManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -433,6 +441,7 @@ impl ThreadManager {
         extensions: Arc<ExtensionRegistry<Config>>,
         user_instructions_provider: Arc<dyn UserInstructionsProvider>,
         analytics_events_client: Option<AnalyticsEventsClient>,
+        attachment_store: Arc<dyn AttachmentStore>,
         thread_store: Arc<dyn ThreadStore>,
         agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
         installation_id: String,
@@ -480,6 +489,7 @@ impl ThreadManager {
                 code_mode_session_provider,
                 extensions,
                 user_instructions_provider,
+                attachment_store,
                 thread_store,
                 agent_graph_store,
                 attestation_provider,
@@ -629,6 +639,7 @@ impl ThreadManager {
                 user_instructions_provider: Arc::new(
                     crate::test_support::EmptyUserInstructionsProvider,
                 ),
+                attachment_store: inline_attachment_store(),
                 thread_store,
                 agent_graph_store,
                 attestation_provider: None,
@@ -666,6 +677,11 @@ impl ThreadManager {
 
     pub fn environment_manager(&self) -> Arc<EnvironmentManager> {
         self.state.environment_manager.clone()
+    }
+
+    /// Returns the attachment store used by threads created by this manager.
+    pub fn attachment_store(&self) -> Arc<dyn AttachmentStore> {
+        Arc::clone(&self.state.attachment_store)
     }
 
     /// Starts the local rollout migration path after a runtime feature enablement.
