@@ -39,6 +39,7 @@ use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::perform_oauth_login_silent;
 
 mod local;
+mod reconcile;
 mod search;
 
 fn plugin_redirect_mode(plugin_root: &Path) -> StreamableHttpRedirectMode {

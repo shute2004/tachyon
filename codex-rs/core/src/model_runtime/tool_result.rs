@@ -7,6 +7,9 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseInputItem;
+use codex_tools::DiscoveredFreeformInputFormat;
+use codex_tools::DiscoveredToolAvailability;
+use codex_tools::DiscoveredToolSpec;
 use codex_tools::ToolPayload;
 use codex_tools::ToolResult;
 use codex_tools::ToolResultContent;
@@ -41,6 +44,12 @@ fn model_tool_result_content(content: ToolResultContent) -> Option<ModelToolResu
     match content {
         ToolResultContent::Text(text) => Some(ModelToolResultContent::Text(text)),
         ToolResultContent::Json(value) => Some(ModelToolResultContent::Json(value)),
+        ToolResultContent::DiscoveredTools(tools) => Some(ModelToolResultContent::DiscoveredTools(
+            tools
+                .into_iter()
+                .map(model_discovered_tool_spec)
+                .collect::<Option<Vec<_>>>()?,
+        )),
         ToolResultContent::Image { uri, detail } => Some(ModelToolResultContent::Image {
             source: ModelMediaSource::Uri(uri),
             detail: detail.map(model_image_detail),
@@ -74,7 +83,81 @@ fn response_item_from_model_tool_result(
             name: None,
             output: function_call_output_payload(result)?,
         }),
-        ToolPayload::ToolSearch { .. } => None,
+        ToolPayload::ToolSearch { .. } => {
+            if result.is_error != Some(false) {
+                return None;
+            }
+            let [ModelToolResultContent::DiscoveredTools(tools)] = result.content.as_slice() else {
+                return None;
+            };
+            let tools = super::codex_request::tool_search_output_values_from_model(tools)?;
+            Some(ResponseInputItem::ToolSearchOutput {
+                call_id: result.call_id.0.clone(),
+                status: "completed".to_string(),
+                execution: "client".to_string(),
+                tools,
+            })
+        }
+    }
+}
+
+fn model_discovered_tool_spec(
+    tool: DiscoveredToolSpec,
+) -> Option<crate::model_runtime::ir::ModelToolSpec> {
+    match tool {
+        DiscoveredToolSpec::Function {
+            namespace,
+            name,
+            description,
+            input_schema,
+            strict,
+            availability,
+        } => Some(crate::model_runtime::ir::ModelToolSpec::Function {
+            namespace,
+            name,
+            description,
+            input_schema,
+            strict,
+            availability: model_tool_availability(availability),
+            purpose: crate::model_runtime::ir::ModelToolPurpose::Invocation,
+        }),
+        DiscoveredToolSpec::Freeform {
+            namespace,
+            name,
+            description,
+            input_format,
+            availability,
+        } => Some(crate::model_runtime::ir::ModelToolSpec::Freeform {
+            namespace,
+            name,
+            description,
+            input_format: model_freeform_input_format(input_format),
+            availability: model_tool_availability(availability),
+            purpose: crate::model_runtime::ir::ModelToolPurpose::Invocation,
+        }),
+    }
+}
+
+fn model_tool_availability(
+    availability: DiscoveredToolAvailability,
+) -> crate::model_runtime::ir::ModelToolAvailability {
+    match availability {
+        DiscoveredToolAvailability::Immediate => {
+            crate::model_runtime::ir::ModelToolAvailability::Immediate
+        }
+        DiscoveredToolAvailability::Deferred => {
+            crate::model_runtime::ir::ModelToolAvailability::Deferred
+        }
+    }
+}
+
+fn model_freeform_input_format(
+    input_format: DiscoveredFreeformInputFormat,
+) -> crate::model_runtime::ir::ModelFreeformInputFormat {
+    match input_format {
+        DiscoveredFreeformInputFormat::Grammar { syntax, definition } => {
+            crate::model_runtime::ir::ModelFreeformInputFormat::Grammar { syntax, definition }
+        }
     }
 }
 

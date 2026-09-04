@@ -6,6 +6,7 @@ use codex_core::config::Config;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::McpResourceAccess;
 use codex_extension_api::McpServerContribution;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::McpServerContributor;
@@ -15,7 +16,6 @@ use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
-use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -51,7 +51,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
-use rmcp::model::ReadResourceRequestParams;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -70,8 +69,8 @@ use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
-struct McpResourceClientCapture {
-    client: Arc<Mutex<Option<McpResourceClient>>>,
+struct McpResourceAccessCapture {
+    client: Arc<Mutex<Option<Arc<dyn McpResourceAccess>>>>,
 }
 
 struct CoalescingMcpContributor {
@@ -238,7 +237,7 @@ fn completed_response_sequence(count: usize) -> Vec<String> {
         .collect()
 }
 
-impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
+impl ThreadLifecycleContributor<Config> for McpResourceAccessCapture {
     fn on_thread_start<'a>(
         &'a self,
         input: ThreadStartInput<'a, Config>,
@@ -251,7 +250,7 @@ impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
             *self
                 .client
                 .lock()
-                .expect("capture lock should not be poisoned") = Some(client.as_ref().clone());
+                .expect("capture lock should not be poisoned") = Some(Arc::clone(client));
         })
     }
 }
@@ -629,7 +628,7 @@ async fn timeout_refresh_replaces_pending_startup_and_reuses_ready_connection() 
     // Publish without waiting for the held initialize to finish.
     let error = test
         .codex
-        .read_mcp_resource("unknown", ReadResourceRequestParams::new("test://resource"))
+        .read_mcp_resource("unknown", "test://resource", /*connector_id*/ None)
         .await
         .expect_err("the unknown server should not exist");
     assert_eq!(error.to_string(), "unknown MCP server 'unknown'");
@@ -665,7 +664,7 @@ async fn out_of_band_resource_read_reconciles_the_published_mcp_runtime() -> Res
 
     let captured_client = Arc::new(Mutex::new(None));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    extensions.thread_lifecycle_contributor(Arc::new(McpResourceClientCapture {
+    extensions.thread_lifecycle_contributor(Arc::new(McpResourceAccessCapture {
         client: Arc::clone(&captured_client),
     }));
     let test = core_test_support::test_codex::test_codex()
@@ -707,10 +706,7 @@ startup_timeout_sec = 0.1
 
     let _ = test
         .codex
-        .read_mcp_resource(
-            "refreshed",
-            ReadResourceRequestParams::new("test://resource"),
-        )
+        .read_mcp_resource("refreshed", "test://resource", /*connector_id*/ None)
         .await;
     assert!(resource_client.has_server("refreshed").await);
     Ok(())

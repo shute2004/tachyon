@@ -120,6 +120,54 @@ impl JsonSchema {
         self
     }
 
+    /// Returns whether this schema contains the Responses-only reviewed-encryption marker.
+    pub fn has_responses_encrypted_marker(&self) -> bool {
+        if self.encrypted.is_some() {
+            return true;
+        }
+
+        self.items
+            .as_deref()
+            .is_some_and(JsonSchema::has_responses_encrypted_marker)
+            || self.properties.as_ref().is_some_and(|properties| {
+                properties
+                    .values()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+            || self
+                .additional_properties
+                .as_ref()
+                .is_some_and(|additional| match additional {
+                    AdditionalProperties::Boolean(_) => false,
+                    AdditionalProperties::Schema(schema) => schema.has_responses_encrypted_marker(),
+                })
+            || self.any_of.as_ref().is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+            || self.one_of.as_ref().is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+            || self.all_of.as_ref().is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+            || self.defs.as_ref().is_some_and(|schemas| {
+                schemas
+                    .values()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+            || self.definitions.as_ref().is_some_and(|schemas| {
+                schemas
+                    .values()
+                    .any(JsonSchema::has_responses_encrypted_marker)
+            })
+    }
+
     pub fn number(description: Option<String>) -> Self {
         Self::typed(JsonSchemaPrimitiveType::Number, description)
     }
