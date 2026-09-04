@@ -858,9 +858,24 @@ impl CodexThread {
     pub async fn read_mcp_resource(
         &self,
         server: &str,
-        params: ReadResourceRequestParams,
+        uri: &str,
+        connector_id: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
+        let mut params = ReadResourceRequestParams::new(uri);
+        if let Some(connector_id) = connector_id {
+            params.meta = Some(
+                serde_json::Map::from_iter([(
+                    "x-codex-turn-metadata".to_string(),
+                    serde_json::json!({
+                        "mcp_request_meta": {
+                            "selected_connector_ids": [connector_id],
+                        },
+                    }),
+                )])
+                .into(),
+            );
+        }
         let result = self
             .session
             .services

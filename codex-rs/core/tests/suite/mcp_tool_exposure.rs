@@ -51,7 +51,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
-use rmcp::model::ReadResourceRequestParams;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -629,7 +628,7 @@ async fn timeout_refresh_replaces_pending_startup_and_reuses_ready_connection() 
     // Publish without waiting for the held initialize to finish.
     let error = test
         .codex
-        .read_mcp_resource("unknown", ReadResourceRequestParams::new("test://resource"))
+        .read_mcp_resource("unknown", "test://resource", /*connector_id*/ None)
         .await
         .expect_err("the unknown server should not exist");
     assert_eq!(error.to_string(), "unknown MCP server 'unknown'");
@@ -707,10 +706,7 @@ startup_timeout_sec = 0.1
 
     let _ = test
         .codex
-        .read_mcp_resource(
-            "refreshed",
-            ReadResourceRequestParams::new("test://resource"),
-        )
+        .read_mcp_resource("refreshed", "test://resource", /*connector_id*/ None)
         .await;
     assert!(resource_client.has_server("refreshed").await);
     Ok(())
