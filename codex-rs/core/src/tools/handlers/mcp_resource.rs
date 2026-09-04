@@ -5,20 +5,19 @@ use std::time::Duration;
 use std::time::Instant;
 
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::McpResourcePage;
 use codex_mcp::McpResourceReadResult;
+use codex_mcp::McpResourceTemplatePage;
 use codex_protocol::items::McpToolCallError;
 use codex_protocol::items::McpToolCallItem;
 use codex_protocol::items::McpToolCallStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::Resource;
+use codex_protocol::mcp::ResourceTemplate;
 use codex_protocol::models::function_call_output_content_items_to_text;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
-use rmcp::model::ListResourceTemplatesResult;
-use rmcp::model::ListResourcesResult;
-use rmcp::model::PaginatedRequestParams;
-use rmcp::model::Resource;
-use rmcp::model::ResourceTemplate;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -76,15 +75,11 @@ impl ListResourceArgs {
     fn target(
         &self,
         turn: &TurnContext,
-    ) -> Result<Option<(String, Option<PaginatedRequestParams>)>, FunctionCallError> {
+    ) -> Result<Option<(String, Option<String>)>, FunctionCallError> {
         match &self.server {
             Some(server) => {
                 ensure_model_can_access_mcp_server(turn, server)?;
-                let params = self
-                    .cursor
-                    .clone()
-                    .map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
-                Ok(Some((server.clone(), params)))
+                Ok(Some((server.clone(), self.cursor.clone())))
             }
             None if self.cursor.is_some() => Err(FunctionCallError::RespondToModel(
                 "cursor can only be used when a server is specified".to_string(),
@@ -140,7 +135,7 @@ struct ListResourcesPayload {
 }
 
 impl ListResourcesPayload {
-    fn from_single_server(server: String, result: ListResourcesResult) -> Self {
+    fn from_single_server(server: String, result: McpResourcePage) -> Self {
         Self {
             resources: ResourceWithServer::from_server(&server, result.resources),
             server: Some(server),
@@ -168,7 +163,7 @@ struct ListResourceTemplatesPayload {
 }
 
 impl ListResourceTemplatesPayload {
-    fn from_single_server(server: String, result: ListResourceTemplatesResult) -> Self {
+    fn from_single_server(server: String, result: McpResourceTemplatePage) -> Self {
         Self {
             resource_templates: ResourceWithServer::from_server(&server, result.resource_templates),
             server: Some(server),

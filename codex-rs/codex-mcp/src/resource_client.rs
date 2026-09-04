@@ -34,6 +34,15 @@ pub struct McpResourcePage {
     pub next_cursor: Option<String>,
 }
 
+/// One page of resource templates returned by an MCP server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpResourceTemplatePage {
+    /// Resource templates advertised on this page.
+    pub resource_templates: Vec<codex_protocol::mcp::ResourceTemplate>,
+    /// Opaque cursor to supply when requesting the next page.
+    pub next_cursor: Option<String>,
+}
+
 /// Contents returned after reading one MCP resource.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct McpResourceReadResult {
@@ -302,9 +311,18 @@ impl McpResourceClient {
     }
 }
 
-fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
+pub(crate) fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
     let value = serde_json::to_value(resource).context("failed to serialize MCP resource")?;
     Resource::from_mcp_value(value).context("failed to convert MCP resource")
+}
+
+pub(crate) fn resource_template_from_rmcp(
+    resource_template: rmcp::model::ResourceTemplate,
+) -> Result<codex_protocol::mcp::ResourceTemplate> {
+    let value = serde_json::to_value(resource_template)
+        .context("failed to serialize MCP resource template")?;
+    codex_protocol::mcp::ResourceTemplate::from_mcp_value(value)
+        .context("failed to convert MCP resource template")
 }
 
 pub(crate) fn resource_content_from_rmcp(
