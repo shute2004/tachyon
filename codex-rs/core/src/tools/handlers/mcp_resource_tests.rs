@@ -1,6 +1,7 @@
 use super::*;
+use codex_mcp::McpResourceReadResult;
+use codex_protocol::mcp::ResourceContent;
 use pretty_assertions::assert_eq;
-use rmcp::model::ResourceContents;
 use serde_json::json;
 
 fn resource(uri: &str, name: &str) -> Resource {
@@ -158,17 +159,64 @@ fn serialize_function_output_preserves_small_payload() {
 }
 
 #[test]
+fn read_resource_payload_preserves_neutral_content_shape() {
+    let payload = ReadResourcePayload {
+        server: "hosted".to_string(),
+        uri: "asset://bundle".to_string(),
+        result: McpResourceReadResult {
+            contents: vec![
+                ResourceContent::Text {
+                    uri: "asset://text".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    text: "hello".to_string(),
+                    meta: Some(json!({"source": "fixture"})),
+                },
+                ResourceContent::Blob {
+                    uri: "asset://blob".to_string(),
+                    mime_type: Some("application/octet-stream".to_string()),
+                    blob: "AAE=".to_string(),
+                    meta: None,
+                },
+            ],
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(payload).expect("serialize read resource payload"),
+        json!({
+            "server": "hosted",
+            "uri": "asset://bundle",
+            "contents": [
+                {
+                    "uri": "asset://text",
+                    "mimeType": "text/plain",
+                    "text": "hello",
+                    "_meta": {"source": "fixture"}
+                },
+                {
+                    "uri": "asset://blob",
+                    "mimeType": "application/octet-stream",
+                    "blob": "AAE="
+                }
+            ]
+        })
+    );
+}
+
+#[test]
 fn serialize_function_output_caps_read_resource_payload() {
     let truncation_policy = TruncationPolicy::Bytes(8_000);
     let payload = ReadResourcePayload {
         server: "hosted".to_string(),
         uri: "skill://large/SKILL.md".to_string(),
-        result: ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-            uri: "skill://large/SKILL.md".to_string(),
-            mime_type: Some("text/markdown".to_string()),
-            text: "x".repeat(16_000),
-            meta: None,
-        }]),
+        result: McpResourceReadResult {
+            contents: vec![ResourceContent::Text {
+                uri: "skill://large/SKILL.md".to_string(),
+                mime_type: Some("text/markdown".to_string()),
+                text: "x".repeat(16_000),
+                meta: None,
+            }],
+        },
     };
     let serialized = serde_json::to_string(&payload).expect("serialize payload");
     let expected = truncate_text(&serialized, truncation_policy * 1.2);

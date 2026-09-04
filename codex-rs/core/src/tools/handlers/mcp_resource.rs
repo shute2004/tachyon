@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::McpResourceReadResult;
 use codex_protocol::items::McpToolCallError;
 use codex_protocol::items::McpToolCallItem;
 use codex_protocol::items::McpToolCallStatus;
@@ -16,7 +17,6 @@ use codex_utils_output_truncation::truncate_text;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::ReadResourceResult;
 use rmcp::model::Resource;
 use rmcp::model::ResourceTemplate;
 use serde::Deserialize;
@@ -190,7 +190,7 @@ struct ReadResourcePayload {
     server: String,
     uri: String,
     #[serde(flatten)]
-    result: ReadResourceResult,
+    result: McpResourceReadResult,
 }
 
 fn call_tool_result_from_content(content: &str, success: Option<bool>) -> CallToolResult {
