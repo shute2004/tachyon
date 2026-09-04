@@ -2,9 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use codex_config::McpServerConfig;
-use codex_mcp::McpServerSource;
-use codex_mcp::PreparedMcpCall;
 use codex_tools::ToolCallSource;
 use codex_tools::ToolName;
 use codex_tools::ToolPayload;
@@ -62,35 +59,8 @@ pub struct McpToolContext {
 }
 
 impl McpToolContext {
-    /// Snapshots a prepared call without exposing its executable client to extensions.
-    ///
-    /// Configured servers retain their provenance only when their captured connection
-    /// still matches the host configuration for the current tool invocation.
-    pub fn from_prepared_call(
-        call: &PreparedMcpCall,
-        configured_server: Option<&McpServerConfig>,
-    ) -> Self {
-        let tool = call.tool_info().clone();
-        let source = if tool.connector_id.is_some() && call.is_host_owned_apps() {
-            McpToolSource::Connector
-        } else if call.is_selected_plugin_server() {
-            McpToolSource::SelectedPlugin
-        } else if let Some(id) = call.plugin_id() {
-            McpToolSource::Plugin { id: id.to_owned() }
-        } else if call
-            .config()
-            .mcp_server_catalog
-            .server(call.server_name())
-            .is_some_and(|server| {
-                matches!(server.source(), McpServerSource::Config)
-                    && configured_server.is_some_and(|configured| server.config() == configured)
-            })
-        {
-            McpToolSource::Config
-        } else {
-            McpToolSource::Other
-        };
-
+    /// Creates a context from frozen metadata and host-classified provenance.
+    pub fn new(tool: crate::McpToolInfo, source: McpToolSource) -> Self {
         Self { tool, source }
     }
 

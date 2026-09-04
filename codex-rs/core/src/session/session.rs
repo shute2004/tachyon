@@ -351,10 +351,8 @@ impl SessionConfiguration {
         current_environments: &[TurnEnvironmentSelection],
     ) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
-        let current_sandbox_policy = self.sandbox_policy(current_environments);
         let current_file_system_sandbox_policy =
             self.file_system_sandbox_policy(current_environments);
-        let current_network_sandbox_policy = self.network_sandbox_policy();
         let file_system_policy_has_rebindable_project_root_write =
             current_file_system_sandbox_policy
                 .entries
@@ -437,35 +435,37 @@ impl SessionConfiguration {
                         network_sandbox_policy,
                     ),
                 )?;
-        } else if cwd_changed
-            && file_system_policy_has_rebindable_project_root_write
-            && current_file_system_sandbox_policy.is_semantically_equivalent_to(
+        } else if cwd_changed && file_system_policy_has_rebindable_project_root_write {
+            // Compatibility projection can resolve filesystem paths. Only compute it
+            // when a cwd-bound legacy policy might need rebinding.
+            let current_sandbox_policy = self.sandbox_policy(current_environments);
+            if current_file_system_sandbox_policy.is_semantically_equivalent_to(
                 &FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
                     &current_sandbox_policy,
                     self.cwd(),
                     &current_file_system_sandbox_policy,
                 ),
                 self.cwd(),
-            )
-        {
-            // Preserve richer split policies across cwd-only updates; only
-            // rederive when the session is already using a structurally
-            // cwd-bound legacy bridge.
-            let file_system_sandbox_policy =
-                FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
-                    &current_sandbox_policy,
-                    next_configuration.cwd(),
-                    &current_file_system_sandbox_policy,
-                );
-            next_configuration
-                .permission_profile_state
-                .set_legacy_permission_profile(
-                    PermissionProfile::from_runtime_permissions_with_enforcement(
-                        SandboxEnforcement::from_legacy_sandbox_policy(&current_sandbox_policy),
-                        &file_system_sandbox_policy,
-                        current_network_sandbox_policy,
-                    ),
-                )?;
+            ) {
+                // Preserve richer split policies across cwd-only updates; only
+                // rederive when the session is already using a structurally
+                // cwd-bound legacy bridge.
+                let file_system_sandbox_policy =
+                    FileSystemSandboxPolicy::from_legacy_sandbox_policy_preserving_deny_entries(
+                        &current_sandbox_policy,
+                        next_configuration.cwd(),
+                        &current_file_system_sandbox_policy,
+                    );
+                next_configuration
+                    .permission_profile_state
+                    .set_legacy_permission_profile(
+                        PermissionProfile::from_runtime_permissions_with_enforcement(
+                            SandboxEnforcement::from_legacy_sandbox_policy(&current_sandbox_policy),
+                            &file_system_sandbox_policy,
+                            self.network_sandbox_policy(),
+                        ),
+                    )?;
+            }
         }
         if let Some(app_server_client_name) = updates.app_server_client_name.clone() {
             next_configuration.app_server_client_name = Some(app_server_client_name);
@@ -1312,7 +1312,8 @@ impl Session {
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             session_extension_data.insert(analytics_events_client.clone());
-            let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+            let mcp_resource_access: Arc<dyn codex_extension_api::McpResourceAccess> =
+                Arc::new(McpResourceAccessAdapter::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
             for contributor in extensions.thread_lifecycle_contributors() {
@@ -1321,7 +1322,7 @@ impl Session {
                     session_source: &session_configuration.session_source,
                     persistent_thread_state_available: state_db_ctx.is_some(),
                     environments: environment_selections,
-                    mcp_resource_client: Some(Arc::clone(&mcp_resource_client)),
+                    mcp_resource_client: Some(Arc::clone(&mcp_resource_access)),
                     extension_metrics: Some(Arc::clone(&extension_metrics)),
                     session_store: &session_extension_data,
                     thread_store: &thread_extension_data,
