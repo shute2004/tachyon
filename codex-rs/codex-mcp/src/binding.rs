@@ -24,6 +24,7 @@ use tokio::sync::RwLock;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
+use crate::resource_client::McpResourceReadResult;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
@@ -153,6 +154,23 @@ impl McpBinding {
         } else {
             self.connections.read_resource(server, params).await
         }
+    }
+
+    /// Reads one resource by URI through the exact clients and connections captured by this
+    /// binding, converting the protocol result to the provider-neutral resource shape.
+    pub async fn read_resource_by_uri(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<McpResourceReadResult> {
+        let params = crate::mcp::read_resource_request_params(uri, None);
+        let result = self.read_resource(server, params).await?;
+        let contents = result
+            .contents
+            .into_iter()
+            .map(crate::resource_client::resource_content_from_rmcp)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(McpResourceReadResult { contents })
     }
 }
 

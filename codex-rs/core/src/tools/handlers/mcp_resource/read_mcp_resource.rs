@@ -8,8 +8,6 @@ use codex_protocol::protocol::McpInvocation;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
-use rmcp::model::ReadResourceRequestParams;
-
 use super::ReadResourceArgs;
 use super::ReadResourcePayload;
 use super::ensure_model_can_access_mcp_server;
@@ -77,7 +75,7 @@ impl ReadMcpResourceHandler {
         run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
             ensure_model_can_access_mcp_server(turn.as_ref(), &server)?;
             let result = mcp
-                .read_resource(&server, ReadResourceRequestParams::new(uri.clone()))
+                .read_resource_by_uri(&server, &uri)
                 .await
                 .map_err(|err| {
                     FunctionCallError::RespondToModel(format!("resources/read failed: {err:#}"))
