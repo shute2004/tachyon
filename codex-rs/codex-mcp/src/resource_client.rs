@@ -10,10 +10,10 @@ use codex_protocol::mcp::ResourceContent;
 use codex_rmcp_client::CancellableEventStreamRequest;
 use rmcp::model::GetMeta;
 use rmcp::model::PaginatedRequestParams;
-use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ServerResult;
 use rmcp::service::ServiceError;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -34,8 +34,17 @@ pub struct McpResourcePage {
     pub next_cursor: Option<String>,
 }
 
-/// Contents returned after reading one MCP resource.
+/// One page of resource templates returned by an MCP server.
 #[derive(Clone, Debug, PartialEq)]
+pub struct McpResourceTemplatePage {
+    /// Resource templates advertised on this page.
+    pub resource_templates: Vec<codex_protocol::mcp::ResourceTemplate>,
+    /// Opaque cursor to supply when requesting the next page.
+    pub next_cursor: Option<String>,
+}
+
+/// Contents returned after reading one MCP resource.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct McpResourceReadResult {
     /// Text or blob content returned for the requested resource.
     pub contents: Vec<ResourceContent>,
@@ -215,7 +224,17 @@ impl McpResourceClient {
 
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
-        let params = ReadResourceRequestParams::new(uri.to_string());
+        self.read_resource_with_connector(server, uri, None).await
+    }
+
+    /// Reads one resource from the named server with an optional connector scope.
+    pub async fn read_resource_with_connector(
+        &self,
+        server: &str,
+        uri: &str,
+        connector_id: Option<&str>,
+    ) -> Result<McpResourceReadResult> {
+        let params = crate::mcp::read_resource_request_params(uri, connector_id);
         let result = self
             .runtime
             .latest_connections()
@@ -292,12 +311,23 @@ impl McpResourceClient {
     }
 }
 
-fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
+pub(crate) fn resource_from_rmcp(resource: rmcp::model::Resource) -> Result<Resource> {
     let value = serde_json::to_value(resource).context("failed to serialize MCP resource")?;
     Resource::from_mcp_value(value).context("failed to convert MCP resource")
 }
 
-fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<ResourceContent> {
+pub(crate) fn resource_template_from_rmcp(
+    resource_template: rmcp::model::ResourceTemplate,
+) -> Result<codex_protocol::mcp::ResourceTemplate> {
+    let value = serde_json::to_value(resource_template)
+        .context("failed to serialize MCP resource template")?;
+    codex_protocol::mcp::ResourceTemplate::from_mcp_value(value)
+        .context("failed to convert MCP resource template")
+}
+
+pub(crate) fn resource_content_from_rmcp(
+    content: rmcp::model::ResourceContents,
+) -> Result<ResourceContent> {
     let value =
         serde_json::to_value(content).context("failed to serialize MCP resource content")?;
     serde_json::from_value(value).context("failed to convert MCP resource content")
