@@ -253,6 +253,12 @@ pub struct ResourceTemplate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub icons: Option<Vec<serde_json::Value>>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// The server's response to a tool call.
@@ -402,6 +408,10 @@ struct ResourceTemplateSerde {
     description: Option<String>,
     #[serde(rename = "mimeType", alias = "mime_type", default)]
     mime_type: Option<String>,
+    #[serde(default)]
+    icons: Option<Vec<serde_json::Value>>,
+    #[serde(rename = "_meta", default)]
+    meta: Option<serde_json::Value>,
 }
 
 impl From<ResourceTemplateSerde> for ResourceTemplate {
@@ -413,6 +423,8 @@ impl From<ResourceTemplateSerde> for ResourceTemplate {
             title,
             description,
             mime_type,
+            icons,
+            meta,
         } = value;
         Self {
             annotations,
@@ -421,6 +433,8 @@ impl From<ResourceTemplateSerde> for ResourceTemplate {
             title,
             description,
             mime_type,
+            icons,
+            meta,
         }
     }
 }
@@ -543,5 +557,35 @@ mod tests {
 
         let parsed = Resource::from_mcp_value(resource).expect("should deserialize");
         assert_eq!(parsed.size, None);
+    }
+
+    #[test]
+    fn resource_template_from_mcp_value_preserves_annotations_and_metadata() {
+        let template = serde_json::json!({
+            "annotations": { "audience": ["user"] },
+            "uriTemplate": "file:///tmp/{name}",
+            "name": "file",
+            "title": "File",
+            "description": "A file resource",
+            "mimeType": "text/plain",
+            "icons": [{ "src": "https://example.com/file.png", "mimeType": "image/png" }],
+            "_meta": { "com.example/source": "fixture" },
+        });
+
+        let parsed = ResourceTemplate::from_mcp_value(template).expect("should deserialize");
+
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("should serialize"),
+            serde_json::json!({
+                "annotations": { "audience": ["user"] },
+                "uriTemplate": "file:///tmp/{name}",
+                "name": "file",
+                "title": "File",
+                "description": "A file resource",
+                "mimeType": "text/plain",
+                "icons": [{ "src": "https://example.com/file.png", "mimeType": "image/png" }],
+                "_meta": { "com.example/source": "fixture" },
+            })
+        );
     }
 }

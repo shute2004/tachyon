@@ -5,6 +5,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use codex_history::HistoryItem;
+use codex_history::HistoryItemProjection;
+use codex_history::HistoryMessage;
+use codex_history::HistoryMessageContent;
+use codex_history::HistoryMessageRole;
+use codex_history::project_response_item;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -16,9 +22,12 @@ use tokio::process::Command;
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
-use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
 use crate::RolloutLine;
+
+#[cfg(test)]
+#[path = "search_projection_tests.rs"]
+mod search_projection_tests;
 
 const MATCH_CONTEXT_BEFORE_CHARS: usize = 48;
 const MATCH_CONTEXT_AFTER_CHARS: usize = 96;
@@ -270,31 +279,63 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
                 Some(agent.message.trim().to_string())
             }
         }
-        RolloutItem::ResponseItem(ResponseItemEnvelope {
-            item: ResponseItem::Message { role, content, .. },
-            ..
-        }) => {
-            let text = content
-                .iter()
-                .filter_map(content_item_text)
-                .collect::<Vec<_>>()
-                .join(" ");
-            if text.trim().is_empty() || (role != "user" && role != "assistant") {
-                None
-            } else {
-                Some(text)
+        RolloutItem::ResponseItem(envelope) => match project_response_item(envelope.clone()) {
+            HistoryItemProjection::Canonical {
+                item: HistoryItem::Message(message),
+                ..
+            } => conversation_text_from_history_message(&message),
+            HistoryItemProjection::Canonical { .. } => None,
+            HistoryItemProjection::Fallback { compatibility, .. } => {
+                legacy_conversation_text_from_response_item(&compatibility.item)
             }
-        }
+        },
         RolloutItem::SessionMeta(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::WorldState(_) => None,
+    }
+}
+
+fn conversation_text_from_history_message(message: &HistoryMessage) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            HistoryMessageContent::Text(text) => Some(text.as_str()),
+            HistoryMessageContent::Image { .. } | HistoryMessageContent::Audio { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.trim().is_empty()
+        || !matches!(
+            message.role,
+            HistoryMessageRole::User | HistoryMessageRole::Assistant
+        )
+    {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn legacy_conversation_text_from_response_item(item: &ResponseItem) -> Option<String> {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return None;
+    };
+    let text = content
+        .iter()
+        .filter_map(content_item_text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.trim().is_empty() || (role != "user" && role != "assistant") {
+        None
+    } else {
+        Some(text)
     }
 }
 

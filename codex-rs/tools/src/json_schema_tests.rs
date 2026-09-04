@@ -2047,3 +2047,18 @@ fn parse_tool_input_schema_drops_malformed_definition_tables() {
         }
     );
 }
+
+#[test]
+fn json_schema_detects_nested_responses_encrypted_marker() {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "secret".to_string(),
+        JsonSchema::object(Default::default(), None, None).with_encrypted(),
+    );
+
+    let nested = JsonSchema::object(properties, None, None);
+    assert!(nested.has_responses_encrypted_marker());
+
+    let plain = JsonSchema::object(Default::default(), None, None);
+    assert!(!plain.has_responses_encrypted_marker());
+}

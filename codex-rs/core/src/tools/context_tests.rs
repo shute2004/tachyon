@@ -1,6 +1,11 @@
 use super::*;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::SearchToolCallParams;
+use codex_tools::JsonSchema;
+use codex_tools::LoadableToolSpec;
+use codex_tools::ResponsesApiNamespace;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -268,8 +273,11 @@ fn mcp_tool_output_response_item_preserves_content_items() {
     }
 }
 
-#[test]
-fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata() {
+#[test_case::test_case(TruncationPolicy::Bytes(64); "byte budget")]
+#[test_case::test_case(TruncationPolicy::Tokens(1); "token budget")]
+fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
+    truncation_policy: TruncationPolicy,
+) {
     let large_content = "large structured value ".repeat(1_000);
     let output = McpToolOutput {
         result: CallToolResult {
@@ -288,12 +296,13 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata()
         tool_input: json!({}),
         wall_time: std::time::Duration::from_millis(1250),
         original_image_detail_supported: false,
-        truncation_policy: TruncationPolicy::Bytes(64),
+        truncation_policy,
     };
 
-    let result = output.code_mode_result(&ToolPayload::Function {
+    let payload = ToolPayload::Function {
         arguments: "{}".to_string(),
-    });
+    };
+    let result = output.code_mode_result(&payload);
 
     assert_eq!(
         result,
@@ -412,6 +421,129 @@ fn tool_search_payloads_roundtrip_as_tool_search_outputs() {
         }
         other => panic!("expected ToolSearchOutput, got {other:?}"),
     }
+}
+
+#[test]
+fn tool_search_output_uses_canonical_result_and_preserves_invalid_fallbacks() {
+    let payload = ToolPayload::ToolSearch {
+        arguments: SearchToolCallParams {
+            query: "calendar".to_string(),
+            limit: None,
+        },
+    };
+    let valid = ToolSearchOutput {
+        tools: vec![
+            LoadableToolSpec::Function(ResponsesApiTool {
+                name: "lookup".to_string(),
+                description: "Look up a record".to_string(),
+                strict: true,
+                defer_loading: Some(true),
+                parameters: JsonSchema::object(
+                    Default::default(),
+                    Some(vec![]),
+                    Some(false.into()),
+                ),
+                output_schema: None,
+            }),
+            LoadableToolSpec::Namespace(ResponsesApiNamespace {
+                name: "calendar".to_string(),
+                description: "Tools in the calendar namespace.".to_string(),
+                tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+                    name: "get_event".to_string(),
+                    description: "Get an event".to_string(),
+                    strict: false,
+                    defer_loading: None,
+                    parameters: JsonSchema::object(Default::default(), None, Some(false.into())),
+                    output_schema: None,
+                })],
+            }),
+        ],
+    };
+    let canonical = valid
+        .to_tool_result()
+        .expect("valid discovery output should have a canonical result");
+    assert!(matches!(
+        canonical.content.as_slice(),
+        [codex_tools::ToolResultContent::DiscoveredTools(tools)] if tools.len() == 2
+    ));
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(&valid, "search-2", &payload),
+        valid.to_response_item("search-2", &payload)
+    );
+
+    let invalid_namespace = ToolSearchOutput {
+        tools: vec![LoadableToolSpec::Namespace(ResponsesApiNamespace {
+            name: "calendar".to_string(),
+            description: "Provider-specific namespace description".to_string(),
+            tools: Vec::new(),
+        })],
+    };
+    assert_eq!(invalid_namespace.to_tool_result(), None);
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &invalid_namespace,
+            "search-invalid-namespace",
+            &payload,
+        ),
+        invalid_namespace.to_response_item("search-invalid-namespace", &payload)
+    );
+
+    let empty_namespace = ToolSearchOutput {
+        tools: vec![LoadableToolSpec::Namespace(ResponsesApiNamespace {
+            name: "calendar".to_string(),
+            description: "Tools in the calendar namespace.".to_string(),
+            tools: Vec::new(),
+        })],
+    };
+    assert_eq!(empty_namespace.to_tool_result(), None);
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &empty_namespace,
+            "search-empty-namespace",
+            &payload,
+        ),
+        empty_namespace.to_response_item("search-empty-namespace", &payload)
+    );
+
+    let invalid_defer_loading = ToolSearchOutput {
+        tools: vec![LoadableToolSpec::Function(ResponsesApiTool {
+            name: "lookup".to_string(),
+            description: "Look up a record".to_string(),
+            strict: false,
+            defer_loading: Some(false),
+            parameters: JsonSchema::object(Default::default(), None, None),
+            output_schema: None,
+        })],
+    };
+    assert_eq!(invalid_defer_loading.to_tool_result(), None);
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &invalid_defer_loading,
+            "search-invalid-defer",
+            &payload,
+        ),
+        invalid_defer_loading.to_response_item("search-invalid-defer", &payload)
+    );
+
+    let invalid_encrypted_schema = ToolSearchOutput {
+        tools: vec![LoadableToolSpec::Function(ResponsesApiTool {
+            name: "lookup".to_string(),
+            description: "Look up a record".to_string(),
+            strict: false,
+            defer_loading: Some(true),
+            parameters: JsonSchema::object(Default::default(), None, None).with_encrypted(),
+            output_schema: None,
+        })],
+    };
+    assert_eq!(invalid_encrypted_schema.to_tool_result(), None);
+    assert_eq!(
+        crate::tools::registry::response_item_for_tool_output(
+            &invalid_encrypted_schema,
+            "search-invalid-encrypted",
+            &payload,
+        ),
+        invalid_encrypted_schema.to_response_item("search-invalid-encrypted", &payload)
+    );
 }
 
 #[test]

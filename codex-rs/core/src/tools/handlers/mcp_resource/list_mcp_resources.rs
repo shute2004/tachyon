@@ -72,7 +72,7 @@ impl ListMcpResourcesHandler {
         run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
             if let Some((server_name, params)) = args.target(turn.as_ref())? {
                 let result = mcp
-                    .list_resources(&server_name, params)
+                    .list_resources_by_cursor(&server_name, params)
                     .await
                     .map_err(|err| {
                         FunctionCallError::RespondToModel(format!("resources/list failed: {err:#}"))
@@ -83,10 +83,13 @@ impl ListMcpResourcesHandler {
                 ))
             } else {
                 let resources = mcp
-                    .list_all_resources(|server_name| {
+                    .list_all_resources_neutral(|server_name| {
                         model_can_access_mcp_server(turn.as_ref(), server_name)
                     })
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        FunctionCallError::RespondToModel(format!("resources/list failed: {err:#}"))
+                    })?;
                 Ok(ListResourcesPayload::from_all_servers(resources))
             }
         })
