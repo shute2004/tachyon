@@ -345,6 +345,7 @@ impl MessageProcessor {
                     config.codex_home.clone(),
                 )),
                 Some(analytics_events_client.clone()),
+                codex_core::inline_attachment_store(),
                 Arc::clone(&thread_store),
                 codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
                 installation_id,

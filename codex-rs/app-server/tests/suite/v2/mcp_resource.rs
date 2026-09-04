@@ -134,6 +134,55 @@ async fn mcp_resource_read_returns_resource_contents() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_resource_read_for_thread_forwards_connector_scope() -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let (apps_server_url, _apps_server_calls, apps_server_handle) =
+        start_resource_apps_mcp_server().await?;
+    let responses_server_uri = responses_server.uri();
+    let (_codex_home, mut mcp) = start_resource_test_app_server(
+        &apps_server_url,
+        &responses_server_uri,
+        ResourceTestEnvironment::Auto,
+    )
+    .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let read_response: McpResourceReadResponse = mcp
+        .request(|request_id| ClientRequest::McpResourceRead {
+            request_id,
+            params: McpResourceReadParams {
+                thread_id: Some(thread.id),
+                origin_call_id: None,
+                server: "codex_apps".to_string(),
+                uri: TEST_WIDGET_RESOURCE_URI.to_string(),
+                connector_id: Some("best_buy".to_string()),
+            },
+        })
+        .await?;
+    assert_eq!(
+        read_response,
+        McpResourceReadResponse {
+            contents: vec![McpResourceContent::Text {
+                uri: TEST_WIDGET_RESOURCE_URI.to_string(),
+                mime_type: Some("text/html".to_string()),
+                text: "<html>best_buy</html>".to_string(),
+                meta: None,
+            }],
+            origin_call_id: None,
+        }
+    );
+
+    apps_server_handle.abort();
+    let _ = apps_server_handle.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
     let (apps_server_url, apps_server_calls, apps_server_handle) =
@@ -966,7 +1015,7 @@ impl ServerHandler for ResourceAppsMcpServer {
             if request_meta
                 .and_then(|metadata| metadata.get("link_id"))
                 .and_then(serde_json::Value::as_str)
-                != Some(expected_link_id.as_str())
+                .is_some_and(|link_id| link_id != expected_link_id.as_str())
             {
                 return Err(rmcp::ErrorData::invalid_params("wrong account scope", None));
             }
