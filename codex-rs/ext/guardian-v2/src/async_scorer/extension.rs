@@ -458,11 +458,6 @@ impl ApprovalReviewContributor for GuardianV2Extension {
             if score < guardian_config.review_threshold {
                 if scored_authorization.as_ref() != Some(&current_authorization) {
                     thread_store.insert(StrictReviewReason::StaleScore);
-                    record_fast_decision(
-                        extension_metrics.as_deref(),
-                        "deferred",
-                        "authorization_changed",
-                    );
                     return None;
                 }
                 return Some(ReviewDecision::Approved);
