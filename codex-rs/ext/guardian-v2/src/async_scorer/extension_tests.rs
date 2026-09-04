@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use codex_core::GuardianAuthorizationVersion;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::LoaderOverrides;
@@ -64,6 +65,7 @@ use super::CLASSIFICATION_METRIC;
 use super::GuardianV2Extension;
 use super::GuardianV2ScoreProgress;
 use super::REVIEW_FALLBACK_METRIC;
+use super::ScoreAuthorization;
 use super::StrictReviewReason;
 use super::TOOL_CALL_LAG_METRIC;
 use super::encrypted_parent_compaction;
@@ -2781,4 +2783,44 @@ fn guardian_action_bounds_structurally_oversized_object_keys() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[test]
+fn cached_score_requires_stable_authorization_snapshot() {
+    fn authorization(local_revision: u64, root_revision: u64) -> ScoreAuthorization {
+        ScoreAuthorization {
+            local: GuardianAuthorizationVersion {
+                user_message_revision: local_revision,
+                user_input_response_count: 0,
+            },
+            root: Some(GuardianAuthorizationVersion {
+                user_message_revision: root_revision,
+                user_input_response_count: 0,
+            }),
+        }
+    }
+
+    let stable = authorization(3, 5);
+    assert!(super::cached_score_authorization_is_stable(
+        Some(&stable),
+        &stable,
+        &stable,
+    ));
+    assert!(!super::cached_score_authorization_is_stable(
+        None, &stable, &stable,
+    ));
+
+    let changed_local = authorization(4, 5);
+    assert!(!super::cached_score_authorization_is_stable(
+        Some(&stable),
+        &stable,
+        &changed_local,
+    ));
+
+    let changed_root = authorization(3, 6);
+    assert!(!super::cached_score_authorization_is_stable(
+        Some(&stable),
+        &stable,
+        &changed_root,
+    ));
 }

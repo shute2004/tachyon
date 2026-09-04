@@ -283,6 +283,15 @@ fn record_classification(
     );
 }
 
+fn cached_score_authorization_is_stable(
+    scored_authorization: Option<&ScoreAuthorization>,
+    first_current_authorization: &ScoreAuthorization,
+    second_current_authorization: &ScoreAuthorization,
+) -> bool {
+    scored_authorization == Some(first_current_authorization)
+        && second_current_authorization == first_current_authorization
+}
+
 #[derive(Clone)]
 struct GuardianV2Extension {
     auth_manager: Arc<AuthManager>,
@@ -414,10 +423,16 @@ impl ApprovalReviewContributor for GuardianV2Extension {
             let thread_id = ThreadId::from_string(thread_store.level_id()).ok()?;
             let thread = manager.get_thread(thread_id).await.ok()?;
             let current_authorization = ScoreAuthorization::current(&thread).await;
-            let scored_authorization = score_progress
-                .authorization
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (scored_authorization, cached_score) = {
+                let scored_authorization = score_progress
+                    .authorization
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let cached_score = thread_store
+                    .get::<SecurityRiskScore>()
+                    .map(|score| score.as_ref().clone());
+                (*scored_authorization, cached_score)
+            };
             let latest_scored_tool_call = score_progress
                 .latest_scored_tool_call
                 .load(Ordering::Acquire);
@@ -452,11 +467,16 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                 return None;
             }
 
-            let score = thread_store
-                .get::<SecurityRiskScore>()
+            let score = cached_score
+                .as_ref()
                 .and_then(|score| score.scores.get("action_risk").copied())?;
             if score < guardian_config.review_threshold {
-                if scored_authorization.as_ref() != Some(&current_authorization) {
+                let authorization_after_cache_read = ScoreAuthorization::current(&thread).await;
+                if !cached_score_authorization_is_stable(
+                    scored_authorization.as_ref(),
+                    &current_authorization,
+                    &authorization_after_cache_read,
+                ) {
                     thread_store.insert(StrictReviewReason::StaleScore);
                     return None;
                 }
@@ -817,7 +837,8 @@ impl GuardianV2Extension {
                         thread
                             .thread_extension_data()
                             .insert_if(score.clone(), |previous| {
-                                previous.is_none_or(|previous| previous.sampled_at < score.sampled_at)
+                                previous
+                                    .is_none_or(|previous| previous.sampled_at < score.sampled_at)
                             });
                     if accepted {
                         *scored_authorization = Some(score_authorization);
