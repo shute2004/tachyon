@@ -63,6 +63,7 @@ use codex_core_api::build_models_manager;
 use codex_core_api::built_in_model_providers;
 use codex_core_api::find_codex_home;
 use codex_core_api::init_state_db;
+use codex_core_api::inline_attachment_store;
 use codex_core_api::install_image_generation_extension;
 use codex_core_api::item_event_to_server_notification;
 use codex_core_api::local_agent_graph_store_from_state_db;
@@ -149,6 +150,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         Arc::new(extensions.build()),
         user_instructions_provider,
         /*analytics_events_client*/ None,
+        inline_attachment_store(),
         Arc::clone(&thread_store),
         local_agent_graph_store_from_state_db(state_db.as_ref()),
         installation_id,

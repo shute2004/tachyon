@@ -23,6 +23,39 @@ fn json_result(value: serde_json::Value, is_error: Option<bool>) -> ToolResult {
     result(vec![ToolResultContent::Json(value)], is_error)
 }
 
+#[test]
+fn discovered_tool_result_constructor_preserves_semantic_declarations() {
+    let tools = vec![
+        super::DiscoveredToolSpec::Function {
+            namespace: None,
+            name: "lookup".to_string(),
+            description: "Look up a record".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+            strict: true,
+            availability: super::DiscoveredToolAvailability::Deferred,
+        },
+        super::DiscoveredToolSpec::Freeform {
+            namespace: Some("calendar".to_string()),
+            name: "search".to_string(),
+            description: "Search events".to_string(),
+            input_format: super::DiscoveredFreeformInputFormat::Grammar {
+                syntax: "lark".to_string(),
+                definition: "start: /.+/".to_string(),
+            },
+            availability: super::DiscoveredToolAvailability::Immediate,
+        },
+    ];
+
+    assert_eq!(
+        ToolResult::success_discovered_tools(tools.clone()),
+        result(vec![ToolResultContent::DiscoveredTools(tools)], Some(false))
+    );
+}
+
 fn payload(body: FunctionCallOutputBody, success: Option<bool>) -> FunctionCallOutputPayload {
     FunctionCallOutputPayload { body, success }
 }
