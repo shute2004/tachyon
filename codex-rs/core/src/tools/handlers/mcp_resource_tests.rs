@@ -1,14 +1,34 @@
 use super::*;
+use codex_mcp::McpResourceReadResult;
+use codex_protocol::mcp::ResourceContent;
 use pretty_assertions::assert_eq;
-use rmcp::model::ResourceContents;
 use serde_json::json;
 
 fn resource(uri: &str, name: &str) -> Resource {
-    Resource::new(uri, name)
+    Resource {
+        annotations: None,
+        description: None,
+        mime_type: None,
+        name: name.to_string(),
+        size: None,
+        title: None,
+        uri: uri.to_string(),
+        icons: None,
+        meta: None,
+    }
 }
 
 fn template(uri_template: &str, name: &str) -> ResourceTemplate {
-    ResourceTemplate::new(uri_template, name)
+    ResourceTemplate {
+        annotations: None,
+        uri_template: uri_template.to_string(),
+        name: name.to_string(),
+        title: None,
+        description: None,
+        mime_type: None,
+        icons: None,
+        meta: None,
+    }
 }
 
 #[test]
@@ -23,8 +43,10 @@ fn resource_with_server_serializes_server_field() {
 
 #[test]
 fn list_resources_payload_from_single_server_copies_next_cursor() {
-    let mut result = ListResourcesResult::with_all_items(vec![resource("memo://id", "memo")]);
-    result.next_cursor = Some("cursor-1".to_string());
+    let result = McpResourcePage {
+        resources: vec![resource("memo://id", "memo")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
     let payload = ListResourcesPayload::from_single_server("srv".to_string(), result);
     let value = serde_json::to_value(&payload).expect("serialize payload");
 
@@ -146,6 +168,85 @@ fn list_resource_templates_payload_from_all_servers_is_sorted() {
 }
 
 #[test]
+fn resource_payload_preserves_rich_neutral_fields() {
+    let payload = ListResourcesPayload::from_single_server(
+        "hosted".to_string(),
+        McpResourcePage {
+            resources: vec![Resource {
+                annotations: Some(json!({"audience": ["user"]})),
+                description: Some("A skill bundle".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                name: "skill".to_string(),
+                size: Some(5_000_000_000),
+                title: Some("Skill".to_string()),
+                uri: "skill://bundle".to_string(),
+                icons: Some(vec![json!({"src": "icon://skill"})]),
+                meta: Some(json!({"source": "fixture"})),
+            }],
+            next_cursor: None,
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(payload).expect("serialize rich resource payload"),
+        json!({
+            "server": "hosted",
+            "resources": [{
+                "server": "hosted",
+                "annotations": {"audience": ["user"]},
+                "description": "A skill bundle",
+                "mimeType": "text/markdown",
+                "name": "skill",
+                "size": 5_000_000_000i64,
+                "title": "Skill",
+                "uri": "skill://bundle",
+                "icons": [{"src": "icon://skill"}],
+                "_meta": {"source": "fixture"}
+            }]
+        })
+    );
+}
+
+#[test]
+fn resource_template_payload_preserves_rich_neutral_fields() {
+    let payload = ListResourceTemplatesPayload::from_single_server(
+        "hosted".to_string(),
+        McpResourceTemplatePage {
+            resource_templates: vec![ResourceTemplate {
+                annotations: Some(json!({"audience": ["user"]})),
+                uri_template: "skill://{bundle}".to_string(),
+                name: "skill".to_string(),
+                title: Some("Skill".to_string()),
+                description: Some("A skill bundle".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                icons: Some(vec![json!({"src": "icon://skill"})]),
+                meta: Some(json!({"source": "fixture"})),
+            }],
+            next_cursor: Some("cursor-2".to_string()),
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(payload).expect("serialize rich resource-template payload"),
+        json!({
+            "server": "hosted",
+            "resourceTemplates": [{
+                "server": "hosted",
+                "annotations": {"audience": ["user"]},
+                "uriTemplate": "skill://{bundle}",
+                "name": "skill",
+                "title": "Skill",
+                "description": "A skill bundle",
+                "mimeType": "text/markdown",
+                "icons": [{"src": "icon://skill"}],
+                "_meta": {"source": "fixture"}
+            }],
+            "nextCursor": "cursor-2"
+        })
+    );
+}
+
+#[test]
 fn serialize_function_output_preserves_small_payload() {
     let payload = json!({"server": "hosted", "resources": []});
     let expected = serde_json::to_string(&payload).expect("serialize payload");
@@ -158,17 +259,64 @@ fn serialize_function_output_preserves_small_payload() {
 }
 
 #[test]
+fn read_resource_payload_preserves_neutral_content_shape() {
+    let payload = ReadResourcePayload {
+        server: "hosted".to_string(),
+        uri: "asset://bundle".to_string(),
+        result: McpResourceReadResult {
+            contents: vec![
+                ResourceContent::Text {
+                    uri: "asset://text".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    text: "hello".to_string(),
+                    meta: Some(json!({"source": "fixture"})),
+                },
+                ResourceContent::Blob {
+                    uri: "asset://blob".to_string(),
+                    mime_type: Some("application/octet-stream".to_string()),
+                    blob: "AAE=".to_string(),
+                    meta: None,
+                },
+            ],
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(payload).expect("serialize read resource payload"),
+        json!({
+            "server": "hosted",
+            "uri": "asset://bundle",
+            "contents": [
+                {
+                    "uri": "asset://text",
+                    "mimeType": "text/plain",
+                    "text": "hello",
+                    "_meta": {"source": "fixture"}
+                },
+                {
+                    "uri": "asset://blob",
+                    "mimeType": "application/octet-stream",
+                    "blob": "AAE="
+                }
+            ]
+        })
+    );
+}
+
+#[test]
 fn serialize_function_output_caps_read_resource_payload() {
     let truncation_policy = TruncationPolicy::Bytes(8_000);
     let payload = ReadResourcePayload {
         server: "hosted".to_string(),
         uri: "skill://large/SKILL.md".to_string(),
-        result: ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-            uri: "skill://large/SKILL.md".to_string(),
-            mime_type: Some("text/markdown".to_string()),
-            text: "x".repeat(16_000),
-            meta: None,
-        }]),
+        result: McpResourceReadResult {
+            contents: vec![ResourceContent::Text {
+                uri: "skill://large/SKILL.md".to_string(),
+                mime_type: Some("text/markdown".to_string()),
+                text: "x".repeat(16_000),
+                meta: None,
+            }],
+        },
     };
     let serialized = serde_json::to_string(&payload).expect("serialize payload");
     let expected = truncate_text(&serialized, truncation_policy * 1.2);
