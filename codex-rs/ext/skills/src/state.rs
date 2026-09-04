@@ -7,8 +7,8 @@ use std::sync::Weak;
 use codex_exec_server::Environment;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_extension_api::ExtensionMetrics;
-use codex_mcp::McpResourceClient;
-use codex_mcp::McpResourceClientCacheKey;
+use codex_extension_api::McpResourceAccess;
+use codex_extension_api::McpResourceCacheKey;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use tokio::sync::OnceCell;
 
@@ -32,7 +32,7 @@ const MAX_CACHED_ORCHESTRATOR_RESOURCES: usize = 100;
 const MAX_CACHED_ORCHESTRATOR_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct SkillsSessionState {
-    pub(crate) mcp_resources: Option<Arc<McpResourceClient>>,
+    pub(crate) mcp_resources: Option<Arc<dyn McpResourceAccess>>,
     pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
@@ -253,13 +253,13 @@ impl SkillsThreadState {
 
     fn orchestrator_cache(
         &self,
-        mcp_resources: Option<&McpResourceClient>,
+        mcp_resources: Option<&dyn McpResourceAccess>,
     ) -> Arc<OrchestratorGenerationCache> {
         let mut cache = self
             .orchestrator_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cache_key = mcp_resources.map(McpResourceClient::cache_key);
+        let cache_key = mcp_resources.map(McpResourceAccess::cache_key);
         if let Some(cache) = cache
             .as_ref()
             .filter(|cache| cache.mcp_cache_key == cache_key)
@@ -337,7 +337,7 @@ struct CachedExecutorDiscoveryCatalog {
 }
 
 struct OrchestratorGenerationCache {
-    mcp_cache_key: Option<McpResourceClientCacheKey>,
+    mcp_cache_key: Option<McpResourceCacheKey>,
     catalog: OnceCell<SkillCatalog>,
     resources: Mutex<OrchestratorResourceCache>,
 }
