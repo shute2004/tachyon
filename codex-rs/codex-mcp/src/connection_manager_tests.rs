@@ -95,6 +95,7 @@ impl McpConnectionSet {
     ) -> Self {
         Self {
             servers: HashMap::new(),
+            event_stream_connection: None,
             disabled_servers: Vec::new(),
             protocol_mode: crate::McpProtocolMode::Legacy,
             required_servers: Vec::new(),

@@ -65,6 +65,7 @@ mod plan_item;
 mod plugin_install;
 mod plugin_list;
 mod plugin_read;
+mod plugin_reconcile;
 mod plugin_search;
 mod plugin_share;
 mod plugin_uninstall;
