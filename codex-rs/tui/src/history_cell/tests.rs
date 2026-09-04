@@ -1037,6 +1037,8 @@ fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
             title: Some("Doc Template".to_string()),
             description: None,
             mime_type: None,
+            icons: None,
+            meta: None,
         }],
         auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
     }];
