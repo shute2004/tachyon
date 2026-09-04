@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
+use codex_core::TurnInputRequest;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
 use codex_core::plugins_manager_for_config;
@@ -19,11 +22,27 @@ use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpStartupPolicy;
 use codex_mcp::McpToolCatalogCache;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::items::McpToolCallStatus;
+use codex_protocol::items::TurnItem;
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::user_input::UserInput;
 use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::responses;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::turn_permission_fields;
+use core_test_support::wait_for_event;
+use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -31,9 +50,38 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+use wiremock::Mock;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 // Installs a known snapshot through AuthManager's public external-auth path.
 struct StaticExternalAuth(CodexAuth);
+
+fn read_only_user_turn(fixture: &TestCodex, text: impl Into<String>) -> TurnInputRequest {
+    let cwd = fixture.config.cwd.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::read_only(), cwd.as_path());
+    TurnInputRequest::user_input(vec![UserInput::Text {
+        text: text.into(),
+        text_elements: Vec::new(),
+    }])
+    .with_thread_settings(ThreadSettingsOverrides {
+        approval_policy: Some(AskForApproval::Never),
+        sandbox_policy: Some(sandbox_policy),
+        permission_profile,
+        collaboration_mode: Some(CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: fixture.session_configured.model.clone(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        }),
+        ..Default::default()
+    })
+}
 
 impl ExternalAuth for StaticExternalAuth {
     fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
@@ -168,5 +216,106 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
         Some("Bearer header.e30.reloaded")
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_auth_challenge_reaches_agent_tool_call_events_without_replay() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let responses_server = responses::start_mock_server().await;
+    let mcp_server = responses::start_mock_server().await;
+    let http_server = AppsTestServer::mount(&mcp_server).await?;
+    let challenge = r#"Bearer error="invalid_token", scope="calendar:read", resource_metadata="https://example.com/.well-known/oauth-protected-resource""#;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/ps/mcp"))
+        .and(body_partial_json(json!({"method": "tools/call"})))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 401)
+                .append_header("www-authenticate", r#"Basic realm="proxy, login""#)
+                .append_header("www-authenticate", challenge),
+        )
+        .with_priority(/*p*/ 1)
+        .expect(1)
+        .mount(&mcp_server)
+        .await;
+    let call_id = "auth-challenge-call";
+    let model_requests = responses::mount_sse_sequence(
+        &responses_server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_function_call_with_namespace(
+                    call_id,
+                    "mcp__reauth",
+                    "calendar_list_events",
+                    "{}",
+                ),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-1", "Please reconnect the MCP server."),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let server_config: McpServerConfig = serde_json::from_value(json!({
+        "url": format!("{}/api/codex/ps/mcp", http_server.chatgpt_base_url),
+        "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+    }))?;
+    let fixture = test_codex()
+        .with_config(move |config| {
+            config
+                .mcp_servers
+                .set([("reauth".to_string(), server_config)].into())
+                .expect("test config should allow the MCP server");
+        })
+        // The mock MCP endpoint stays on the host when the executor is remote.
+        .build_with_remote_and_local_env(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, "reauth").await?;
+    fixture
+        .codex
+        .start_or_steer_turn(read_only_user_turn(&fixture, "List calendar events."))
+        .await?;
+
+    let mut end_results = Vec::new();
+    let mut completed_results = Vec::new();
+    wait_for_event(&fixture.codex, |event| {
+        match event {
+            EventMsg::McpToolCallEnd(event) if event.call_id == call_id => {
+                end_results.push(event.result.clone());
+            }
+            EventMsg::ItemCompleted(event) => {
+                if let TurnItem::McpToolCall(item) = &event.item
+                    && item.id == call_id
+                {
+                    completed_results.push((item.status, item.result.clone(), item.error.clone()));
+                }
+            }
+            _ => {}
+        }
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let expected = CallToolResult {
+        content: vec![json!({"type": "text", "text": "Authentication required"})],
+        structured_content: None,
+        is_error: Some(true),
+        meta: Some(json!({
+            "mcp/www_authenticate": [format!(r#"Basic realm="proxy, login", {challenge}"#)],
+        })),
+    };
+    assert_eq!(end_results, vec![Ok(expected.clone())]);
+    assert_eq!(
+        completed_results,
+        vec![(McpToolCallStatus::Failed, Some(expected), None)]
+    );
+    assert_eq!(model_requests.requests().len(), 2);
+    mcp_server.verify().await;
+    fixture.codex.shutdown_and_wait().await?;
     Ok(())
 }
