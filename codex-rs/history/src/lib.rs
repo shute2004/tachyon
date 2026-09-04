@@ -30,9 +30,27 @@ use serde::Serializer;
 use serde::de::Error as _;
 
 mod envelope;
+mod item;
+mod response_projection;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
+pub use item::HistoryImageDetail;
+pub use item::HistoryItem;
+pub use item::HistoryMediaSource;
+pub use item::HistoryMessage;
+pub use item::HistoryMessageContent;
+pub use item::HistoryMessagePhase;
+pub use item::HistoryMessageRole;
+pub use item::HistoryReasoning;
+pub use item::HistoryToolCall;
+pub use item::HistoryToolCallId;
+pub use item::HistoryToolInput;
+pub use item::HistoryToolResult;
+pub use item::HistoryToolResultContent;
+pub use response_projection::HistoryItemProjection;
+pub use response_projection::HistoryProjectionFallback;
+pub use response_projection::project_response_item;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
@@ -394,3 +412,7 @@ fn multi_agent_version_from_items(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "response_projection_tests.rs"]
+mod response_projection_tests;

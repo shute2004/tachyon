@@ -281,6 +281,68 @@ async fn shell_mode_for_environment_uses_direct_mode_for_remote_environments() -
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
+async fn exec_command_reuses_foreign_windows_grant() {
+    use codex_protocol::models::AdditionalPermissionProfile;
+    use codex_protocol::models::FileSystemPermissions;
+    use codex_utils_path_uri::PathUri;
+
+    let (session, mut turn) = make_session_and_context().await;
+
+    let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd");
+    let granted_permissions = AdditionalPermissionProfile {
+        file_system: Some(FileSystemPermissions::from_read_write_path_uris(
+            /*read*/ Some(Vec::new()),
+            /*write*/
+            Some(vec![
+                PathUri::parse("file:///C:/workspace/granted").expect("valid Windows grant"),
+            ]),
+        )),
+        ..Default::default()
+    };
+    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+    let turn_state = {
+        let active_turn = session.active_turn.lock().await;
+        Arc::clone(&active_turn.as_ref().expect("active turn").turn_state)
+    };
+    turn_state.lock().await.record_granted_permissions(
+        codex_exec_server::REMOTE_ENVIRONMENT_ID,
+        granted_permissions.clone(),
+    );
+
+    let environment = {
+        let TurnEnvironmentState::Ready(environment) = turn
+            .environments
+            .environments
+            .first_mut()
+            .expect("primary environment")
+        else {
+            panic!("primary environment should be ready");
+        };
+        environment.selection.environment_id = codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string();
+        environment.selection.cwd = cwd.clone();
+        environment.selection.workspace_roots = vec![cwd.clone()];
+        environment.config_mut().workspace_roots = vec![cwd.clone()];
+        environment.environment = Arc::new(
+            Environment::create_for_tests(Some("ws://127.0.0.1:1/remote-exec-server".to_string()))
+                .expect("remote environment"),
+        );
+        environment
+    };
+    let effective = crate::tools::handlers::apply_granted_turn_permissions(
+        &session,
+        environment,
+        &cwd,
+        crate::sandboxing::SandboxPermissions::WithAdditionalPermissions,
+        Some(granted_permissions.clone()),
+    )
+    .await;
+
+    assert!(effective.permissions_preapproved);
+    assert_eq!(effective.additional_permissions, Some(granted_permissions));
+}
+
+#[tokio::test]
 async fn exec_command_pre_tool_use_payload_uses_raw_command() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "printf exec command" }).to_string(),
