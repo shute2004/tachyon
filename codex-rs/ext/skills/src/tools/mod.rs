@@ -14,6 +14,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::JsonToolOutput;
+use codex_extension_api::McpResourceAccess;
 use codex_extension_api::ResponsesApiTool;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::ThreadOriginator;
@@ -24,7 +25,6 @@ use codex_extension_api::ToolOutput;
 use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
-use codex_mcp::McpResourceClient;
 use codex_otel::sanitize_metric_tag_value;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -192,7 +192,7 @@ impl SkillAnalytics {
 #[derive(Clone)]
 struct SkillToolContext {
     providers: SkillProviders,
-    mcp_resources: Option<Arc<McpResourceClient>>,
+    mcp_resources: Option<Arc<dyn McpResourceAccess>>,
     thread_state: Arc<SkillsThreadState>,
     analytics: Option<SkillAnalytics>,
     orchestrator_available: bool,
