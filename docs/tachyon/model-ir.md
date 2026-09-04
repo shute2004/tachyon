@@ -48,6 +48,12 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 
 The Rust definitions live in `codex-rs/core/src/model_runtime/ir.rs` during extraction.
 
+Tool runtimes use a separate result-side vocabulary for client discovery: `ToolResultContent::DiscoveredTools`
+contains result-specific semantic function/free-form declarations with namespace, schema or grammar,
+strictness, and immediate/deferred availability. The Codex adapter converts those declarations to
+Responses `ToolSearchOutput` only at the provider boundary; an unrepresentable declaration keeps the
+existing legacy output path.
+
 ## Preserve generic capability, not provider realization
 
 Provider-specific realization must not be copied mechanically into the IR, but generic harness

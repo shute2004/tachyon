@@ -17,6 +17,7 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
+use codex_extension_api::McpResourceAccess;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::SkillInvocationContributor;
@@ -31,7 +32,6 @@ use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
-use codex_mcp::McpResourceClient;
 use codex_otel::MetricsClient;
 use codex_protocol::openai_models::ModelInfo;
 
@@ -599,7 +599,7 @@ impl<C> SkillsExtension<C> {
         &self,
         entry: &SkillCatalogEntry,
         host_snapshot: Option<Arc<HostSkillsSnapshot>>,
-        mcp_resources: Option<Arc<McpResourceClient>>,
+        mcp_resources: Option<Arc<dyn McpResourceAccess>>,
         thread_state: &SkillsThreadState,
     ) -> Result<SkillReadResult, String> {
         thread_state

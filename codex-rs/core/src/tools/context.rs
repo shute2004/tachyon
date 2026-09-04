@@ -1,4 +1,3 @@
-use crate::context_manager::truncate_function_output_payload;
 use crate::original_image_detail::sanitize_original_image_detail;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -6,18 +5,29 @@ use crate::session::turn_context::TurnContext;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::format_output_omission_marker;
 use crate::unified_exec::resolve_max_tokens;
+use codex_protocol::ResponseItemId;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
+use codex_tools::DiscoveredFreeformInputFormat;
+use codex_tools::DiscoveredToolAvailability;
+use codex_tools::DiscoveredToolSpec;
+use codex_tools::FreeformTool;
 use codex_tools::LoadableToolSpec;
+use codex_tools::ResponsesApiNamespaceTool;
+use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolResult;
+use codex_tools::default_namespace_description;
+use codex_utils_audio::estimate_audio_token_count;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::formatted_truncate_text;
+use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::truncate_text;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -67,6 +77,34 @@ pub struct ToolInvocation {
     pub payload: ToolPayload,
 }
 
+impl ToolInvocation {
+    /// Returns the Responses item that requested this call or started its code-mode cell.
+    pub(crate) async fn originating_item_id(&self) -> Option<ResponseItemId> {
+        if let ToolCallSource::CodeMode { cell_id, .. } = &self.source {
+            return self
+                .session
+                .services
+                .code_mode_service
+                .cell_originating_item_id(&codex_code_mode::CellId::new(cell_id.clone()));
+        }
+
+        self.session
+            .clone_history()
+            .await
+            .raw_items()
+            .rev()
+            .find_map(|item| match item {
+                ResponseItem::FunctionCall { id, call_id, .. }
+                | ResponseItem::CustomToolCall { id, call_id, .. }
+                    if call_id == &self.call_id =>
+                {
+                    id.clone()
+                }
+                _ => None,
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct McpToolOutput {
     pub result: CallToolResult,
@@ -91,6 +129,10 @@ impl ToolOutput for McpToolOutput {
 
     fn success_for_logging(&self) -> bool {
         self.result.success()
+    }
+
+    fn fallback_token_limit_override(&self) -> Option<usize> {
+        Some((self.truncation_policy * 1.2).token_budget())
     }
 
     fn to_tool_result(&self) -> Option<ToolResult> {
@@ -146,7 +188,12 @@ impl McpToolOutput {
         //
         // The text is serialized again inside the Responses payload, so allow
         // a small buffer for JSON escaping and wrapper overhead.
-        truncate_function_output_payload(&payload, self.truncation_policy * 1.2)
+        truncate_function_output_payload(
+            &mut payload,
+            self.truncation_policy * 1.2,
+            estimate_audio_token_count,
+        );
+        payload
     }
 }
 
@@ -173,6 +220,18 @@ impl ToolOutput for ToolSearchOutput {
         true
     }
 
+    fn to_tool_result(&self) -> Option<ToolResult> {
+        let tools = self
+            .tools
+            .iter()
+            .map(discovered_tool_specs)
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Some(ToolResult::success_discovered_tools(tools))
+    }
+
     fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
         ResponseInputItem::ToolSearchOutput {
             call_id: call_id.to_string(),
@@ -188,6 +247,75 @@ impl ToolOutput for ToolSearchOutput {
                 })
                 .collect(),
         }
+    }
+}
+
+fn discovered_tool_specs(tool: &LoadableToolSpec) -> Option<Vec<DiscoveredToolSpec>> {
+    match tool {
+        LoadableToolSpec::Function(tool) => Some(vec![discovered_function_tool(None, tool)?]),
+        LoadableToolSpec::Namespace(namespace) => {
+            if namespace.tools.is_empty()
+                || namespace.description != default_namespace_description(&namespace.name)
+            {
+                return None;
+            }
+            namespace
+                .tools
+                .iter()
+                .map(|tool| match tool {
+                    ResponsesApiNamespaceTool::Function(tool) => {
+                        discovered_function_tool(Some(namespace.name.clone()), tool)
+                    }
+                    ResponsesApiNamespaceTool::Custom(tool) => {
+                        discovered_freeform_tool(Some(namespace.name.clone()), tool)
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+fn discovered_function_tool(
+    namespace: Option<String>,
+    tool: &ResponsesApiTool,
+) -> Option<DiscoveredToolSpec> {
+    if tool.parameters.has_responses_encrypted_marker() {
+        return None;
+    }
+    Some(DiscoveredToolSpec::Function {
+        namespace,
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_schema: serde_json::to_value(&tool.parameters).ok()?,
+        strict: tool.strict,
+        availability: discovered_tool_availability(tool.defer_loading)?,
+    })
+}
+
+fn discovered_freeform_tool(
+    namespace: Option<String>,
+    tool: &FreeformTool,
+) -> Option<DiscoveredToolSpec> {
+    if tool.format.r#type != "grammar" {
+        return None;
+    }
+    Some(DiscoveredToolSpec::Freeform {
+        namespace,
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+        input_format: DiscoveredFreeformInputFormat::Grammar {
+            syntax: tool.format.syntax.clone(),
+            definition: tool.format.definition.clone(),
+        },
+        availability: discovered_tool_availability(tool.defer_loading)?,
+    })
+}
+
+fn discovered_tool_availability(defer_loading: Option<bool>) -> Option<DiscoveredToolAvailability> {
+    match defer_loading {
+        None => Some(DiscoveredToolAvailability::Immediate),
+        Some(true) => Some(DiscoveredToolAvailability::Deferred),
+        Some(false) => None,
     }
 }
 

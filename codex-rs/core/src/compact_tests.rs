@@ -2,8 +2,12 @@ use super::*;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::ResponseItemId;
+use codex_protocol::items::HookPromptFragment;
+use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -61,6 +65,159 @@ fn user_message(text: &str) -> ResponseItem {
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[test]
+fn should_keep_compacted_history_item_uses_canonical_message_roles() {
+    for (role, expected) in [
+        ("developer", false),
+        ("system", false),
+        ("assistant", true),
+        ("user", true),
+    ] {
+        let item = ResponseItem::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![ContentItem::InputText {
+                text: "message content".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        assert_eq!(
+            crate::compact_remote::should_keep_compacted_history_item(&item),
+            expected,
+            "unexpected retention decision for canonical {role} message"
+        );
+    }
+}
+
+#[test]
+fn should_keep_compacted_history_item_retains_canonical_hook_prompts() {
+    let item = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
+        "Continue after the hook.",
+        "hook-run-1",
+    )])
+    .expect("hook prompt message");
+
+    assert!(crate::compact_remote::should_keep_compacted_history_item(
+        &item
+    ));
+}
+
+#[test]
+fn should_keep_compacted_history_item_rejects_canonical_non_messages() {
+    let items = [
+        ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "lookup".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call-1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("result".to_string()),
+                success: Some(true),
+            },
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    for item in items {
+        assert!(!crate::compact_remote::should_keep_compacted_history_item(
+            &item
+        ));
+    }
+}
+
+#[test]
+fn should_keep_compacted_history_item_fallback_preserves_raw_retention() {
+    let cases = [
+        (
+            ResponseItem::Message {
+                id: None,
+                role: "future_role".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "opaque".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            false,
+        ),
+        (
+            ResponseItem::Reasoning {
+                id: None,
+                summary: Vec::new(),
+                content: None,
+                encrypted_content: Some("opaque".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            false,
+        ),
+        (
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "lookup".to_string(),
+                namespace: None,
+                arguments: "not json".to_string(),
+                encrypted_function_args: None,
+                call_id: "call-1".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            false,
+        ),
+        (
+            ResponseItem::AgentMessage {
+                id: None,
+                author: "child".to_string(),
+                recipient: "parent".to_string(),
+                content: Vec::new(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            true,
+        ),
+        (
+            ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "opaque".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            true,
+        ),
+        (
+            ResponseItem::ContextCompaction {
+                id: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            true,
+        ),
+        (ResponseItem::CompactionTrigger {}, false),
+        (ResponseItem::Other, false),
+    ];
+
+    for (item, expected) in cases {
+        assert_eq!(
+            crate::compact_remote::should_keep_compacted_history_item(&item),
+            expected
+        );
     }
 }
 

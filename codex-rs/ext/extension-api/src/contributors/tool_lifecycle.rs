@@ -33,6 +33,48 @@ pub enum ToolCallOutcome {
     Aborted,
 }
 
+/// Provenance captured from the immutable MCP call selected for one tool invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum McpToolSource {
+    /// A connector routed through the host-owned Codex Apps MCP server.
+    Connector,
+    /// An MCP server whose frozen registration matches the active Codex configuration.
+    Config,
+    /// An MCP server registered by a locally loaded plugin.
+    Plugin {
+        /// Identifier of the plugin that owns this MCP server.
+        id: String,
+    },
+    /// An executor-selected plugin whose root has not been attested by the host.
+    SelectedPlugin,
+    /// A compatibility or extension registration without user-owned provenance.
+    Other,
+}
+
+/// Read-only metadata and provenance captured from the MCP call that will execute.
+#[derive(Clone, Debug)]
+pub struct McpToolContext {
+    tool: crate::McpToolInfo,
+    source: McpToolSource,
+}
+
+impl McpToolContext {
+    /// Creates a context from frozen metadata and host-classified provenance.
+    pub fn new(tool: crate::McpToolInfo, source: McpToolSource) -> Self {
+        Self { tool, source }
+    }
+
+    /// Returns frozen metadata for the exact model-visible MCP tool being executed.
+    pub fn tool_info(&self) -> &crate::McpToolInfo {
+        &self.tool
+    }
+
+    /// Returns the registration source captured with the executable call.
+    pub fn source(&self) -> &McpToolSource {
+        &self.source
+    }
+}
+
 /// Input supplied when the host starts executing one tool call.
 pub struct ToolStartInput<'a> {
     /// Store scoped to the host session runtime.
@@ -47,6 +89,8 @@ pub struct ToolStartInput<'a> {
     pub call_id: &'a str,
     /// Tool name as routed by the host.
     pub tool_name: &'a ToolName,
+    /// Read-only metadata and provenance from the exact MCP call that will execute.
+    pub mcp_tool: Option<&'a McpToolContext>,
     /// Finalized tool arguments, including any pre-tool-use hook rewrites.
     ///
     /// Payloads can contain sensitive plaintext and must not be logged.
