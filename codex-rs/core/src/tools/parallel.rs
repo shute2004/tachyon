@@ -109,7 +109,7 @@ impl ToolCallRuntime {
             executed_tool_calls.record_tool_call(
                 &call,
                 &source,
-                super::effective_tool_mode(&self.step_context.turn),
+                self.step_context.tool_router.tool_mode(),
             );
         }
         let router = &self.step_context.tool_router;
@@ -367,6 +367,7 @@ impl Drop for ToolCallTimingGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use crate::session::step_context::StepContext;
@@ -380,6 +381,7 @@ mod tests {
     use codex_extension_api::ToolCallOutcome;
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::openai_models::ToolMode;
     use pretty_assertions::assert_eq;
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
@@ -471,6 +473,9 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            &[],
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -653,6 +658,9 @@ mod tests {
         let router = Arc::new(ToolRouter::from_parts(
             ToolRegistry::from_tools([handler]),
             Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            &[],
         ));
         let step_context = step_context.with_tool_router_for_test(router);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));

@@ -3367,11 +3367,11 @@ impl Session {
         });
         extension_data.insert(selected_plugins.clone());
         turn_context.extension_data.insert(selected_plugins);
-        // Tool planning still uses the admitted turn. Migrating it to the
-        // captured model is a separate step from diagnostic activation.
+        // Finalize this step's tool plan against the same pinned model snapshot used for sampling.
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
+            settings.model_info.as_ref(),
             &environments,
             &mcp,
             &extension_data,
@@ -3379,6 +3379,18 @@ impl Session {
         )
         .or_cancel(cancellation_token)
         .await??;
+        // Publish inventory after planning rather than during finalization, so constructing
+        // additional candidate plans cannot overwrite turn-wide metadata.
+        if turn_context
+            .config
+            .tool_registry
+            .turn_metadata_includes_tool_info
+            && settings.model_info.use_responses_lite
+        {
+            turn_context.turn_metadata_state.set_tool_namespaces_info(
+                crate::tools::collect_tool_namespaces_info_for_router(tool_router.as_ref()),
+            );
+        }
         Ok(Arc::new(StepContext {
             settings,
             session_telemetry,
