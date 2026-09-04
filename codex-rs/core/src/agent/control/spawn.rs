@@ -14,6 +14,12 @@ use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ExtensionDataInit;
+use codex_history::HistoryItem;
+use codex_history::HistoryItemProjection;
+use codex_history::HistoryMessagePhase;
+use codex_history::HistoryMessageRole;
+use codex_history::ResponseItemEnvelope;
+use codex_history::project_response_item;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
@@ -61,32 +67,7 @@ pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>
 
 fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item: bool) -> bool {
     match item {
-        RolloutItem::ResponseItem(envelope) => match &envelope.item {
-            ResponseItem::Message { role, phase, .. } => match role.as_str() {
-                "system" | "developer" | "user" => true,
-                "assistant" => *phase == Some(MessagePhase::FinalAnswer),
-                _ => false,
-            },
-            ResponseItem::FunctionCallOutput { call_id: None, .. } => true,
-            ResponseItem::AdditionalTools { .. }
-            | ResponseItem::AgentMessage { .. }
-            | ResponseItem::Reasoning { .. }
-            | ResponseItem::LocalShellCall { .. }
-            | ResponseItem::FunctionCall { .. }
-            | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::FunctionCallOutput {
-                call_id: Some(_), ..
-            }
-            | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::CustomToolCallOutput { .. }
-            | ResponseItem::ToolSearchOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::Compaction { .. }
-            | ResponseItem::CompactionTrigger { .. }
-            | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => false,
-        },
+        RolloutItem::ResponseItem(envelope) => keep_forked_response_item(&envelope.item),
         RolloutItem::RealtimeItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -96,6 +77,53 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // so they must rebuild context on their first child turn.
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+    }
+}
+
+fn keep_forked_response_item(item: &ResponseItem) -> bool {
+    match project_response_item(ResponseItemEnvelope::new(item.clone())) {
+        HistoryItemProjection::Canonical {
+            item: HistoryItem::Message(message),
+            ..
+        } => match message.role {
+            HistoryMessageRole::System
+            | HistoryMessageRole::Developer
+            | HistoryMessageRole::User => true,
+            HistoryMessageRole::Assistant => message.phase == Some(HistoryMessagePhase::Final),
+        },
+        HistoryItemProjection::Canonical { .. } => false,
+        HistoryItemProjection::Fallback { compatibility, .. } => {
+            keep_forked_response_item_raw(&compatibility.item)
+        }
+    }
+}
+
+fn keep_forked_response_item_raw(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, phase, .. } => match role.as_str() {
+            "system" | "developer" | "user" => true,
+            "assistant" => *phase == Some(MessagePhase::FinalAnswer),
+            _ => false,
+        },
+        ResponseItem::FunctionCallOutput { call_id: None, .. } => true,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput {
+            call_id: Some(_), ..
+        }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => false,
     }
 }
 
