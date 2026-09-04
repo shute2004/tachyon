@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -41,6 +42,7 @@ use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::security_risk::SecurityRiskScore;
 use serde_json::json;
 
+use super::authorization::ScoreAuthorization;
 use super::config::GuardianV2Config;
 use super::config::GuardianV2ReviewScope;
 use super::review_evidence::render_review_evidence;
@@ -259,6 +261,8 @@ struct GuardianV2ScoreProgress {
     latest_tool_call: AtomicUsize,
     latest_scored_tool_call: AtomicUsize,
     latest_failed_tool_call: AtomicUsize,
+    // Serialize successful score publication with its authorization metadata.
+    authorization: Mutex<Option<ScoreAuthorization>>,
     metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
@@ -277,6 +281,15 @@ fn record_classification(
         i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
         &tags,
     );
+}
+
+fn cached_score_authorization_is_stable(
+    scored_authorization: Option<&ScoreAuthorization>,
+    first_current_authorization: &ScoreAuthorization,
+    second_current_authorization: &ScoreAuthorization,
+) -> bool {
+    scored_authorization == Some(first_current_authorization)
+        && second_current_authorization == first_current_authorization
 }
 
 #[derive(Clone)]
@@ -406,6 +419,20 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                 }
             }
             let score_progress = thread_store.get::<GuardianV2ScoreProgress>()?;
+            let manager = self.thread_manager.upgrade()?;
+            let thread_id = ThreadId::from_string(thread_store.level_id()).ok()?;
+            let thread = manager.get_thread(thread_id).await.ok()?;
+            let current_authorization = ScoreAuthorization::current(&thread).await;
+            let (scored_authorization, cached_score) = {
+                let scored_authorization = score_progress
+                    .authorization
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let cached_score = thread_store
+                    .get::<SecurityRiskScore>()
+                    .map(|score| score.as_ref().clone());
+                (*scored_authorization, cached_score)
+            };
             let latest_scored_tool_call = score_progress
                 .latest_scored_tool_call
                 .load(Ordering::Acquire);
@@ -440,10 +467,19 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                 return None;
             }
 
-            let score = thread_store
-                .get::<SecurityRiskScore>()
+            let score = cached_score
+                .as_ref()
                 .and_then(|score| score.scores.get("action_risk").copied())?;
             if score < guardian_config.review_threshold {
+                let authorization_after_cache_read = ScoreAuthorization::current(&thread).await;
+                if !cached_score_authorization_is_stable(
+                    scored_authorization.as_ref(),
+                    &current_authorization,
+                    &authorization_after_cache_read,
+                ) {
+                    thread_store.insert(StrictReviewReason::StaleScore);
+                    return None;
+                }
                 return Some(ReviewDecision::Approved);
             }
             if score >= guardian_config.review_threshold {
@@ -650,6 +686,10 @@ impl GuardianV2Extension {
             let root_conversation = root_snapshot.map(|snapshot| snapshot.messages);
             let authorization_version =
                 guardian_evidence.authorization_version(conversation_history.as_ref());
+            let score_authorization = ScoreAuthorization {
+                local: authorization_version,
+                root: root_authorization_version,
+            };
             let trusted_user_inputs =
                 guardian_evidence.user_input_fragments(conversation_history.as_ref());
             let transcript = guardian_config
@@ -785,12 +825,26 @@ impl GuardianV2Extension {
                     scores: BTreeMap::from([("action_risk".to_owned(), action_risk)]),
                     sampled_at: Some(sampled_at.into()),
                 };
-                let accepted =
-                    thread
-                        .thread_extension_data()
-                        .insert_if(score.clone(), |previous| {
-                            previous.is_none_or(|previous| previous.sampled_at < score.sampled_at)
-                        });
+                if score_authorization != ScoreAuthorization::current(&thread).await {
+                    return Ok("superseded");
+                }
+                let accepted = {
+                    let mut scored_authorization = score_progress
+                        .authorization
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let accepted =
+                        thread
+                            .thread_extension_data()
+                            .insert_if(score.clone(), |previous| {
+                                previous
+                                    .is_none_or(|previous| previous.sampled_at < score.sampled_at)
+                            });
+                    if accepted {
+                        *scored_authorization = Some(score_authorization);
+                    }
+                    accepted
+                };
                 tracing::info!(
                     %thread_id,
                     %turn_id,
