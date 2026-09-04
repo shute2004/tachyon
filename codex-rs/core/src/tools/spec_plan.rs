@@ -1164,8 +1164,8 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     }
 
     let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);
-    let model_has_clock = turn_context
-        .model_info()
+    let model_has_clock = context
+        .model_info
         .experimental_supported_tools
         .iter()
         .any(|tool| tool == "clock");

@@ -1656,6 +1656,56 @@ async fn candidate_model_plan_leaves_selected_model_and_inventory_unchanged() {
 }
 
 #[tokio::test]
+async fn clock_tools_follow_selected_model_not_admitted_turn() {
+    let (_session, mut turn) = make_session_and_context().await;
+    set_feature(
+        &mut turn,
+        Feature::CurrentTimeReminder,
+        /*enabled*/ false,
+    );
+    set_feature(&mut turn, Feature::SleepTool, /*enabled*/ true);
+    update_config(&mut turn, |config| {
+        config.sleep_tool_mode = codex_features::SleepToolMode::ModelDriven;
+    });
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info)
+            .experimental_supported_tools
+            .retain(|tool| tool != "clock");
+    });
+
+    let admitted_model = Arc::clone(turn.model_info());
+    let admitted_before = ToolPlanProbe::from_router(plan_with_model(
+        &turn,
+        admitted_model.as_ref(),
+        ToolPlanInputs::default(),
+    ));
+    admitted_before.assert_visible_lacks(&["clock"]);
+    assert!(admitted_before.namespace_function_names("clock").is_empty());
+
+    let mut selected_model = admitted_model.as_ref().clone();
+    selected_model
+        .experimental_supported_tools
+        .push("clock".to_string());
+    let selected = ToolPlanProbe::from_router(plan_with_model(
+        &turn,
+        &selected_model,
+        ToolPlanInputs::default(),
+    ));
+    assert_eq!(
+        selected.namespace_function_names("clock"),
+        ["curr_time", "sleep"]
+    );
+
+    let admitted_after = ToolPlanProbe::from_router(plan_with_model(
+        &turn,
+        admitted_model.as_ref(),
+        ToolPlanInputs::default(),
+    ));
+    assert_eq!(admitted_after, admitted_before);
+    assert_eq!(turn.model_info(), &admitted_model);
+}
+
+#[tokio::test]
 async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
     for (enabled, second_exposure) in [
         (false, ToolExposure::Direct),
