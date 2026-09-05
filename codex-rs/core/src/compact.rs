@@ -352,7 +352,7 @@ async fn run_compact_task_inner_impl(
     }
 
     let history_snapshot = sess.clone_history().await;
-    let history_items = history_snapshot.annotated_items();
+    let history_items = history_snapshot.responses_compatibility();
     let summary_suffix =
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
@@ -539,11 +539,11 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUser
         .collect()
 }
 
-pub(crate) fn collect_annotated_user_messages(
-    items: &[ResponseItemEnvelope],
+pub(crate) fn collect_annotated_user_messages<'a>(
+    items: impl IntoIterator<Item = &'a ResponseItemEnvelope>,
 ) -> Vec<CompactedUserMessage> {
     items
-        .iter()
+        .into_iter()
         .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.clone()))
         .collect()
 }

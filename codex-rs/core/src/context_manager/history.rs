@@ -2,6 +2,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::context_manager::StoredHistoryEntry;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
@@ -46,7 +47,7 @@ use std::sync::LazyLock;
 pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
-    items: Arc<Vec<ResponseItemEnvelope>>,
+    items: Arc<Vec<StoredHistoryEntry>>,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
     /// Monotonic user-input/reset revision, independent of compaction's history generation.
@@ -68,7 +69,7 @@ pub(crate) struct ContextManager {
 }
 
 struct SharedConversationHistory {
-    items: Arc<Vec<ResponseItemEnvelope>>,
+    items: Arc<Vec<StoredHistoryEntry>>,
     history_version: u64,
     user_message_revision: u64,
 }
@@ -91,6 +92,7 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
         Box::new(
             self.items
                 .iter()
+                .map(StoredHistoryEntry::responses_compatibility)
                 .map(|envelope| &envelope.item)
                 .filter(|item| {
                     !matches!(
@@ -221,8 +223,10 @@ impl ContextManager {
                     .unwrap_or(policy * 1.2);
                 truncate_function_output_payload(output, policy, estimate_audio_token_count);
             }
-            Arc::make_mut(&mut self.items).push(processed);
-            if crate::context::is_user_authorization_message(item) {
+            let stored = StoredHistoryEntry::new(processed);
+            let is_user_authorization = stored.is_user_authorization_message();
+            Arc::make_mut(&mut self.items).push(stored);
+            if is_user_authorization {
                 self.user_message_revision = self.user_message_revision.saturating_add(1);
             }
         }
@@ -240,36 +244,60 @@ impl ContextManager {
 
     /// Returns normalized history envelopes for internal consumers that must retain metadata.
     pub(crate) fn for_prompt_annotated(
-        mut self,
+        self,
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
-        self.normalize_history(input_modalities);
-        Arc::unwrap_or_clone(self.items)
+        let mut items = self.into_responses_compatibility();
+
+        // Normalization is a prompt-only realization of the compatibility source. The consumed
+        // history is discarded, so there is no reason to rebuild canonical storage after these
+        // synthetic/prompt-specific changes.
+        normalize::ensure_call_outputs_present(&mut items);
+        normalize::remove_orphan_outputs(&mut items);
+        normalize::strip_images_when_unsupported(input_modalities, &mut items);
+        normalize::strip_audio_when_unsupported(input_modalities, &mut items);
+        items
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
     pub(crate) fn raw_items(
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
-        self.items.iter().map(|envelope| &envelope.item)
+        self.items
+            .iter()
+            .map(StoredHistoryEntry::responses_compatibility)
+            .map(|envelope| &envelope.item)
     }
 
-    /// Returns annotated history items without cloning their response payloads.
-    pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
-        &self.items
+    /// Returns compatibility envelopes without cloning their response payloads.
+    pub(crate) fn responses_compatibility(
+        &self,
+    ) -> impl Clone + ExactSizeIterator<Item = &ResponseItemEnvelope> + DoubleEndedIterator {
+        self.items
+            .iter()
+            .map(StoredHistoryEntry::responses_compatibility)
     }
 
     /// Returns raw items in the history and consumes the snapshot.
     pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
-        self.into_annotated_items()
+        self.into_responses_compatibility()
             .into_iter()
             .map(ResponseItemEnvelope::into_item)
             .collect()
     }
 
-    /// Returns annotated history items and consumes the snapshot.
-    pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
-        Arc::unwrap_or_clone(self.items)
+    /// Returns compatibility envelopes and consumes the snapshot.
+    pub(crate) fn into_responses_compatibility(self) -> Vec<ResponseItemEnvelope> {
+        match Arc::try_unwrap(self.items) {
+            Ok(items) => items
+                .into_iter()
+                .map(StoredHistoryEntry::into_responses_compatibility)
+                .collect(),
+            Err(items) => items
+                .iter()
+                .map(|item| item.responses_compatibility().clone())
+                .collect(),
+        }
     }
 
     pub(crate) fn history_version(&self) -> u64 {
@@ -300,6 +328,7 @@ impl ContextManager {
         let items_tokens = self
             .items
             .iter()
+            .map(StoredHistoryEntry::responses_compatibility)
             .map(|envelope| estimate_item_token_count(&envelope.item))
             .fold(0i64, i64::saturating_add);
 
@@ -315,7 +344,7 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(items, &removed.item);
+            normalize::remove_corresponding_for(items, &removed.responses_compatibility().item);
             self.world_state_baseline = None;
         }
     }
@@ -332,7 +361,14 @@ impl ContextManager {
 
     /// Compaction changes the model's history without changing the user's authorization.
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.items = Arc::new(items.into_iter().map(StoredHistoryEntry::new).collect());
+        self.history_version = self.history_version.saturating_add(1);
+        self.world_state_baseline = None;
+    }
+
+    fn replace_stored_items(&mut self, items: Vec<StoredHistoryEntry>) {
         self.items = Arc::new(items);
+        self.user_message_revision = self.user_message_revision.saturating_add(1);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
     }
@@ -361,7 +397,7 @@ impl ContextManager {
         let snapshot = self.items.clone();
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace_annotated(Arc::unwrap_or_clone(snapshot));
+            self.replace_stored_items(Arc::unwrap_or_clone(snapshot));
             return;
         };
 
@@ -375,14 +411,20 @@ impl ContextManager {
         cut_idx =
             self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
 
-        let mut retained_items = snapshot[..cut_idx].to_vec();
-        if cut_idx == first_instruction_turn_idx
-            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
-        {
-            retained_items.retain_mut(|item| {
-                if item.turn_id() == Some(first_turn_id)
-                    && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
-                {
+        let first_turn_id = (cut_idx == first_instruction_turn_idx)
+            .then(|| {
+                snapshot[first_instruction_turn_idx]
+                    .responses_compatibility()
+                    .turn_id()
+            })
+            .flatten();
+        let retained_items = snapshot[..cut_idx].to_vec().into_iter().filter_map(|item| {
+            let compatibility = item.responses_compatibility();
+            if first_turn_id.is_some()
+                && first_turn_id == compatibility.turn_id()
+                && matches!(&compatibility.item, ResponseItem::Message { role, .. } if role == "developer")
+            {
+                return item.map_responses_compatibility(|item| {
                     let Some(mut content) = to_annotated_content(&mut item.item) else {
                         return false;
                     };
@@ -394,13 +436,12 @@ impl ContextManager {
                         )
                     });
                     !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
-                } else {
-                    true
-                }
-            });
-        }
+                });
+            }
+            Some(item)
+        }).collect::<Vec<_>>();
 
-        self.replace_annotated(retained_items);
+        self.replace_stored_items(retained_items);
     }
 
     pub(crate) fn update_token_info(
@@ -420,7 +461,7 @@ impl ContextManager {
         let Some(last_user_index) = self
             .items
             .iter()
-            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
+            .rposition(StoredHistoryEntry::is_user_turn_boundary)
         else {
             return 0;
         };
@@ -430,13 +471,14 @@ impl ContextManager {
             .take(last_user_index)
             .filter(|envelope| {
                 matches!(
-                    &envelope.item,
+                    &envelope.responses_compatibility().item,
                     ResponseItem::Reasoning {
                         encrypted_content: Some(_),
                         ..
                     }
                 )
             })
+            .map(StoredHistoryEntry::responses_compatibility)
             .map(|envelope| estimate_item_token_count(&envelope.item))
             .fold(0i64, i64::saturating_add)
     }
@@ -449,9 +491,12 @@ impl ContextManager {
         let start = self
             .items
             .iter()
-            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .rposition(|entry| is_model_generated_item(&entry.responses_compatibility().item))
             .map_or(self.items.len(), |index| index.saturating_add(1));
-        self.items[start..].iter().map(|envelope| &envelope.item)
+        self.items[start..]
+            .iter()
+            .map(StoredHistoryEntry::responses_compatibility)
+            .map(|envelope| &envelope.item)
     }
 
     /// When true, the server already accounted for past reasoning tokens and
@@ -481,26 +526,6 @@ impl ContextManager {
             .fold(0i64, i64::saturating_add)
     }
 
-    /// This function enforces a couple of invariants on the in-memory history:
-    /// 1. every call (function/custom) has a corresponding output entry
-    /// 2. every output has a corresponding call entry or names an external tool event
-    /// 3. unsupported image and audio content is stripped from messages and tool outputs
-    fn normalize_history(&mut self, input_modalities: &[InputModality]) {
-        let items = Arc::make_mut(&mut self.items);
-
-        // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(items);
-
-        // Paired outputs must have a corresponding call; named external outputs stand alone.
-        normalize::remove_orphan_outputs(items);
-
-        // strip images when model does not support them
-        normalize::strip_images_when_unsupported(input_modalities, items);
-
-        // strip audio when model does not support it
-        normalize::strip_audio_when_unsupported(input_modalities, items);
-    }
-
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
     ///
     /// Returns the adjusted cut index after removing contextual developer/user items immediately
@@ -520,12 +545,12 @@ impl ContextManager {
     /// reinjection.
     fn trim_pre_turn_context_updates(
         &mut self,
-        snapshot: &[ResponseItemEnvelope],
+        snapshot: &[StoredHistoryEntry],
         first_instruction_turn_idx: usize,
         mut cut_idx: usize,
     ) -> usize {
         while cut_idx > first_instruction_turn_idx {
-            match &snapshot[cut_idx - 1].item {
+            match &snapshot[cut_idx - 1].responses_compatibility().item {
                 ResponseItem::Message { role, content, .. }
                     if role == "developer" && is_contextual_dev_message_content(content) =>
                 {
@@ -909,10 +934,10 @@ fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
     InterAgentCommunication::is_message_content(content)
 }
 
-fn user_message_positions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
+fn user_message_positions(items: &[StoredHistoryEntry]) -> Vec<usize> {
     let mut positions = Vec::new();
     for (idx, envelope) in items.iter().enumerate() {
-        if is_user_turn_boundary(&envelope.item) {
+        if envelope.is_user_turn_boundary() {
             positions.push(idx);
         }
     }

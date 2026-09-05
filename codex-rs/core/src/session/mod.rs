@@ -3940,8 +3940,7 @@ impl Session {
                 let history = self.clone_history().await;
                 crate::compact_remote_v2::truncate_retained_messages_for_remote_compaction(
                     history
-                        .annotated_items()
-                        .iter()
+                        .responses_compatibility()
                         .filter(|item| {
                             crate::compact_remote_v2::is_client_authored_developer_message(item)
                         })
