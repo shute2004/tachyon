@@ -1704,7 +1704,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     let forked_path = forked_thread.path.expect("forked rollout path");
     let child_rollout = std::fs::read_to_string(forked_path.as_path())?
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
     assert!(matches!(
         child_rollout.as_slice(),
