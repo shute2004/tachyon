@@ -29,9 +29,9 @@ pub(super) async fn materialize_to_sqlite(
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
     if projection_state.is_none()
-        && !tokio::fs::try_exists(rollout_path)
+        && codex_rollout::existing_rollout_path(rollout_path)
             .await
-            .map_err(thread_store_io_error)?
+            .is_none()
     {
         return Ok(());
     }
@@ -76,13 +76,21 @@ async fn read_projection_steps(
     thread_id: ThreadId,
     subagent_history_start_ordinal: Option<u64>,
 ) -> ThreadStoreResult<(Vec<RolloutProjectionStep>, u64)> {
-    let file_end_offset = match tokio::fs::metadata(rollout_path).await {
-        Ok(metadata) => metadata.len(),
+    let path = rollout_path.to_path_buf();
+    let file =
+        tokio::task::spawn_blocking(move || codex_rollout::open_rollout_seekable_reader(&path))
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to join rollout projection read: {err}"),
+            })?;
+    let mut file = match file {
+        Ok(file) => tokio::fs::File::from_std(file),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && start_offset == 0 => {
             return Ok((Vec::new(), 0));
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
+    let file_end_offset = file.metadata().await.map_err(thread_store_io_error)?.len();
     let byte_count =
         file_end_offset
             .checked_sub(start_offset)
@@ -93,9 +101,6 @@ async fn read_projection_steps(
         message: "durable rollout append exceeds addressable memory".to_string(),
     })?;
     let mut bytes = vec![0; byte_count];
-    let mut file = tokio::fs::File::open(rollout_path)
-        .await
-        .map_err(thread_store_io_error)?;
     file.seek(SeekFrom::Start(start_offset))
         .await
         .map_err(thread_store_io_error)?;
@@ -111,10 +116,7 @@ async fn read_projection_steps(
     let mut projections = Vec::new();
     let mut next_ordinal = expected_ordinal;
     let mut next_offset = start_offset;
-    let mut pending_rejected_line_count = 0;
     let mut line_start_offset = start_offset;
-    // Keep rejected lines pending until a later valid ordinal proves whether they consumed history.
-    // This lets a same-ordinal retry replace a failed write without advancing only one checkpoint.
     for line_bytes in bytes[..complete_byte_count].split_inclusive(|byte| *byte == b'\n') {
         let line_end_offset = line_start_offset
             .checked_add(u64::try_from(line_bytes.len()).map_err(|_| {
@@ -126,9 +128,7 @@ async fn read_projection_steps(
                 message: "durable rollout byte offset overflow".to_string(),
             })?;
         if line_bytes.iter().all(u8::is_ascii_whitespace) {
-            if pending_rejected_line_count == 0 {
-                next_offset = line_end_offset;
-            }
+            next_offset = line_end_offset;
             line_start_offset = line_end_offset;
             continue;
         }
@@ -142,16 +142,16 @@ async fn read_projection_steps(
                     line_end_byte_offset = line_end_offset,
                     expected_ordinal = next_ordinal,
                     error = %err,
-                    "deferring rejected rollout line until a later ordinal resolves it"
+                    "skipping malformed rollout line during projection"
                 );
-                pending_rejected_line_count += 1;
+                next_offset = line_end_offset;
                 line_start_offset = line_end_offset;
                 continue;
             }
         };
-        let value_ordinal = value.get("ordinal").and_then(serde_json::Value::as_u64);
+        let raw_ordinal = value.get("ordinal").and_then(serde_json::Value::as_u64);
         let line = match codex_rollout::decode_rollout_line(value) {
-            Ok(line) => Some(line),
+            Ok(line) => line,
             Err(err) => {
                 warn!(
                     thread_id = %thread_id,
@@ -159,51 +159,44 @@ async fn read_projection_steps(
                     line_start_byte_offset = line_start_offset,
                     line_end_byte_offset = line_end_offset,
                     expected_ordinal = next_ordinal,
-                    line_ordinal = ?value_ordinal,
+                    line_ordinal = ?raw_ordinal,
                     error = %err,
-                    "deferring unknown rollout line until a later ordinal resolves it"
+                    "skipping unknown rollout line during projection"
                 );
-                None
-            }
-        };
-        let ordinal = match line
-            .as_ref()
-            .and_then(|line| line.ordinal)
-            .or(value_ordinal)
-        {
-            Some(ordinal) => ordinal,
-            None if line.is_none() => {
-                pending_rejected_line_count += 1;
+                next_offset = line_end_offset;
                 line_start_offset = line_end_offset;
                 continue;
             }
+        };
+        let ordinal = match line.ordinal {
+            Some(ordinal) => ordinal,
             None => {
-                return Err(ThreadStoreError::Internal {
-                    message: format!(
-                        "paginated rollout line for {thread_id} is missing an ordinal"
-                    ),
-                });
+                warn!(
+                    thread_id = %thread_id,
+                    rollout_path = %rollout_path.display(),
+                    line_start_byte_offset = line_start_offset,
+                    line_end_byte_offset = line_end_offset,
+                    expected_ordinal = next_ordinal,
+                    "skipping paginated rollout line without an ordinal"
+                );
+                next_offset = line_end_offset;
+                line_start_offset = line_end_offset;
+                continue;
             }
         };
         if ordinal < next_ordinal {
-            return Err(ThreadStoreError::Internal {
-                message: format!(
-                    "thread history projection for {thread_id} expected ordinal {next_ordinal}, got {ordinal}"
-                ),
-            });
-        }
-        let Some(line) = line else {
-            pending_rejected_line_count += 1;
+            warn!(
+                thread_id = %thread_id,
+                rollout_path = %rollout_path.display(),
+                line_start_byte_offset = line_start_offset,
+                line_end_byte_offset = line_end_offset,
+                expected_ordinal = next_ordinal,
+                line_ordinal = ordinal,
+                "skipping duplicate or regressed rollout ordinal during projection"
+            );
+            next_offset = line_end_offset;
             line_start_offset = line_end_offset;
             continue;
-        };
-        let skipped_ordinal_count = ordinal - next_ordinal;
-        if skipped_ordinal_count > pending_rejected_line_count {
-            return Err(ThreadStoreError::Internal {
-                message: format!(
-                    "thread history projection for {thread_id} expected ordinal {next_ordinal}, got {ordinal}; {pending_rejected_line_count} rejected rollout lines cannot cover that gap"
-                ),
-            });
         }
         let is_inherited_subagent_history =
             subagent_history_start_ordinal.is_some_and(|start| ordinal < start);
@@ -230,9 +223,20 @@ async fn read_projection_steps(
                         expected_ordinal = next_ordinal,
                         line_ordinal = ordinal,
                         error = %err,
-                        "deferring rollout line with invalid timestamp until a later ordinal resolves it"
+                        "skipping rollout line with invalid timestamp during projection"
                     );
-                    pending_rejected_line_count += 1;
+                    let end_ordinal_exclusive =
+                        ordinal
+                            .checked_add(1)
+                            .ok_or_else(|| ThreadStoreError::Internal {
+                                message: "rollout ordinal exceeds SQLite integer range".to_string(),
+                            })?;
+                    projections.push(RolloutProjectionStep::SkippedOrdinalRange {
+                        start_ordinal: next_ordinal,
+                        end_ordinal_exclusive,
+                    });
+                    next_ordinal = end_ordinal_exclusive;
+                    next_offset = line_end_offset;
                     line_start_offset = line_end_offset;
                     continue;
                 }
@@ -240,7 +244,7 @@ async fn read_projection_steps(
         } else {
             None
         };
-        if skipped_ordinal_count > 0 {
+        if ordinal > next_ordinal {
             warn!(
                 thread_id = %thread_id,
                 rollout_path = %rollout_path.display(),
@@ -250,14 +254,13 @@ async fn read_projection_steps(
                 line_ordinal = ordinal,
                 skipped_ordinal_start = next_ordinal,
                 skipped_ordinal_end_exclusive = ordinal,
-                "skipping rollout ordinal range after rejected lines"
+                "skipping missing rollout ordinal range during projection"
             );
             projections.push(RolloutProjectionStep::SkippedOrdinalRange {
                 start_ordinal: next_ordinal,
                 end_ordinal_exclusive: ordinal,
             });
         }
-        pending_rejected_line_count = 0;
         let next_line_ordinal =
             ordinal
                 .checked_add(1)
