@@ -418,7 +418,7 @@ impl ContextManager {
                     .turn_id()
             })
             .flatten();
-        let retained_items = snapshot[..cut_idx].to_vec().into_iter().filter_map(|item| {
+        let retained_items = snapshot[..cut_idx].iter().cloned().filter_map(|item| {
             let compatibility = item.responses_compatibility();
             if first_turn_id.is_some()
                 && first_turn_id == compatibility.turn_id()
