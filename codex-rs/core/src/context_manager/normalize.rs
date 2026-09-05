@@ -198,7 +198,10 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
     }
 }
 
-pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, item: &ResponseItem) {
+pub(crate) fn remove_corresponding_for<T>(items: &mut Vec<T>, item: &ResponseItem)
+where
+    T: std::borrow::Borrow<ResponseItem>,
+{
     let Some(correlation) = tool_correlation(item) else {
         return;
     };
@@ -216,13 +219,19 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
     } = item
     {
         if let Some(pos) = items.iter().position(|envelope| {
-            matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
+            matches!(
+                envelope.borrow(),
+                ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id
+            )
         }) {
             items.remove(pos);
             return;
         }
         if let Some(pos) = items.iter().position(|envelope| {
-            matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
+            matches!(
+                envelope.borrow(),
+                ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id
+            )
         }) {
             items.remove(pos);
         }
@@ -230,7 +239,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
     }
 
     if let Some(pos) = items.iter().position(|envelope| {
-        tool_correlation(&envelope.item).is_some_and(|candidate| {
+        tool_correlation(envelope.borrow()).is_some_and(|candidate| {
             candidate.compatibility_pairing_class == correlation.compatibility_pairing_class
                 && candidate.side == counterpart_side
                 && candidate.call_id == correlation.call_id

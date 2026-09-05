@@ -6,6 +6,8 @@ use crate::context::world_state::WorldStateSection;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_history::CodexHarnessMetadata;
+use codex_history::HistoryItem;
+use codex_history::HistoryMessageContent;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
@@ -119,6 +121,11 @@ fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
 
 fn raw_items(history: &ContextManager) -> Vec<ResponseItem> {
     history.raw_items().cloned().collect()
+}
+
+fn normalize_history(history: &mut ContextManager, input_modalities: &[InputModality]) {
+    let normalized = history.clone().for_prompt_annotated(input_modalities);
+    history.replace_compacted(normalized);
 }
 
 #[test]
@@ -492,8 +499,8 @@ fn cloned_history_shares_items_until_mutated() {
     let mut snapshot = history.clone();
 
     assert!(std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.items.first().expect("stored item"),
+        snapshot.items.first().expect("stored item")
     ));
 
     snapshot.record_items(
@@ -502,8 +509,8 @@ fn cloned_history_shares_items_until_mutated() {
     );
 
     assert!(!std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.items.first().expect("stored item"),
+        snapshot.items.first().expect("stored item")
     ));
     assert_eq!(raw_items(&history), std::slice::from_ref(&first));
     assert_eq!(raw_items(&snapshot), &[first, second]);
@@ -521,8 +528,11 @@ fn annotated_history_apis_preserve_envelopes() {
     history.replace_annotated(vec![first_envelope.clone()]);
 
     assert_eq!(
-        history.annotated_items(),
-        std::slice::from_ref(&first_envelope)
+        history
+            .responses_compatibility()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![first_envelope]
     );
     assert_eq!(history.into_raw_items(), vec![first_item]);
 }
@@ -558,13 +568,14 @@ fn record_annotated_items_preserves_metadata_while_processing_item(
 
     history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
 
-    assert_eq!(history.annotated_items().len(), 1);
-    assert_eq!(history.annotated_items()[0].metadata, envelope.metadata);
-    assert_eq!(
-        history.annotated_items()[0].item != envelope.item,
-        expected_truncation
-    );
-    let ResponseItem::FunctionCallOutput { output, .. } = &history.annotated_items()[0].item else {
+    let stored = history
+        .responses_compatibility()
+        .next()
+        .expect("stored item");
+    assert_eq!(history.responses_compatibility().len(), 1);
+    assert_eq!(stored.metadata, envelope.metadata);
+    assert_eq!(stored.item != envelope.item, expected_truncation);
+    let ResponseItem::FunctionCallOutput { output, .. } = &stored.item else {
         panic!("expected function call output");
     };
     assert_eq!(
@@ -1126,6 +1137,41 @@ fn drop_last_n_user_turns_preserves_prefix() {
 }
 
 #[test]
+fn rollback_revision_advances_for_nonzero_request_but_not_zero_request() {
+    let mut history = create_history_with_items(vec![assistant_msg("session prefix")]);
+    let initial_revision = history.user_message_revision;
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert_eq!(history.user_message_revision, initial_revision + 1);
+
+    history.drop_last_n_user_turns(/*num_turns*/ 0);
+    assert_eq!(history.user_message_revision, initial_revision + 1);
+}
+
+#[test]
+fn rollback_does_not_strip_untagged_session_prefix_developer_content() {
+    let developer = developer_msg(&ModelSwitchInstructions::new("session prefix model").render());
+    let mut history = create_history_with_items(vec![
+        developer.clone(),
+        user_input_text_msg("turn 1 user"),
+        assistant_msg("turn 1 assistant"),
+        user_input_text_msg("turn 2 user"),
+        assistant_msg("turn 2 assistant"),
+    ]);
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(
+        raw_items(&history),
+        vec![
+            developer,
+            user_input_text_msg("turn 1 user"),
+            assistant_msg("turn 1 assistant")
+        ]
+    );
+}
+
+#[test]
 fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
     let items = vec![
         user_input_text_msg("<environment_context>ctx</environment_context>"),
@@ -1334,6 +1380,18 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
             ),
         }],
     );
+    let Some(HistoryItem::Message(message)) =
+        history.items.first().and_then(|entry| entry.canonical())
+    else {
+        panic!("expected canonical surviving developer message");
+    };
+    assert_eq!(
+        message.content,
+        vec![
+            HistoryMessageContent::Text("persistent developer instructions".to_string()),
+            HistoryMessageContent::Text("persistent environment instructions".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -1477,7 +1535,12 @@ fn record_items_truncates_function_call_output_content() {
     history.record_items([&item], policy);
 
     assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    match &history
+        .responses_compatibility()
+        .next()
+        .expect("stored item")
+        .item
+    {
         ResponseItem::FunctionCallOutput { output, .. } => {
             let content = output.text_content().unwrap_or_default();
             assert_ne!(content, long_output);
@@ -1492,7 +1555,14 @@ fn record_items_truncates_function_call_output_content() {
         }
         other => panic!("unexpected history item: {other:?}"),
     }
-    assert_eq!(history.items[0].turn_id(), Some("turn-1"));
+    assert_eq!(
+        history
+            .responses_compatibility()
+            .next()
+            .expect("stored item")
+            .turn_id(),
+        Some("turn-1")
+    );
 }
 
 #[test]
@@ -1512,7 +1582,12 @@ fn record_items_truncates_custom_tool_call_output_content() {
     history.record_items([&item], policy);
 
     assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    match &history
+        .responses_compatibility()
+        .next()
+        .expect("stored item")
+        .item
+    {
         ResponseItem::CustomToolCallOutput { output, .. } => {
             let output = output.text_content().unwrap_or_default();
             assert_ne!(output, long_output);
@@ -1548,7 +1623,12 @@ fn record_items_respects_custom_token_limit() {
 
     history.record_items([&item], policy);
 
-    let stored = match &history.items[0].item {
+    let stored = match &history
+        .responses_compatibility()
+        .next()
+        .expect("stored item")
+        .item
+    {
         ResponseItem::FunctionCallOutput { output, .. } => output,
         other => panic!("unexpected history item: {other:?}"),
     };
@@ -1668,7 +1748,7 @@ fn normalize_adds_missing_output_for_function_call() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -1708,7 +1788,7 @@ fn normalize_adds_missing_output_for_custom_tool_call() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -1751,7 +1831,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -1794,7 +1874,7 @@ fn normalize_removes_orphan_function_call_output() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(raw_items(&h), vec![]);
 }
@@ -1811,7 +1891,7 @@ fn normalize_removes_orphan_custom_tool_call_output() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(raw_items(&h), vec![]);
 }
@@ -1866,7 +1946,7 @@ fn normalize_mixed_inserts_and_removals() {
     ];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -1941,7 +2021,7 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
     assert_eq!(
         raw_items(&h),
         vec![
@@ -2037,7 +2117,7 @@ fn normalize_adds_missing_output_for_tool_search_call() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -2076,7 +2156,7 @@ fn normalize_adds_missing_output_for_custom_tool_call_panics_in_debug() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[cfg(debug_assertions)]
@@ -2097,7 +2177,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id_panics_in_debug() 
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[cfg(debug_assertions)]
@@ -2113,7 +2193,7 @@ fn normalize_removes_orphan_function_call_output_panics_in_debug() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[cfg(debug_assertions)]
@@ -2128,7 +2208,7 @@ fn normalize_removes_orphan_custom_tool_call_output_panics_in_debug() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[cfg(not(debug_assertions))]
@@ -2144,7 +2224,7 @@ fn normalize_removes_orphan_client_tool_search_output() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(raw_items(&h), vec![]);
 }
@@ -2162,7 +2242,7 @@ fn normalize_removes_orphan_client_tool_search_output_panics_in_debug() {
         internal_chat_message_metadata_passthrough: None,
     }];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[test]
@@ -2177,7 +2257,7 @@ fn normalize_keeps_server_tool_search_output_without_matching_call() {
     }];
     let mut h = create_history_with_items(items);
 
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 
     assert_eq!(
         raw_items(&h),
@@ -2238,7 +2318,7 @@ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
         },
     ];
     let mut h = create_history_with_items(items);
-    h.normalize_history(&default_input_modalities());
+    normalize_history(&mut h, &default_input_modalities());
 }
 
 #[test]
