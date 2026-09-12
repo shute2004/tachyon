@@ -279,6 +279,20 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
     # explicit `--platforms=...` flag.
     post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
   fi
+
+  if [[ $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+    has_platform_override=0
+    for arg in "${bazel_args[@]}"; do
+      if [[ "$arg" == --platforms=* ]]; then
+        has_platform_override=1
+        break
+      fi
+    done
+
+    if [[ $has_platform_override -eq 0 ]]; then
+      post_config_bazel_args+=("--platforms=//:windows_x86_64_gnullvm")
+    fi
+  fi
 fi
 
 if [[ $remote_download_toplevel -eq 1 ]]; then
