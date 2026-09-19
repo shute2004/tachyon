@@ -282,15 +282,35 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
 
   if [[ $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
     has_platform_override=0
+    has_extra_execution_platforms_override=0
+    has_extra_toolchains_override=0
     for arg in "${bazel_args[@]}"; do
-      if [[ "$arg" == --platforms=* ]]; then
-        has_platform_override=1
-        break
-      fi
+      case "$arg" in
+        --platforms=*)
+          has_platform_override=1
+          ;;
+        --extra_execution_platforms=*)
+          has_extra_execution_platforms_override=1
+          ;;
+        --extra_toolchains=*)
+          has_extra_toolchains_override=1
+          ;;
+      esac
     done
 
     if [[ $has_platform_override -eq 0 ]]; then
       post_config_bazel_args+=("--platforms=//:windows_x86_64_gnullvm")
+    fi
+
+    # The cross config normally supplies the Windows MSVC execution platform
+    # and the test toolchain that pairs it with the gnullvm target. Preserve
+    # those test-resolution inputs in the local fallback without reintroducing
+    # the cross config's Linux RBE platform.
+    if [[ $has_extra_execution_platforms_override -eq 0 ]]; then
+      post_config_bazel_args+=("--extra_execution_platforms=//:windows_x86_64_msvc")
+    fi
+    if [[ $has_extra_toolchains_override -eq 0 ]]; then
+      post_config_bazel_args+=("--extra_toolchains=//:windows_gnullvm_tests_on_msvc_host_toolchain")
     fi
   fi
 fi
