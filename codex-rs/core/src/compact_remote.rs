@@ -440,15 +440,16 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     // saturation in the normal history estimator.
     let base_tokens =
         i128::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i128::MAX);
-    let original_items = history.annotated_items();
-    let mut estimated_tokens = history_item_groups(original_items.iter().map(|item| &item.item))
-        .map(|group| group.estimated_token_count())
-        .fold(base_tokens, i128::saturating_add);
+    let original_items: Vec<&ResponseItemEnvelope> = history.responses_compatibility().collect();
+    let mut estimated_tokens =
+        history_item_groups(original_items.iter().copied().map(|item| &item.item))
+            .map(|group| group.estimated_token_count())
+            .fold(base_tokens, i128::saturating_add);
     let initial_estimated_tokens = i64::try_from(estimated_tokens).unwrap_or(i64::MAX);
     let mut rewritten_items = Vec::new();
     let mut consumed_items: usize = 0;
 
-    for group in history_item_groups(original_items.iter().map(|item| &item.item))
+    for group in history_item_groups(original_items.iter().copied().map(|item| &item.item))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -462,7 +463,7 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
             .saturating_sub(consumed_items.saturating_add(group_item_count));
         let Some(rewritten_item) = original_items
             .get(source_index)
-            .and_then(rewritten_output_for_context_window)
+            .and_then(|item| rewritten_output_for_context_window(item))
         else {
             break;
         };
@@ -476,7 +477,10 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     let rewritten_outputs = rewritten_items.len();
     if rewritten_outputs > 0 {
         let retained_len = original_items.len() - consumed_items;
-        let mut items = original_items[..retained_len].to_vec();
+        let mut items: Vec<ResponseItemEnvelope> = original_items[..retained_len]
+            .iter()
+            .map(|item| (*item).clone())
+            .collect();
         items.extend(rewritten_items.into_iter().rev());
         history.replace_annotated(items);
     }

@@ -267,7 +267,7 @@ fn project_message_content(content: &ContentItem) -> HistoryMessageContent {
         }
         ContentItem::InputImage { image_url, detail } => HistoryMessageContent::Image {
             source: HistoryMediaSource::Uri(image_url.clone()),
-            detail: detail.as_ref().map(project_image_detail),
+            detail: detail.map(project_image_detail),
         },
         ContentItem::InputAudio { audio_url } => HistoryMessageContent::Audio {
             source: HistoryMediaSource::Uri(audio_url.clone()),
@@ -275,7 +275,7 @@ fn project_message_content(content: &ContentItem) -> HistoryMessageContent {
     }
 }
 
-fn project_image_detail(detail: &ImageDetail) -> crate::HistoryImageDetail {
+fn project_image_detail(detail: ImageDetail) -> crate::HistoryImageDetail {
     match detail {
         ImageDetail::Auto => crate::HistoryImageDetail::Auto,
         ImageDetail::Low => crate::HistoryImageDetail::Low,
@@ -314,7 +314,7 @@ fn project_tool_result_content(
                 FunctionCallOutputContentItem::InputImage { image_url, detail } => {
                     Ok(HistoryToolResultContent::Image {
                         source: HistoryMediaSource::Uri(image_url.clone()),
-                        detail: detail.as_ref().map(project_image_detail),
+                        detail: detail.map(project_image_detail),
                     })
                 }
                 FunctionCallOutputContentItem::InputAudio { audio_url } => {

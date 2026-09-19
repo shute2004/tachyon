@@ -2617,7 +2617,11 @@ async fn prepares_resumed_history_before_installing_it() {
         }]
     );
     assert_eq!(
-        history.annotated_items()[0].metadata,
+        history
+            .responses_compatibility()
+            .next()
+            .expect("history item")
+            .metadata,
         Some(CodexHarnessMetadata::default())
     );
 }
@@ -3421,7 +3425,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     });
     assert_eq!(
         persisted_replacement_history.cloned(),
-        Some(live_history.annotated_items().to_vec())
+        Some(live_history.responses_compatibility().cloned().collect())
     );
 }
 
@@ -3475,7 +3479,11 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     expected_item.set_id(live_item.id().cloned());
     assert_eq!(raw_history_items(&live_history), vec![expected_item]);
     assert_eq!(
-        live_history.annotated_items()[0].metadata,
+        live_history
+            .responses_compatibility()
+            .next()
+            .expect("history item")
+            .metadata,
         Some(CodexHarnessMetadata::default())
     );
 
