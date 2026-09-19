@@ -610,7 +610,7 @@ impl GuardianV2Extension {
         let latest_parent_compaction = if guardian_config.reuse_parent_compaction {
             input
                 .conversation_history
-                .items()
+                .responses_compatibility_items()
                 .filter(|item| {
                     matches!(
                         item,
@@ -694,11 +694,12 @@ impl GuardianV2Extension {
                 guardian_evidence.user_input_fragments(conversation_history.as_ref());
             let transcript = guardian_config
                 .transcript
-                .build(conversation_history.items());
+                .build(conversation_history.responses_compatibility_items());
             truncations.extend(transcript.truncations);
-            let rendered_images = guardian_config
-                .transcript
-                .images(conversation_history.items(), node_repl_images);
+            let rendered_images = guardian_config.transcript.images(
+                conversation_history.responses_compatibility_items(),
+                node_repl_images,
+            );
             truncations.record(
                 "transcript_image",
                 rendered_images.omitted_bytes,

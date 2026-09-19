@@ -62,7 +62,7 @@ impl GuardianReviewEvidence {
             .user_inputs
             .iter()
             .filter(|(recorded_call_id, _)| {
-                history.items().any(|item| {
+                history.responses_compatibility_items().any(|item| {
                     matches!(
                         item,
                         ResponseItem::FunctionCall { call_id, .. }

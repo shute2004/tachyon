@@ -127,7 +127,11 @@ impl ToolLifecycleContributor for ConversationHistoryRecorder {
                 .push(RecordedHistory {
                     call_id: input.call_id.to_owned(),
                     arguments: input.payload.log_payload().into_owned(),
-                    items: input.conversation_history.items().cloned().collect(),
+                    items: input
+                        .conversation_history
+                        .responses_compatibility_items()
+                        .cloned()
+                        .collect(),
                     mcp_tool: input
                         .mcp_tool
                         .map(|tool| (tool.tool_info().clone(), tool.source().clone())),

@@ -19,6 +19,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::HistorySnapshotItemRef;
 use codex_extension_api::ResponseItem;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCallSource;
@@ -259,7 +260,11 @@ impl ConversationHistorySnapshot for TestConversationHistory {
         self.0.iter().filter(|item| item.is_user_message()).count() as u64
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+    fn items(&self) -> Box<dyn Iterator<Item = HistorySnapshotItemRef<'_>> + Send + '_> {
+        Box::new(std::iter::empty())
+    }
+
+    fn responses_compatibility_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(self.0.iter())
     }
 }

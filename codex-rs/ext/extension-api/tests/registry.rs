@@ -19,6 +19,7 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
+use codex_extension_api::HistorySnapshotItemRef;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::ResponseItem;
@@ -245,7 +246,11 @@ impl ConversationHistorySnapshot for AllContributors {
         0
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+    fn items(&self) -> Box<dyn Iterator<Item = HistorySnapshotItemRef<'_>> + Send + '_> {
+        Box::new(std::iter::empty())
+    }
+
+    fn responses_compatibility_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(std::iter::empty())
     }
 }

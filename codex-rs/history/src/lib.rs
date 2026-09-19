@@ -33,6 +33,7 @@ mod envelope;
 mod item;
 mod response_projection;
 mod rollout_payload;
+mod snapshot;
 
 pub use envelope::HistoryEnvelope;
 pub use item::HistoryImageDetail;
@@ -51,6 +52,7 @@ pub use item::HistoryToolResultContent;
 pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
+pub use snapshot::HistorySnapshotItemRef;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///

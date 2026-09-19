@@ -4,6 +4,7 @@ use codex_history::HistoryItem;
 use codex_history::HistoryItemProjection;
 use codex_history::HistoryMessageRole;
 use codex_history::HistoryProjectionFallback;
+use codex_history::HistorySnapshotItemRef;
 use codex_history::ResponseItemEnvelope;
 use codex_history::project_response_item;
 use codex_protocol::models::ResponseItem;
@@ -41,6 +42,18 @@ impl StoredHistoryEntry {
         match &self.projection {
             HistoryItemProjection::Canonical { .. } => None,
             HistoryItemProjection::Fallback { reason, .. } => Some(*reason),
+        }
+    }
+
+    /// Borrow this entry's provider-neutral snapshot view without cloning its canonical item.
+    pub(crate) fn snapshot_item(&self) -> HistorySnapshotItemRef<'_> {
+        match &self.projection {
+            HistoryItemProjection::Canonical { item, .. } => {
+                HistorySnapshotItemRef::Canonical(item)
+            }
+            HistoryItemProjection::Fallback { reason, .. } => {
+                HistorySnapshotItemRef::Fallback(*reason)
+            }
         }
     }
 
@@ -103,6 +116,14 @@ impl StoredHistoryEntry {
             Some(_) => false,
             None => is_user_authorization_message(&self.responses_compatibility().item),
         }
+    }
+
+    pub(crate) fn is_contextual_user_message(&self) -> bool {
+        matches!(
+            &self.responses_compatibility().item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user" && is_contextual_user_message_content(content)
+        )
     }
 }
 

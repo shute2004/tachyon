@@ -15,6 +15,7 @@ use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_history::CodexHarnessMetadata;
+use codex_history::HistorySnapshotItemRef;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
@@ -88,19 +89,22 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
         self.user_message_revision
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+    fn items(&self) -> Box<dyn Iterator<Item = HistorySnapshotItemRef<'_>> + Send + '_> {
         Box::new(
             self.items
                 .iter()
+                .filter(|entry| !entry.is_contextual_user_message())
+                .map(StoredHistoryEntry::snapshot_item),
+        )
+    }
+
+    fn responses_compatibility_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        Box::new(
+            self.items
+                .iter()
+                .filter(|entry| !entry.is_contextual_user_message())
                 .map(StoredHistoryEntry::responses_compatibility)
-                .map(|envelope| &envelope.item)
-                .filter(|item| {
-                    !matches!(
-                        item,
-                        ResponseItem::Message { role, content, .. }
-                            if role == "user" && is_contextual_user_message_content(content)
-                    )
-                }),
+                .map(|envelope| &envelope.item),
         )
     }
 }

@@ -8,6 +8,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_history::CodexHarnessMetadata;
 use codex_history::HistoryItem;
 use codex_history::HistoryMessageContent;
+use codex_history::HistoryMessageRole;
+use codex_history::HistoryProjectionFallback;
+use codex_history::HistorySnapshotItemRef;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
@@ -129,21 +132,42 @@ fn normalize_history(history: &mut ContextManager, input_modalities: &[InputModa
 }
 
 #[test]
-fn conversation_history_snapshot_shares_response_items_until_history_changes() {
+fn conversation_history_snapshot_shares_canonical_items_until_history_changes() {
     let mut history = create_history_with_items(vec![assistant_msg("original")]);
     let snapshot = history.conversation_history_snapshot();
 
-    let original = history.raw_items().next().expect("original history item");
-    let shared = snapshot.items().next().expect("shared snapshot item");
-    assert!(std::ptr::eq(original, shared));
+    let shared = match snapshot.items().next().expect("shared snapshot item") {
+        HistorySnapshotItemRef::Canonical(item) => item,
+        HistorySnapshotItemRef::Fallback(reason) => {
+            panic!("expected canonical snapshot item, got fallback {reason:?}")
+        }
+    };
+    let snapshot_again = history.conversation_history_snapshot();
+    let shared_again = match snapshot_again.items().next().expect("shared snapshot item") {
+        HistorySnapshotItemRef::Canonical(item) => item,
+        HistorySnapshotItemRef::Fallback(reason) => {
+            panic!("expected canonical snapshot item, got fallback {reason:?}")
+        }
+    };
+    assert!(std::ptr::eq(shared, shared_again));
 
     history.record_items(
         std::iter::once(&assistant_msg("later")),
         TruncationPolicy::Tokens(10_000),
     );
 
+    let retained = match snapshot.items().next().expect("retained snapshot item") {
+        HistorySnapshotItemRef::Canonical(item) => item,
+        HistorySnapshotItemRef::Fallback(reason) => {
+            panic!("expected canonical snapshot item, got fallback {reason:?}")
+        }
+    };
+    assert!(std::ptr::eq(shared, retained));
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot
+            .responses_compatibility_items()
+            .cloned()
+            .collect::<Vec<_>>(),
         vec![assistant_msg("original")],
     );
     assert_eq!(
@@ -156,6 +180,33 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
         snapshot.history_version(),
         history.conversation_history_snapshot().history_version()
     );
+}
+
+#[test]
+fn conversation_history_snapshot_emits_canonical_and_fallback_items_in_source_order() {
+    let history = create_history_with_items(vec![
+        assistant_msg("first"),
+        reasoning_with_encrypted_content(/*len*/ 800),
+        assistant_msg("last"),
+    ]);
+    let snapshot = history.conversation_history_snapshot();
+    let mut items = snapshot.items();
+
+    assert!(matches!(
+        items.next(),
+        Some(HistorySnapshotItemRef::Canonical(HistoryItem::Message(_)))
+    ));
+    assert_eq!(
+        items.next(),
+        Some(HistorySnapshotItemRef::Fallback(
+            HistoryProjectionFallback::EncryptedReasoning
+        ))
+    );
+    assert!(matches!(
+        items.next(),
+        Some(HistorySnapshotItemRef::Canonical(HistoryItem::Message(_)))
+    ));
+    assert!(items.next().is_none());
 }
 
 #[test]
@@ -177,8 +228,28 @@ fn conversation_history_snapshot_excludes_contextual_user_messages() {
     ]);
     let snapshot = history.conversation_history_snapshot();
 
+    let neutral_items = snapshot.items().collect::<Vec<_>>();
+    assert_eq!(neutral_items.len(), 3);
+    assert!(matches!(
+        neutral_items[0],
+        HistorySnapshotItemRef::Canonical(HistoryItem::Message(message))
+            if message.role == HistoryMessageRole::User
+    ));
+    assert!(matches!(
+        neutral_items[1],
+        HistorySnapshotItemRef::Canonical(HistoryItem::Message(message))
+            if message.role == HistoryMessageRole::Assistant
+    ));
+    assert!(matches!(
+        neutral_items[2],
+        HistorySnapshotItemRef::Canonical(HistoryItem::Message(message))
+            if message.role == HistoryMessageRole::Developer
+    ));
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot
+            .responses_compatibility_items()
+            .cloned()
+            .collect::<Vec<_>>(),
         vec![user_message, assistant_message, developer_message],
     );
 }
