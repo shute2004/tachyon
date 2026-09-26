@@ -30,6 +30,7 @@ pub(crate) use self::types::CellToolCall;
 pub(crate) use self::types::CompletionCommit;
 use self::types::CompletionDelivery;
 use self::types::ObservationDelivery;
+use self::types::ProgressDelivery;
 use crate::TaskFailureHandler;
 use crate::runtime::PendingRuntimeMode;
 use crate::runtime::RuntimeCommand;
@@ -197,9 +198,11 @@ async fn run_cell<H: CellHost>(
                     continue;
                 }
                 if matches!(mode, ObserveMode::PendingFrontier) && pending_frontier_ready {
+                    observer = Some(Observer { mode, response_tx });
                     pending_frontier_ready = false;
-                    match send_cell_event(
-                        response_tx,
+                    match send_observer_event(
+                        &cell_state,
+                        &mut observer,
                         CellEvent::Pending {
                             content_items: std::mem::take(&mut content_items),
                             pending_tool_call_ids: std::mem::take(&mut pending_tool_call_ids),
@@ -243,7 +246,8 @@ async fn run_cell<H: CellHost>(
                 yield_timer = None;
                 restore_undelivered_yield(
                     send_observer_event(
-                        observer.take(),
+                        &cell_state,
+                        &mut observer,
                         CellEvent::Yielded {
                             content_items: std::mem::take(&mut content_items),
                         },
@@ -343,7 +347,8 @@ async fn run_cell<H: CellHost>(
                             yield_timer = None;
                             pending_frontier_ready = false;
                             match send_observer_event(
-                                observer.take(),
+                                &cell_state,
+                                &mut observer,
                                 CellEvent::Pending {
                                     content_items: std::mem::take(&mut content_items),
                                     pending_tool_call_ids: std::mem::take(
@@ -380,7 +385,8 @@ async fn run_cell<H: CellHost>(
                             yield_timer = None;
                             restore_undelivered_yield(
                                 send_observer_event(
-                                    observer.take(),
+                                    &cell_state,
+                                    &mut observer,
                                     CellEvent::Yielded {
                                         content_items: std::mem::take(&mut content_items),
                                     },
@@ -516,21 +522,22 @@ async fn run_cell<H: CellHost>(
     host.closed().await;
 }
 
-fn send_observer_event(observer: Option<Observer>, event: CellEvent) -> Result<(), CellEvent> {
-    let Some(observer) = observer else {
-        return Err(event);
-    };
-    send_cell_event(observer.response_tx, event)
-}
-
-fn send_cell_event(
-    response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
+fn send_observer_event(
+    cell_state: &CellState,
+    observer: &mut Option<Observer>,
     event: CellEvent,
 ) -> Result<(), CellEvent> {
-    match response_tx.send(Ok(event)) {
-        Ok(()) => Ok(()),
-        Err(Ok(event)) => Err(event),
-        Err(Err(error)) => panic!("cell event delivery returned an actor error: {error:?}"),
+    let Some(observer_to_send) = observer.take() else {
+        return Err(event);
+    };
+    let mode = observer_to_send.mode;
+    match cell_state.deliver_progress(observer_to_send.response_tx, event) {
+        ProgressDelivery::Delivered => Ok(()),
+        ProgressDelivery::ReceiverClosed(event) => Err(event),
+        ProgressDelivery::Rejected { response_tx, event } => {
+            *observer = Some(Observer { mode, response_tx });
+            Err(event)
+        }
     }
 }
 
