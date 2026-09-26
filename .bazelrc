@@ -99,6 +99,10 @@ common:ci --build_metadata=VISIBILITY=PUBLIC
 common:ci --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=0
 common:ci --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebuginfo=0
 
+# Keep local CI Rust actions lean without inheriting remote CI behavior.
+common:ci-local --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=0
+common:ci-local --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebuginfo=0
+
 # Disable disk cache in CI since we have a remote one and aren't using persistent workers.
 common:ci --disk_cache=
 
