@@ -328,6 +328,9 @@ async fn run_cell<H: CellHost>(
                     continue;
                 };
                 match event {
+                    // Preserve the observer and queued output until termination delivers its final event.
+                    RuntimeEvent::Started | RuntimeEvent::Pending | RuntimeEvent::YieldRequested
+                        if termination => {}
                     RuntimeEvent::Started => {
                         yield_timer = observer.as_ref().and_then(observer_timer);
                     }

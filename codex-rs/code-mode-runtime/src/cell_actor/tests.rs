@@ -163,6 +163,33 @@ fn spawn_cell_actor_harness_with_host_and_failure_handler<H: CellHost>(
     }
 }
 
+async fn assert_termination_delivers_queued_output(
+    termination: CellEventFuture,
+    initial_event_rx: oneshot::Receiver<Result<CellEvent, CellError>>,
+    task: tokio::task::JoinHandle<()>,
+) {
+    let expected = Ok(CellEvent::Terminated {
+        content_items: vec![OutputItem::Text {
+            text: "queued output".to_string(),
+        }],
+    });
+    let (termination_result, observer_result) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let termination_result = termination.await;
+            let observer_result = initial_event_rx.await.expect("initial observer event");
+            (termination_result, observer_result)
+        })
+        .await
+        .expect("termination event timed out");
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cell actor task timed out")
+        .expect("cell actor task");
+
+    assert_eq!(termination_result, expected.clone());
+    assert_eq!(observer_result, expected);
+}
+
 #[tokio::test]
 async fn unexpected_runtime_thread_exit_is_reported_to_the_session_owner() {
     let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
@@ -272,6 +299,99 @@ async fn queued_termination_preempts_unobserved_runtime_completion() {
     assert_eq!(termination.await, terminated.clone());
     assert_eq!(harness.initial_event_rx.await.unwrap(), terminated);
     harness.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_started_and_zero_yield_deadline() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::ZERO));
+    harness.event_tx.send(RuntimeEvent::Started).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_yield_requested() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::from_secs(60)));
+    harness.event_tx.send(RuntimeEvent::YieldRequested).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_pending_frontier() {
+    let harness = spawn_cell_actor_harness(ObserveMode::PendingFrontier);
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_when_runtime_channel_closes() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::from_secs(60)));
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    drop(harness.event_tx);
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
 }
 
 #[tokio::test]
