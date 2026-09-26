@@ -46,8 +46,8 @@ jobs:
   sdks:
     # Keep the Bazel/TypeScript SDK validation required, but run it on public
     # GitHub infrastructure. The Bazel wrapper already has an unauthenticated
-    # fallback when the BuildBuddy secret is unavailable. A cold local Bazel
-    # A cold standard hosted runner can approach the hosted-runner execution limit,
+    # fallback when the BuildBuddy secret is unavailable. A cold standard hosted
+    # runner can approach the hosted-runner execution limit,
     # so allow that full window without reducing SDK test coverage.
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -78,11 +78,42 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Set up Bazel CI
-        id: setup_bazel
-        uses: ./.github/actions/setup-bazel-ci
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK packages
+        run: pnpm -r --filter ./sdk/typescript run build
+
+      - name: Lint SDK packages
+        run: pnpm -r --filter ./sdk/typescript run lint
+
+      - name: Prepare Bazel CI
+        id: prepare_bazel
+        uses: ./.github/actions/prepare-bazel-ci
         with:
           target: x86_64-unknown-linux-gnu
+          cache-scope: sdk
+
+      - name: Configure SDK Bazel action cache
+        id: sdk_action_cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          action_cache_path="${CI_BUILD_ROOT}/sdk-action-cache"
+          mkdir -p "${action_cache_path}"
+          echo "path=${action_cache_path}" >> "${GITHUB_OUTPUT}"
+          echo "SDK_BAZEL_DISK_CACHE=${action_cache_path}" >> "${GITHUB_ENV}"
+
+      - name: Restore SDK Bazel action cache
+        id: restore_sdk_action_cache
+        continue-on-error: true
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.sdk_action_cache.outputs.path }}
+          key: sdk-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            sdk-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            sdk-actions-v1-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build codex with Bazel
         env:
@@ -92,6 +123,11 @@ jobs:
           set -euo pipefail
           codex_target="//codex-rs/cli:codex"
           code_mode_host_target="//codex-rs/code-mode-host:codex-code-mode-host"
+          bazel_action_cache_args=(
+            "--disk_cache=${SDK_BAZEL_DISK_CACHE}"
+            "--experimental_disk_cache_gc_max_size=4G"
+            "--experimental_disk_cache_gc_idle_delay=1s"
+          )
 
           # Use the shared CI wrapper so fork PRs fall back cleanly when
           # BuildBuddy credentials are unavailable. This workflow needs the
@@ -101,6 +137,7 @@ jobs:
             --remote-download-toplevel \
             -- \
             build \
+            "${bazel_action_cache_args[@]}" \
             --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
             --build_metadata=TAG_job=sdk \
             -- \
@@ -118,6 +155,7 @@ jobs:
               ./.github/scripts/run-bazel-ci.sh \
                 -- \
                 cquery \
+                "${bazel_action_cache_args[@]}" \
                 --output=files \
                 -- \
                 "${target}" \
@@ -160,25 +198,60 @@ jobs:
           set -euo pipefail
           "${CODEX_EXEC_PATH}" --version
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build SDK packages
-        run: pnpm -r --filter ./sdk/typescript run build
-
-      - name: Lint SDK packages
-        run: pnpm -r --filter ./sdk/typescript run lint
-
       - name: Test SDK packages
         run: pnpm -r --filter ./sdk/typescript run test
 
-      - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.setup_bazel.outputs.cache-hit != 'true'
+      - name: Check SDK Bazel action cache size
+        id: sdk_action_cache_size
+        if: always() && !cancelled() && steps.sdk_action_cache.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          action_cache_path="${CI_BUILD_ROOT}/sdk-action-cache"
+          action_cache_entries="$(find "${action_cache_path}" -mindepth 1 -print -quit 2>/dev/null || true)"
+          if [[ -z "${action_cache_entries}" ]]; then
+            echo "Skipping SDK Bazel action cache upload because the cache is empty." >> "${GITHUB_STEP_SUMMARY}"
+            echo "save=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          action_cache_size_output="$(du -sb -- "${action_cache_path}")"
+          action_cache_size_bytes="${action_cache_size_output%%[[:space:]]*}"
+          action_cache_max_size_bytes=$((4 * 1024 * 1024 * 1024))
+          if (( action_cache_size_bytes > action_cache_max_size_bytes )); then
+            echo "Skipping SDK Bazel action cache upload: ${action_cache_size_bytes} bytes exceeds the 4 GiB upload budget." >> "${GITHUB_STEP_SUMMARY}"
+            echo "save=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "SDK Bazel action cache is ${action_cache_size_bytes} bytes; eligible for upload (4 GiB budget)." >> "${GITHUB_STEP_SUMMARY}"
+          echo "save=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Save SDK Bazel action cache
+        if: always() && !cancelled() && steps.sdk_action_cache_size.outputs.save == 'true' && steps.restore_sdk_action_cache.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ steps.setup_bazel.outputs.repository-cache-path }}
-          key: bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
+          path: ${{ steps.sdk_action_cache.outputs.path }}
+          key: sdk-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.sha }}
+
+      - name: Save bazel repository cache
+        if: always() && !cancelled() && steps.prepare_bazel.outcome == 'success' && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+
+      - name: Upload Bazel execution logs
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: sdk execution logs
+          path: ${{ runner.temp }}/bazel-execution-logs
+          if-no-files-found: ignore
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
