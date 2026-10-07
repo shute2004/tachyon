@@ -13,9 +13,31 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/setup-bazel-ci
+    - id: prepare_bazel
+      uses: ./.github/actions/prepare-bazel-ci
       with:
         target: ${{ inputs.target }}
+        cache-scope: argument-comment-lint
+
+    - name: Configure argument comment lint Bazel action cache
+      id: lint_action_cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        action_cache_path="${CI_BUILD_ROOT}/lint-action-cache"
+        mkdir -p "${action_cache_path}"
+        echo "path=${action_cache_path}" >> "${GITHUB_OUTPUT}"
+        echo "ARGUMENT_COMMENT_LINT_BAZEL_DISK_CACHE=${action_cache_path}" >> "${GITHUB_ENV}"
+
+    - name: Restore argument comment lint Bazel action cache
+      id: restore_lint_action_cache
+      continue-on-error: true
+      uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.lint_action_cache.outputs.path }}
+        key: lint-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml', 'tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain') }}-${{ github.sha }}
+        restore-keys: |
+          lint-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml', 'tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain') }}-
 
     - name: Install Linux sandbox build dependencies
       if: ${{ runner.os == 'Linux' }}
@@ -31,10 +53,16 @@ runs:
       shell: bash
       run: |
         bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
+        bazel_action_cache_args=(
+          "--disk_cache=${ARGUMENT_COMMENT_LINT_BAZEL_DISK_CACHE}"
+          "--experimental_disk_cache_gc_max_size=2G"
+          "--experimental_disk_cache_gc_idle_delay=1s"
+        )
         ./.github/scripts/run-bazel-ci.sh \
           -- \
           build \
           --config=argument-comment-lint \
+          "${bazel_action_cache_args[@]}" \
           --keep_going \
           --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
           -- \
@@ -46,8 +74,66 @@ runs:
         BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
       shell: bash
       run: |
+        bazel_action_cache_args=(
+          "--disk_cache=${ARGUMENT_COMMENT_LINT_BAZEL_DISK_CACHE}"
+          "--experimental_disk_cache_gc_max_size=2G"
+          "--experimental_disk_cache_gc_idle_delay=1s"
+        )
         ./.github/scripts/run-argument-comment-lint-bazel.sh \
           --config=argument-comment-lint \
           --platforms=//:local_windows \
+          "${bazel_action_cache_args[@]}" \
           --keep_going \
           --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+
+    - name: Check argument comment lint Bazel action cache size
+      id: lint_action_cache_size
+      if: always() && !cancelled() && steps.lint_action_cache.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        ACTION_CACHE_PATH: ${{ steps.lint_action_cache.outputs.path }}
+      run: |
+        python_command=python3
+        if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+          python_command=python
+        fi
+        "${python_command}" ./.github/scripts/check_bazel_cache_size.py "${ACTION_CACHE_PATH}"
+
+    - name: Save argument comment lint Bazel action cache
+      if: >-
+        always() &&
+        !cancelled() &&
+        steps.prepare_bazel.outcome == 'success' &&
+        steps.lint_action_cache.outcome == 'success' &&
+        steps.lint_action_cache_size.outputs.save == 'true' &&
+        steps.restore_lint_action_cache.outputs.cache-hit != 'true' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      continue-on-error: true
+      uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.lint_action_cache.outputs.path }}
+        key: lint-actions-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'MODULE.bazel.lock', 'codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml', 'tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain') }}-${{ github.sha }}
+
+    - name: Save Bazel repository cache
+      if: >-
+        always() &&
+        !cancelled() &&
+        steps.prepare_bazel.outcome == 'success' &&
+        steps.prepare_bazel.outputs.repository-cache-hit != 'true' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      continue-on-error: true
+      uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+        key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+
+    - name: Upload argument comment lint Bazel execution logs
+      if: always() && !cancelled()
+      continue-on-error: true
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      with:
+        name: argument-comment-lint-bazel-logs-${{ inputs.target }}
+        path: ${{ runner.temp }}/bazel-execution-logs
+        if-no-files-found: ignore
+        retention-days: 1

@@ -135,7 +135,7 @@ raise SystemExit(int(os.environ["FAKE_BAZEL_STATUS"]))
             self.assertIn("--config=ci-local", test_call[0])
             self.assertIn("--config=ci-local", info_call[0])
 
-    def test_keyless_windows_cross_compile_keeps_local_platform_resolution(self) -> None:
+    def test_keyless_windows_cross_compile_uses_gnullvm_host_and_exec_platforms(self) -> None:
         with TemporaryDirectory() as temp_dir:
             result, calls = self.run_ci(
                 temp_dir,
@@ -153,6 +153,39 @@ raise SystemExit(int(os.environ["FAKE_BAZEL_STATUS"]))
             invocation = self.command_calls(calls, "test")[0]
             self.assertIn("--config=ci-local", invocation)
             self.assertNotIn("--config=ci-windows-cross", invocation)
+            self.assertIn("--host_platform=//:local_windows", invocation)
+            self.assertIn("--platforms=//:windows_x86_64_gnullvm", invocation)
+            self.assertIn(
+                "--extra_execution_platforms=//:windows_x86_64_gnullvm", invocation
+            )
+            self.assertIn(
+                "--extra_toolchains=//:windows_gnullvm_tests_on_gnullvm_host_toolchain",
+                invocation,
+            )
+            self.assertIn("--jobs=8", invocation)
+            self.assertFalse(any("//:rbe" in arg for arg in invocation))
+            self.assertNotIn("--host_platform=//:local_windows_msvc", invocation)
+            self.assertNotIn(
+                "--extra_execution_platforms=//:windows_x86_64_msvc", invocation
+            )
+
+    def test_keyless_windows_cross_compile_preserves_explicit_msvc_host(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result, calls = self.run_ci(
+                temp_dir,
+                [
+                    "--windows-cross-compile",
+                    "--windows-msvc-host-platform",
+                    "--",
+                    "test",
+                    "--",
+                    "//codex-rs/cli:tests",
+                ],
+                runner_os="Windows",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocation = self.command_calls(calls, "test")[0]
             self.assertIn("--host_platform=//:local_windows_msvc", invocation)
             self.assertIn("--platforms=//:windows_x86_64_gnullvm", invocation)
             self.assertIn(
@@ -162,8 +195,155 @@ raise SystemExit(int(os.environ["FAKE_BAZEL_STATUS"]))
                 "--extra_toolchains=//:windows_gnullvm_tests_on_msvc_host_toolchain",
                 invocation,
             )
-            self.assertIn("--jobs=8", invocation)
-            self.assertFalse(any("//:rbe" in arg for arg in invocation))
+            self.assertNotIn("--host_platform=//:local_windows", invocation)
+
+    def test_keyless_windows_cross_compile_respects_caller_platform_overrides(self) -> None:
+        explicit_args = [
+            "--host_platform=//:custom_host",
+            "--platforms=//:custom_target",
+            "--extra_execution_platforms=//:custom_exec",
+            "--extra_toolchains=//:custom_test_toolchain",
+        ]
+        with TemporaryDirectory() as temp_dir:
+            result, calls = self.run_ci(
+                temp_dir,
+                [
+                    "--windows-cross-compile",
+                    "--",
+                    "build",
+                    *explicit_args,
+                    "--",
+                    "//codex-rs/cli:codex",
+                ],
+                runner_os="Windows",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocation = self.command_calls(calls, "build")[0]
+            for arg in explicit_args:
+                self.assertIn(arg, invocation)
+            self.assertNotIn("--host_platform=//:local_windows", invocation)
+            self.assertNotIn("--platforms=//:windows_x86_64_gnullvm", invocation)
+            self.assertNotIn(
+                "--extra_execution_platforms=//:windows_x86_64_gnullvm", invocation
+            )
+            self.assertNotIn(
+                "--extra_toolchains=//:windows_gnullvm_tests_on_gnullvm_host_toolchain",
+                invocation,
+            )
+
+    def test_keyless_windows_cross_compile_respects_split_form_platform_overrides(self) -> None:
+        explicit_args = [
+            "--host_platform",
+            "//:custom_host",
+            "--platforms",
+            "//:custom_target",
+            "--extra_execution_platforms",
+            "//:custom_exec",
+            "--extra_toolchains",
+            "//:custom_test_toolchain",
+        ]
+        with TemporaryDirectory() as temp_dir:
+            result, calls = self.run_ci(
+                temp_dir,
+                [
+                    "--windows-cross-compile",
+                    "--",
+                    "build",
+                    *explicit_args,
+                    "--",
+                    "//codex-rs/cli:codex",
+                ],
+                runner_os="Windows",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocation = self.command_calls(calls, "build")[0]
+            for arg in explicit_args:
+                self.assertIn(arg, invocation)
+            self.assertNotIn("--host_platform=//:local_windows", invocation)
+            self.assertNotIn("--platforms=//:windows_x86_64_gnullvm", invocation)
+            self.assertNotIn(
+                "--extra_execution_platforms=//:windows_x86_64_gnullvm", invocation
+            )
+            self.assertNotIn(
+                "--extra_toolchains=//:windows_gnullvm_tests_on_gnullvm_host_toolchain",
+                invocation,
+            )
+
+    def test_explicit_msvc_host_preserves_split_form_caller_host_platform(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result, calls = self.run_ci(
+                temp_dir,
+                [
+                    "--windows-msvc-host-platform",
+                    "--",
+                    "build",
+                    "--host_platform",
+                    "//:custom_host",
+                    "--",
+                    "//codex-rs/cli:codex",
+                ],
+                runner_os="Windows",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocation = self.command_calls(calls, "build")[0]
+            self.assertIn("--host_platform", invocation)
+            self.assertIn("//:custom_host", invocation)
+            self.assertNotIn("--host_platform=//:local_windows_msvc", invocation)
+
+    def test_keyed_windows_cross_compile_keeps_rbe_configuration(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result, calls = self.run_ci(
+                temp_dir,
+                [
+                    "--windows-cross-compile",
+                    "--",
+                    "build",
+                    "--",
+                    "//codex-rs/cli:codex",
+                ],
+                runner_os="Windows",
+                api_key="test-token",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocation = self.command_calls(calls, "build")[0]
+            self.assertIn("--config=ci-windows-cross", invocation)
+            self.assertIn("--host_platform=//:rbe", invocation)
+            self.assertIn("--shell_executable=/bin/bash", invocation)
+            self.assertNotIn("--config=ci-local", invocation)
+            self.assertNotIn("--host_platform=//:local_windows", invocation)
+            self.assertFalse(
+                any(arg.startswith("--extra_execution_platforms=") for arg in invocation)
+            )
+
+    def test_keyless_windows_build_test_and_query_failures_preserve_exit_status(self) -> None:
+        for command in ("build", "test", "cquery"):
+            with self.subTest(command=command), TemporaryDirectory() as temp_dir:
+                bazel_args = [command]
+                if command == "cquery":
+                    bazel_args.extend(
+                        ["--output=label", "deps(//codex-rs/cli:codex)"]
+                    )
+                result, calls = self.run_ci(
+                    temp_dir,
+                    [
+                        "--windows-cross-compile",
+                        "--",
+                        *bazel_args,
+                        "--",
+                        "//codex-rs/cli:codex",
+                    ],
+                    runner_os="Windows",
+                    bazel_status=37,
+                )
+
+                self.assertEqual(result.returncode, 37, result.stderr)
+                invocation = self.command_calls(calls, command)
+                self.assertEqual(len(invocation), 1, calls)
+                self.assertIn("--host_platform=//:local_windows", invocation[0])
 
     def test_keyed_linux_invocation_keeps_remote_ci_configuration(self) -> None:
         with TemporaryDirectory() as temp_dir:

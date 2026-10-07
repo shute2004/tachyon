@@ -255,10 +255,8 @@ if [[ ${#bazel_args[@]} -eq 0 || ${#bazel_targets[@]} -eq 0 ]]; then
 fi
 
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
-  # Windows cross-compilation depends on authenticated RBE. Preserve the local
-  # Windows build shape when credentials are unavailable.
+  # Keep the Windows CI tuning while selecting the local GNU-ABI host below.
   ci_config=ci-windows
-  windows_msvc_host_platform=1
 fi
 
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
@@ -285,7 +283,7 @@ fi
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; then
   has_host_platform_override=0
   for arg in "${bazel_args[@]}"; do
-    if [[ "$arg" == --host_platform=* ]]; then
+    if [[ "$arg" == "--host_platform" || "$arg" == --host_platform=* ]]; then
       has_host_platform_override=1
       break
     fi
@@ -298,38 +296,50 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
     # explicit `--platforms=...` flag.
     post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
   fi
+fi
 
-  if [[ $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
-    has_platform_override=0
-    has_extra_execution_platforms_override=0
-    has_extra_toolchains_override=0
-    for arg in "${bazel_args[@]}"; do
-      case "$arg" in
-        --platforms=*)
-          has_platform_override=1
-          ;;
-        --extra_execution_platforms=*)
-          has_extra_execution_platforms_override=1
-          ;;
-        --extra_toolchains=*)
-          has_extra_toolchains_override=1
-          ;;
-      esac
-    done
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  has_host_platform_override=0
+  has_platform_override=0
+  has_extra_execution_platforms_override=0
+  has_extra_toolchains_override=0
+  for arg in "${bazel_args[@]}"; do
+    case "$arg" in
+      --host_platform | --host_platform=*)
+        has_host_platform_override=1
+        ;;
+      --platforms | --platforms=*)
+        has_platform_override=1
+        ;;
+      --extra_execution_platforms | --extra_execution_platforms=*)
+        has_extra_execution_platforms_override=1
+        ;;
+      --extra_toolchains | --extra_toolchains=*)
+        has_extra_toolchains_override=1
+        ;;
+    esac
+  done
 
-    if [[ $has_platform_override -eq 0 ]]; then
-      post_config_bazel_args+=("--platforms=//:windows_x86_64_gnullvm")
-    fi
+  if [[ $has_host_platform_override -eq 0 && $windows_msvc_host_platform -eq 0 ]]; then
+    post_config_bazel_args+=("--host_platform=//:local_windows")
+  fi
 
-    # The cross config normally supplies the Windows MSVC execution platform
-    # and the test toolchain that pairs it with the gnullvm target. Preserve
-    # those test-resolution inputs in the local fallback without reintroducing
-    # the cross config's Linux RBE platform.
-    if [[ $has_extra_execution_platforms_override -eq 0 ]]; then
+  if [[ $has_platform_override -eq 0 ]]; then
+    post_config_bazel_args+=("--platforms=//:windows_x86_64_gnullvm")
+  fi
+
+  if [[ $has_extra_execution_platforms_override -eq 0 ]]; then
+    if [[ $windows_msvc_host_platform -eq 1 ]]; then
       post_config_bazel_args+=("--extra_execution_platforms=//:windows_x86_64_msvc")
+    else
+      post_config_bazel_args+=("--extra_execution_platforms=//:windows_x86_64_gnullvm")
     fi
-    if [[ $has_extra_toolchains_override -eq 0 ]]; then
+  fi
+  if [[ $has_extra_toolchains_override -eq 0 ]]; then
+    if [[ $windows_msvc_host_platform -eq 1 ]]; then
       post_config_bazel_args+=("--extra_toolchains=//:windows_gnullvm_tests_on_msvc_host_toolchain")
+    else
+      post_config_bazel_args+=("--extra_toolchains=//:windows_gnullvm_tests_on_gnullvm_host_toolchain")
     fi
   fi
 fi
