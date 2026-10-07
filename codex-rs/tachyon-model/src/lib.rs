@@ -26,6 +26,7 @@
 //! assert_eq!(route.transport(), ModelTransport::Http);
 //! ```
 
+pub mod backend;
 pub mod route;
 
 use std::sync::Arc;

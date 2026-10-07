@@ -122,6 +122,15 @@ ModelTurnRuntime                           Codex adapter
 
 The Codex adapter still provides explicit migration paths for provider-specific or not-yet-extracted semantics. Request shapes that cannot round-trip through the canonical request IR remain on the legacy `Prompt` fallback. On the event side, product/backend notifications and unsupported output shapes remain on an explicit Codex compatibility side channel rather than being forced into `ModelEvent`.
 
+Hosts may also supply a canonical `ModelBackend` through `ModelRuntime::from_backend` and
+`StartThreadOptions::with_model_runtime`. Regular sampling and tool follow-ups then consume
+canonical events without Codex sidecars. The selected runtime is fixed for the session;
+provider identity is checked before each request. Canonical backends require representable
+history and tool declarations, and reject unsupported prompts rather than silently using a
+legacy fallback. Tool output schemas and custom namespace descriptions are not yet represented
+by this IR, so the default full tool set is not supported by canonical backends. Compaction, realtime,
+and delegated-child backend migration are not completed by this sampling slice.
+
 The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
 which has no Core, provider, authentication, or UI dependency. Core retains its existing IR
 import path through re-exports. The model-runtime source layout includes:
@@ -129,6 +138,8 @@ import path through re-exports. The model-runtime source layout includes:
 ```text
 codex-rs/tachyon-model/src/
 ├── lib.rs                   # canonical provider-neutral request/event vocabulary
+├── backend.rs               # provider-neutral factory, turn handle, and event-source contract
+├── backend_tests.rs         # factory lifecycle and canonical stream tests
 ├── route.rs                 # provider/protocol/transport identities
 └── tests.rs                 # focused IR semantics tests
 
@@ -141,6 +152,8 @@ codex-rs/core/src/model_runtime/
 ├── codex_request_tests.rs   # focused request conversion tests
 ├── codex_event.rs           # transitional event conversion / compatibility boundary
 ├── codex_event_tests.rs     # focused event conversion tests
+├── harness_event.rs         # canonical lifecycle projection into existing history/tool handlers
+├── harness_event_tests.rs   # canonical mapping and Codex sidecar preservation tests
 ├── codex_adapter.rs         # transitional Codex/OpenAI implementation
 ├── retry.rs                 # model-stream retry policy
 └── retry_tests.rs           # retry policy tests

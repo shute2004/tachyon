@@ -60,6 +60,35 @@ The existing twelve IR semantics tests live with the owning crate. Core separate
 cross-path type identity and its adapter conversions. This ownership move does not yet make
 the complete model runtime or agent loop independent of Codex.
 
+## Executable backend boundary
+
+`tachyon-model::backend` defines a session-scoped `ModelBackend` factory, a fresh
+provider-bound `ModelTurnBackend` for each harness turn, and an ordered canonical event
+source. A selected model ID is passed separately from the provider identity. Backends own
+their endpoint, authentication, transport, and reusable private resources; these do not
+cross the canonical contract.
+
+A host selects this runtime with `ModelRuntime::from_backend` and
+`StartThreadOptions::with_model_runtime`. Session startup snapshots that selection, rather
+than looking it up from mutable extension data on every turn. The normal sampling path
+keeps one backend handle across tool follow-ups and checks its provider identity before
+each request. Fatal or unsupported requests are not retried; retryable backend failures
+use the existing bounded stream retry policy.
+
+Canonical output reaches the existing history and tool handlers through a transitional
+projection, without invented Codex event context or response IDs. Raw Responses telemetry
+remains exclusive to the Codex path. The Codex adapter retains its lossless legacy fallback;
+a canonical backend instead rejects prompts containing unsupported history or tool declarations.
+Tool output schemas and custom namespace descriptions are not represented yet; these are
+unextracted tool semantics, not inherently provider-specific mechanisms. Consequently the
+default full tool set is not supported by this canonical sampling slice.
+
+This slice does not implement canonical compaction, reasoning-content section starts, or
+automatic backend inheritance for delegated child threads. Those operations remain
+explicitly unsupported or on their existing Codex paths. Realtime and delegated WebSocket
+capability checks still retain the legacy client. The complete agent loop is not yet a
+standalone provider-neutral crate.
+
 Tool runtimes use a separate result-side vocabulary for client discovery: `ToolResultContent::DiscoveredTools`
 contains result-specific semantic function/free-form declarations with namespace, schema or grammar,
 strictness, and immediate/deferred availability. The Codex adapter converts those declarations to

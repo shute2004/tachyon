@@ -17,6 +17,7 @@ use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
+use crate::model_runtime::ModelRuntime;
 use crate::plugins::plugins_manager_for_config;
 use crate::session::step_context::StepContext;
 use crate::shell::default_user_shell;
@@ -269,6 +270,7 @@ impl StepContext {
     }
 }
 
+mod canonical_backend_tests;
 mod guardian_tests;
 
 struct InstructionsTestCase {
@@ -6262,6 +6264,26 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         }),
     )
     .expect("initialize test hooks");
+    let model_client = ModelClient::new(
+        Some(auth_manager.clone()),
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        session_configuration.provider.info().clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.originator.clone(),
+        config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        /*concurrent_reasoning_summaries_enabled*/
+        config
+            .features
+            .enabled(Feature::ConcurrentReasoningSummaries),
+        /*attestation_provider*/ None,
+        config.http_client_factory(),
+    );
+    let model_runtime = ModelRuntime::from_codex_client(model_client.clone());
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
@@ -6317,25 +6339,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(auth_manager.clone()),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.info().clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::ContentItemKinds),
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
-        ),
+        model_runtime,
+        model_client,
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
@@ -8494,6 +8499,26 @@ where
         }),
     )
     .expect("initialize test hooks");
+    let model_client = ModelClient::new(
+        Some(Arc::clone(&auth_manager)),
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        session_configuration.provider.info().clone(),
+        session_configuration.session_source.clone(),
+        session_configuration.originator.clone(),
+        config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
+        config.features.enabled(Feature::EnableRequestCompression),
+        config.features.enabled(Feature::RuntimeMetrics),
+        Session::build_model_client_beta_features_header(config.as_ref()),
+        /*concurrent_reasoning_summaries_enabled*/
+        config
+            .features
+            .enabled(Feature::ConcurrentReasoningSummaries),
+        /*attestation_provider*/ None,
+        config.http_client_factory(),
+    );
+    let model_runtime = ModelRuntime::from_codex_client(model_client.clone());
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
@@ -8549,25 +8574,8 @@ where
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(Arc::clone(&auth_manager)),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.info().clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::ContentItemKinds),
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
-        ),
+        model_runtime,
+        model_client,
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),

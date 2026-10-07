@@ -8,6 +8,7 @@ use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::mcp::McpManager;
+use crate::model_runtime::ModelRuntime;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
 use crate::session::GitEnrichmentPolicy;
@@ -261,6 +262,12 @@ impl StartThreadOptions {
             client_mcp_extensions: ClientMcpExtensions::default(),
             reserved_thread_id: None,
         }
+    }
+
+    /// Uses `model_runtime` for regular sampling in the new thread.
+    pub fn with_model_runtime(mut self, model_runtime: ModelRuntime) -> Self {
+        self.thread_extension_init.insert(model_runtime);
+        self
     }
 }
 
