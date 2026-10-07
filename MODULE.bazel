@@ -258,6 +258,7 @@ windows_gnullvm_rust = use_extension(
     "windows_gnullvm_rust",
 )
 use_repo(windows_gnullvm_rust, "wr_gnullvm_stable")
+
 register_toolchains("@wr_gnullvm_stable//:toolchain")
 
 register_toolchains("@default_rust_toolchains//:all")
