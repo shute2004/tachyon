@@ -9,6 +9,22 @@
 //! regular sampling requests through `ModelRequest` while unsupported Codex/Responses-only shapes
 //! remain on an explicit migration fallback. C3 begins moving the stream consumer to canonical
 //! `ModelEvent` semantics while keeping unsupported/product events on a compatibility side channel.
+//!
+//! A route keeps provider identity, protocol identity, and transport as separate dimensions:
+//!
+//! ```
+//! use tachyon_model::route::{ModelProtocol, ModelProviderId, ModelRoute, ModelTransport};
+//!
+//! let route = ModelRoute::new(
+//!     ModelProviderId::new("example-provider"),
+//!     ModelProtocol::new("example.protocol"),
+//!     ModelTransport::Http,
+//! );
+//!
+//! assert_eq!(route.provider_id().id(), "example-provider");
+//! assert_eq!(route.protocol().id(), "example.protocol");
+//! assert_eq!(route.transport(), ModelTransport::Http);
+//! ```
 
 pub mod route;
 
