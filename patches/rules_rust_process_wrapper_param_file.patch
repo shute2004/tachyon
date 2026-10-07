@@ -1,6 +1,9 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+index 9622cdd7adc50295c9ca6fd38b7f40914cde6bed..3a9bd224942337b9343bb342d34f70c6fcd8a565 100644
 --- a/rust/private/rustc.bzl
 +++ b/rust/private/rustc.bzl
-@@ -1122,4 +1122,10 @@
+@@ -1121,6 +1121,12 @@
+ 
      # Wrapper args first
      process_wrapper_flags = ctx.actions.args()
 +
@@ -11,15 +14,21 @@
 +    process_wrapper_flags.use_param_file("@%s", use_always = True)
  
      for build_env_file in build_env_files:
+         process_wrapper_flags.add("--env-file", build_env_file)
+diff --git a/util/process_wrapper/flags.rs b/util/process_wrapper/flags.rs
+index 8ea9557d43b2b9b94b91edc15bcf1fe0930c9ada..3cd8c4d936489ab4cdde3157d3721ef95157e3ad 100644
 --- a/util/process_wrapper/flags.rs
 +++ b/util/process_wrapper/flags.rs
-@@ -26,4 +26,5 @@
+@@ -25,6 +25,7 @@
+     ValueMissing(String),
      ProvidedMultipleTimes(String),
      ProgramNameMissing,
 +    ParamFileReadError { path: String, error: String },
  }
  
-@@ -39,4 +40,10 @@
+ impl fmt::Display for FlagParseError {
+@@ -38,6 +39,12 @@
+             Self::ProgramNameMissing => {
                  write!(f, "program name (argv[0]) missing")
              }
 +            Self::ParamFileReadError { path, error } => {
@@ -30,13 +39,17 @@
 +            }
          }
      }
-@@ -144,4 +151,5 @@
+ }
+@@ -143,6 +150,7 @@
+     }
  
      pub(crate) fn parse(mut self, argv: Vec<String>) -> Result<ParseOutcome, FlagParseError> {
 +        let argv = expand_param_file(argv)?;
          let mut argv_iter = argv.into_iter().peekable();
          let program_name = argv_iter.next().ok_or(FlagParseError::ProgramNameMissing)?;
-@@ -186,4 +194,33 @@
+ 
+@@ -185,6 +193,35 @@
+     }
  }
  
 +fn expand_param_file(argv: Vec<String>) -> Result<Vec<String>, FlagParseError> {
@@ -70,7 +83,9 @@
 +
  fn consume_args<I: Iterator<Item = String>>(
      flag: &str,
-@@ -203,3 +240,111 @@
+     argv_iter: &mut Peekable<I>,
+@@ -202,5 +239,113 @@
+ }
  
  #[cfg(test)]
 +mod param_file_test {
