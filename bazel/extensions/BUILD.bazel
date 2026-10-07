@@ -1,3 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["codex_release_archive.bzl"])
+exports_files([
+    "codex_release_archive.bzl",
+    "windows_rust.bzl",
+])
