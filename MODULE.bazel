@@ -169,6 +169,9 @@ rules_rust.patch(
         # Skip transient native-Windows linker outputs while consolidating
         # dependency search paths.
         "//patches:rules_rust_windows_process_wrapper_skip_temp_outputs.patch",
+        # Spill the process-wrapper argv to a response file so Windows action
+        # launches remain below CreateProcessW's command-line limit.
+        "//patches:rules_rust_process_wrapper_param_file.patch",
     ],
     strip = 1,
 )

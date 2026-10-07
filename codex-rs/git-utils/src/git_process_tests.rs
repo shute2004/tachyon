@@ -60,7 +60,7 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
         .env("RELEASE_WRAPPER_FILE", &release_wrapper_file);
 
     let (mut wrapper, process_tree) = spawn_git_command(&mut command).expect("spawn Git wrapper");
-    let child_pid = tokio::time::timeout(Duration::from_secs(30), async {
+    let child_pid = match tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(child_pid) = std::fs::read_to_string(&child_pid_file)
                 && !child_pid.trim().is_empty()
@@ -72,7 +72,32 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
         }
     })
     .await
-    .expect("wait for Git wrapper child readiness");
+    {
+        Ok(child_pid) => child_pid,
+        Err(readiness_timeout) => {
+            drop(process_tree);
+            let wrapper_diagnostics = match tokio::time::timeout(
+                Duration::from_secs(3),
+                wrapper.wait_with_output(),
+            )
+            .await
+            {
+                Ok(Ok(output)) => format!(
+                    "exit status: {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ),
+                Ok(Err(error)) => format!("failed to collect wrapper output: {error}"),
+                Err(collection_timeout) => {
+                    format!("timed out collecting wrapper output: {collection_timeout:?}")
+                }
+            };
+            panic!(
+                "wait for Git wrapper child readiness: {readiness_timeout:?}\n{wrapper_diagnostics}"
+            );
+        }
+    };
 
     if matches!(wrapper_lifetime, GitWrapperLifetime::ExitBeforeTimeout) {
         std::fs::write(&release_wrapper_file, "release").expect("release Git wrapper");
