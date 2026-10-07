@@ -84,6 +84,73 @@ impl McpConnectionSet {
         Some(*self.tool_catalog_revision.read().await)
     }
 
+    #[instrument(level = "trace", skip_all)]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "call preparation must remain serialized with catalog replacement"
+    )]
+    pub(crate) async fn prepare_call_for_tool(
+        self: &Arc<Self>,
+        config: Arc<crate::McpConfig>,
+        advertised_tool: &ToolInfo,
+    ) -> Option<PreparedMcpCall> {
+        let server_name = &advertised_tool.server_name;
+        let view = self.servers.get(server_name)?;
+        if !view.tool_filter.allows(&advertised_tool.tool.name) {
+            return None;
+        }
+
+        let mut client = view.connection.client().await.ok()?;
+        client.tool_timeout = view.tool_timeout;
+
+        // Keep the revision read guard through both the Apps override read and call construction.
+        let revision = self.tool_catalog_revision.read().await;
+        let current_tools = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+            self.codex_apps_tools_override
+                .read()
+                .await
+                .clone()
+                .unwrap_or_else(|| client.tools.clone())
+        } else {
+            client.tools.clone()
+        };
+        let mut matches = current_tools.iter().filter(|tool| {
+            tool.server_name == *server_name
+                && tool.tool.name == advertised_tool.tool.name
+                && tool.connector_id == advertised_tool.connector_id
+        });
+        let current_tool = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+
+        let mut tool_info = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+            prepare_codex_apps_tools_for_model(
+                vec![current_tool.clone()],
+                &self.tool_plugin_provenance,
+            )
+        } else {
+            crate::rmcp_client::prepare_regular_mcp_tools_for_model(
+                vec![current_tool.clone()],
+                &self.tool_plugin_provenance,
+            )
+        }
+        .pop()?;
+        if !tool_is_model_visible(&tool_info) {
+            return None;
+        }
+        tool_info = Self::with_server_metadata(tool_info, &view.metadata);
+        // Keep only the normalized callable identity from the advertised tool.
+        tool_info
+            .callable_namespace
+            .clone_from(&advertised_tool.callable_namespace);
+        tool_info
+            .callable_name
+            .clone_from(&advertised_tool.callable_name);
+
+        self.prepare_call(&tool_info, Arc::new(client), config, *revision)
+    }
+
     /// Returns all tools with model-visible names normalized.
     #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.servers.len()))]
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {

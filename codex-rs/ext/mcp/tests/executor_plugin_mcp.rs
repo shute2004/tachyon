@@ -27,6 +27,7 @@ struct ContributionSummary {
     plugin_id: String,
     plugin_display_name: String,
     selection_order: usize,
+    source_environment_id: String,
     enabled: bool,
 }
 
@@ -87,6 +88,7 @@ command = "expected-command"
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
                 selection_order: 0,
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 enabled: true,
             },
             ContributionSummary {
@@ -94,6 +96,7 @@ command = "expected-command"
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
                 selection_order: 0,
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 enabled: false,
             },
             ContributionSummary {
@@ -101,6 +104,7 @@ command = "expected-command"
                 plugin_id: "selected-root".to_string(),
                 plugin_display_name: "Selected Demo".to_string(),
                 selection_order: 0,
+                source_environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 enabled: false,
             },
         ]
@@ -274,6 +278,19 @@ default_tools_approval_mode = "auto"
         .build()
         .await?;
     let existing = selected_plugin_contributions(&config, plugin_root.path()).await?;
+    assert_eq!(
+        existing
+            .iter()
+            .map(|summary| (
+                summary.name.as_str(),
+                summary.source_environment_id.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first", LOCAL_ENVIRONMENT_ID),
+            ("second", LOCAL_ENVIRONMENT_ID),
+        ]
+    );
     let mut servers = raw_selected_plugin_contributions(&config, plugin_root.path())
         .await?
         .into_iter()
@@ -357,12 +374,14 @@ async fn selected_plugin_contributions(
                 plugin_id,
                 plugin_display_name,
                 selection_order,
+                source_environment_id,
                 config,
             } => Some(ContributionSummary {
                 name,
                 plugin_id,
                 plugin_display_name,
                 selection_order,
+                source_environment_id,
                 enabled: config.enabled,
             }),
             McpServerContribution::SelectedPluginPackage { .. } => None,

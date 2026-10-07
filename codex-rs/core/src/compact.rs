@@ -11,6 +11,7 @@ use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
 use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::codex_local_compaction_prompt;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -281,11 +282,11 @@ async fn run_compact_task_inner_impl(
             .clone()
             .for_prompt(&turn_context.model_info().input_modalities);
         let turn_input_len = turn_input.len();
-        let prompt = Prompt {
-            input: turn_input,
-            base_instructions: sess.get_base_instructions().await,
-            ..Default::default()
-        };
+        let prompt = codex_local_compaction_prompt(
+            turn_input,
+            sess.get_base_instructions().await,
+            turn_context.as_ref(),
+        );
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),

@@ -22,12 +22,13 @@ mod provider;
 
 /// Frozen MCP and connector declarations for one selected package.
 ///
-/// Each server config retains the stable logical environment ID. Reconnection may replace the
-/// concrete environment instance without changing that authority.
+/// The plugin root's source environment is retained separately from each server's execution
+/// environment. Reconnection may replace a concrete environment instance without changing either.
 #[derive(Clone)]
 struct SelectedPluginMetadata {
     plugin_id: String,
     plugin_display_name: String,
+    source_environment_id: String,
     servers: Vec<(String, codex_config::McpServerConfig)>,
     connector_ids: Vec<String>,
 }
@@ -89,6 +90,10 @@ impl SelectedExecutorPluginMcpContributor {
                 return None;
             }
         };
+        let codex_protocol::capabilities::CapabilityRootLocation::Environment {
+            environment_id,
+            ..
+        } = &selected_root.location;
         let metadata = match plugin {
             Some(plugin) => {
                 // MCP server declarations and app connector declarations are separate
@@ -121,6 +126,7 @@ impl SelectedExecutorPluginMcpContributor {
                 Some(SelectedPluginMetadata {
                     plugin_id: plugin.plugin().selected_root_id().to_string(),
                     plugin_display_name: plugin.plugin().manifest().display_name().to_string(),
+                    source_environment_id: environment_id.clone(),
                     servers,
                     connector_ids,
                 })
@@ -234,6 +240,7 @@ fn project_metadata(
             plugin_id: plugin.plugin_id.clone(),
             plugin_display_name: plugin.plugin_display_name.clone(),
             selection_order,
+            source_environment_id: plugin.source_environment_id.clone(),
             config: Box::new(config),
         })
         .collect::<Vec<_>>();

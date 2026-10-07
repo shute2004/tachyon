@@ -5,11 +5,11 @@ use crate::realtime_conversation::handle_start as handle_realtime_conversation_s
 use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
 use async_channel::Receiver;
 use codex_otel::set_parent_from_w3c_trace_context;
-use codex_protocol::protocol::Submission;
 use tracing::Instrument;
 use tracing::debug_span;
 use tracing::info_span;
 
+use crate::session::SessionSubmission;
 use crate::session::session::Session;
 use crate::session::thread_settings;
 use crate::session::turn_input;
@@ -37,6 +37,7 @@ use codex_protocol::protocol::RealtimeConversationListVoicesResponseEvent;
 use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ReviewRequest;
+use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnAbortReason;
@@ -512,12 +513,14 @@ pub async fn review(
 pub(super) async fn submission_loop(
     sess: Arc<Session>,
     config: Arc<Config>,
-    rx_sub: Receiver<Submission>,
+    rx_sub: Receiver<SessionSubmission>,
 ) {
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
-    while let Ok(sub) = rx_sub.recv().await {
-        debug!(?sub, "Submission");
+    while let Ok(session_submission) = rx_sub.recv().await {
+        debug!(?session_submission, "Submission");
+        let input_source = session_submission.input_source;
+        let sub = session_submission.submission;
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
             match sub.op {
@@ -569,7 +572,14 @@ pub(super) async fn submission_loop(
                     mode,
                     reply,
                 } => {
-                    let result = turn_input::handle(&sess, *request, mode, sub.id.clone()).await;
+                    let result = turn_input::handle_with_source(
+                        &sess,
+                        *request,
+                        mode,
+                        sub.id.clone(),
+                        input_source,
+                    )
+                    .await;
                     let _ = reply.send(result);
                     false
                 }

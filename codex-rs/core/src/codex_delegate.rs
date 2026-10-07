@@ -26,6 +26,7 @@ use crate::session::GitEnrichmentPolicy;
 use crate::session::SUBMISSION_CHANNEL_CAPACITY;
 use crate::session::SessionIo;
 use crate::session::SessionSpawnArgs;
+use crate::session::SessionSubmission;
 use crate::session::emit_subagent_session_started;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -211,7 +212,7 @@ pub(crate) async fn run_codex_thread_one_shot(
 
     // Send the initial input to kick off the one-shot turn.
     let submission = io
-        .submit_turn_input(
+        .submit_synthetic_turn_input(
             TurnInputRequest::user_input(input).on_start(TurnStartOptions {
                 final_output_json_schema,
                 service_tier: None,
@@ -246,13 +247,16 @@ pub(crate) async fn run_codex_thread_one_shot(
             let _ = tx_bridge.send(event).await;
             if should_shutdown {
                 let _ = ops_tx
-                    .send(Submission {
-                        id: "shutdown".to_string(),
-                        op: Op::Shutdown {},
-                        trace: None,
-                        parent_turn_id: None,
-                        root_turn_id: None,
-                    })
+                    .send(
+                        Submission {
+                            id: "shutdown".to_string(),
+                            op: Op::Shutdown {},
+                            trace: None,
+                            parent_turn_id: None,
+                            root_turn_id: None,
+                        }
+                        .into(),
+                    )
                     .await;
                 child_cancel.cancel();
                 break;
@@ -353,7 +357,7 @@ async fn forward_event_or_shutdown(
 /// Forward ops from a caller to a sub-agent, respecting cancellation.
 async fn forward_ops(
     io: Arc<SessionIo>,
-    rx_ops: Receiver<Submission>,
+    rx_ops: Receiver<SessionSubmission>,
     cancel_token_ops: CancellationToken,
 ) {
     loop {
@@ -361,7 +365,7 @@ async fn forward_ops(
             Ok(Ok(submission)) => submission,
             Ok(Err(_)) | Err(_) => break,
         };
-        let _ = io.submit_with_id(submission).await;
+        let _ = io.submit_session_submission(submission).await;
     }
 }
 

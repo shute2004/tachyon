@@ -112,6 +112,7 @@ impl McpServerContributor<Config> for SelectedPluginMcpServer {
                 plugin_id: "selected-plugin@test".to_string(),
                 plugin_display_name: "selected-plugin".to_string(),
                 selection_order: 0,
+                source_environment_id: self.environment_id.clone(),
                 config: Box::new(config),
             }]
         })

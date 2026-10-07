@@ -204,13 +204,7 @@ impl McpHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let prepared_mcp_call = invocation
-            .session
-            .prepare_mcp_call(
-                &self.tool_info.server_name,
-                self.tool_info.tool.name.as_ref(),
-            )
-            .await;
+        let prepared_mcp_call = invocation.session.prepare_mcp_call(&self.tool_info).await;
         let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
             let tool = call.tool_info();
             McpToolContext::new(

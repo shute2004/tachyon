@@ -15,6 +15,7 @@
 mod codex_adapter;
 mod codex_event;
 mod codex_request;
+mod historical_selection;
 pub mod ir;
 pub(crate) mod retry;
 pub mod route;
@@ -39,9 +40,43 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
+pub(crate) use historical_selection::HistoricalModelSelection;
 use ir::ModelRequest;
 use route::ModelProviderId;
 pub(crate) use tool_result::to_response_item as tool_result_to_response_item;
+
+/// Migration-only bridge from the current Codex turn context into prior-turn metadata.
+pub(crate) fn historical_model_selection_from_codex_turn_context(
+    turn_context: &crate::session::turn_context::TurnContext,
+) -> HistoricalModelSelection {
+    codex_adapter::historical_model_selection_from_codex_turn_context(turn_context)
+}
+
+/// Migration-only bridge from the existing serialized Codex turn context item into prior-turn
+/// metadata. The model and provider-private program are taken atomically from that item.
+pub(crate) fn historical_model_selection_from_codex_turn_context_item(
+    turn_context: &codex_protocol::protocol::TurnContextItem,
+) -> HistoricalModelSelection {
+    codex_adapter::historical_model_selection_from_codex_turn_context_item(turn_context)
+}
+
+/// Migration-only bridge restoring a prior model selection onto a cloned Codex turn context.
+pub(crate) async fn codex_turn_context_for_historical_selection(
+    current: &crate::session::turn_context::TurnContext,
+    selection: &HistoricalModelSelection,
+    models_manager: &codex_models_manager::manager::SharedModelsManager,
+) -> crate::session::turn_context::TurnContext {
+    codex_adapter::turn_context_for_historical_selection(current, selection, models_manager).await
+}
+
+/// Migration-only bridge constructing a local compaction prompt from its selected turn context.
+pub(crate) fn codex_local_compaction_prompt(
+    input: Vec<ResponseItem>,
+    base_instructions: codex_protocol::models::BaseInstructions,
+    turn_context: &crate::session::turn_context::TurnContext,
+) -> Prompt {
+    codex_adapter::local_compaction_prompt(input, base_instructions, turn_context)
+}
 
 /// Transitional C2 bridge: project the current Codex prompt into canonical request semantics when
 /// doing so is lossless. Unsupported provider-specific history/state stays on the legacy path.

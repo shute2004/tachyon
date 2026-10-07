@@ -17,6 +17,7 @@ use super::ExecServerReconnectStrategy;
 use super::INITIAL_REGISTRY_MAX_RETRIES;
 use super::INITIAL_REGISTRY_OPERATION_TIMEOUT;
 use super::INITIAL_REGISTRY_REQUEST_TIMEOUT;
+use super::PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT;
 use crate::ExecServerError;
 use crate::NoiseChannelIdentity;
 use crate::NoiseChannelPublicKey;
@@ -24,6 +25,9 @@ use crate::NoiseRendezvousConnectBundle;
 use crate::NoiseRendezvousConnectProvider;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT;
+use crate::client_api::Deferred;
+use crate::client_api::DeferredEnvironmentReadiness;
+use crate::client_api::ExecServerTransportParams;
 
 #[derive(Default)]
 struct SequenceNoiseConnectProvider {
@@ -83,9 +87,31 @@ impl SequenceNoiseConnectProvider {
             codex_http_client::HttpClientFactory::new(
                 codex_http_client::OutboundProxyPolicy::ReqwestDefault,
             ),
+            /*provisioning_deadline*/ None,
         )
         .await
         .map(|(connection, options, _)| (connection, options))
+    }
+
+    async fn connect_provisioned(
+        self: &Arc<Self>,
+        identity: &NoiseChannelIdentity,
+        readiness: DeferredEnvironmentReadiness,
+    ) -> Result<ExecServerClient, ExecServerError> {
+        let provider: Arc<dyn NoiseRendezvousConnectProvider> = self.clone();
+        ExecServerClient::connect_for_transport(
+            ExecServerTransportParams::Deferred(Box::new(Deferred {
+                readiness,
+                transport: ExecServerTransportParams::NoiseRendezvous {
+                    provider,
+                    identity: identity.clone(),
+                },
+            })),
+            codex_http_client::HttpClientFactory::new(
+                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+            ),
+        )
+        .await
     }
 }
 
@@ -154,6 +180,187 @@ async fn initial_noise_connection_bounds_offline_retries() -> Result<()> {
     assert!((4..=INITIAL_REGISTRY_MAX_RETRIES as usize + 1).contains(&requests));
     sequence.assert_requested_identity(&identity, requests);
     assert!(started.elapsed() <= INITIAL_REGISTRY_OPERATION_TIMEOUT);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provisioned_noise_connection_bounds_offline_retries() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    for _ in 0..1024 {
+        sequence.push_error(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ));
+    }
+    let (_readiness_tx, readiness) = tokio::sync::watch::channel(Some(Ok(())));
+    let identity = NoiseChannelIdentity::generate()?;
+    let started = tokio::time::Instant::now();
+
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("a provisioned executor that stays offline must time out");
+
+    assert!(crate::client::is_environment_offline_error(&error));
+    assert_eq!(started.elapsed(), PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT);
+    let requests = sequence.requested_keys().len();
+    assert!(requests > INITIAL_REGISTRY_MAX_RETRIES as usize + 1);
+    sequence.assert_requested_identity(&identity, requests);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provisioned_noise_connection_keeps_other_registry_retry_limits() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    for _ in 0..=INITIAL_REGISTRY_MAX_RETRIES {
+        sequence.push_error(registry_error(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ));
+    }
+    let (_readiness_tx, readiness) = tokio::sync::watch::channel(Some(Ok(())));
+    let identity = NoiseChannelIdentity::generate()?;
+    let started = tokio::time::Instant::now();
+
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("only an offline executor receives the provisioning grace");
+
+    assert!(matches!(
+        error,
+        ExecServerError::EnvironmentRegistryHttp {
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
+            ..
+        }
+    ));
+    assert!(started.elapsed() <= INITIAL_REGISTRY_OPERATION_TIMEOUT);
+    assert!(sequence.requested_keys().len() <= INITIAL_REGISTRY_MAX_RETRIES as usize + 1);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provisioned_noise_connection_bounds_a_stalled_retry_request() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    sequence.push_error(registry_error(
+        http::StatusCode::CONFLICT,
+        "environment_offline",
+    ));
+    for _ in 0..INITIAL_REGISTRY_MAX_RETRIES {
+        sequence.push_pending();
+    }
+    let (_readiness_tx, readiness) = tokio::sync::watch::channel(Some(Ok(())));
+    let identity = NoiseChannelIdentity::generate()?;
+    let started = tokio::time::Instant::now();
+
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("a stalled registry request must keep the ordinary timeout");
+
+    assert!(matches!(
+        error,
+        ExecServerError::EnvironmentRegistryRequest(error) if error.is_timeout()
+    ));
+    assert_eq!(started.elapsed(), INITIAL_REGISTRY_OPERATION_TIMEOUT);
+    let requests = sequence.requested_keys().len();
+    assert!((2..=3).contains(&requests));
+    sequence.assert_requested_identity(&identity, requests);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provisioned_noise_connection_stops_on_a_late_permanent_error() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    for _ in 0..10 {
+        sequence.push_error(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ));
+    }
+    sequence.push_error(registry_error(http::StatusCode::FORBIDDEN, "forbidden"));
+    let (_readiness_tx, readiness) = tokio::sync::watch::channel(Some(Ok(())));
+    let identity = NoiseChannelIdentity::generate()?;
+    let started = tokio::time::Instant::now();
+
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("a permanent error must stop provisioning retries");
+
+    assert!(matches!(
+        error,
+        ExecServerError::EnvironmentRegistryHttp {
+            status: http::StatusCode::FORBIDDEN,
+            code: Some(code),
+            ..
+        } if code == "forbidden"
+    ));
+    sequence.assert_requested_identity(&identity, /*requests*/ 11);
+    assert!(started.elapsed() > INITIAL_REGISTRY_OPERATION_TIMEOUT);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provisioned_noise_grace_starts_after_readiness_succeeds() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    for _ in 0..1024 {
+        sequence.push_error(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ));
+    }
+    let identity = NoiseChannelIdentity::generate()?;
+    let (readiness_tx, readiness) = tokio::sync::watch::channel(None);
+    let connecting = tokio::spawn({
+        let sequence = sequence.clone();
+        let identity = identity.clone();
+        async move { sequence.connect_provisioned(&identity, readiness).await }
+    });
+
+    tokio::task::yield_now().await;
+    assert!(sequence.requested_keys().is_empty());
+    tokio::time::advance(PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT * 2).await;
+    tokio::task::yield_now().await;
+    assert!(sequence.requested_keys().is_empty());
+
+    readiness_tx.send(Some(Ok(())))?;
+    let started_after_readiness = tokio::time::Instant::now();
+    let error = connecting
+        .await?
+        .err()
+        .expect("the executor remains offline for the full grace period");
+
+    assert!(crate::client::is_environment_offline_error(&error));
+    assert_eq!(
+        started_after_readiness.elapsed(),
+        PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT
+    );
+    assert!(sequence.requested_keys().len() > INITIAL_REGISTRY_MAX_RETRIES as usize + 1);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_provisioning_does_not_request_a_noise_bundle() -> Result<()> {
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    let identity = NoiseChannelIdentity::generate()?;
+    let (_readiness_tx, readiness) =
+        tokio::sync::watch::channel(Some(Err("provisioning failed".to_string())));
+
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("failed provisioning must stop before transport startup");
+
+    assert!(
+        matches!(error, ExecServerError::Disconnected(message) if message.contains("provisioning failed"))
+    );
+    assert!(sequence.requested_keys().is_empty());
     Ok(())
 }
 
@@ -429,5 +636,78 @@ async fn initial_noise_connection_refreshes_bundle_after_exhausting_initial_retr
     sequence.assert_requested_identity(&identity, INITIAL_REGISTRY_MAX_RETRIES as usize + 3);
     unauthorized_server.await??;
     accepted_server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provisioned_noise_grace_deadline_is_not_extended_by_unauthorized_refresh() -> Result<()> {
+    let unauthorized_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let unauthorized_url = format!("ws://{}", unauthorized_listener.local_addr()?);
+    let unauthorized_server = tokio::spawn(async move {
+        let (mut socket, _) = unauthorized_listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await?;
+        socket
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        socket.shutdown().await?;
+        anyhow::Ok(())
+    });
+
+    let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    sequence.push_response(async {
+        tokio::time::pause();
+        Err(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ))
+    });
+    for _ in 1..30 {
+        sequence.push_error(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ));
+    }
+    let unauthorized_bundle = test_bundle(unauthorized_url.clone())?;
+    sequence.push_response(async move {
+        tokio::time::resume();
+        Ok(unauthorized_bundle)
+    });
+    sequence.push_response(async {
+        tokio::time::pause();
+        Err(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ))
+    });
+    for _ in 0..1024 {
+        sequence.push_error(registry_error(
+            http::StatusCode::CONFLICT,
+            "environment_offline",
+        ));
+    }
+
+    let (_readiness_tx, readiness) = tokio::sync::watch::channel(Some(Ok(())));
+    let identity = NoiseChannelIdentity::generate()?;
+    let started = tokio::time::Instant::now();
+    let error = sequence
+        .connect_provisioned(&identity, readiness)
+        .await
+        .err()
+        .expect("offline retries after a 401 must stop at the original grace deadline");
+
+    assert!(crate::client::is_environment_offline_error(&error));
+    assert!(started.elapsed() >= PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT);
+    assert!(
+        started.elapsed()
+            < PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT + std::time::Duration::from_secs(2)
+    );
+    assert_eq!(sequence.returned_urls(), vec![unauthorized_url]);
+    let requests = sequence.requested_keys().len();
+    assert!(requests > 30);
+    sequence.assert_requested_identity(&identity, requests);
+    unauthorized_server.await??;
     Ok(())
 }

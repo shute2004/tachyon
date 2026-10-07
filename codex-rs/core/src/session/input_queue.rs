@@ -3,6 +3,7 @@ use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_history::InputAssociation;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -13,6 +14,8 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
+use tokio::sync::SemaphorePermit;
 use tokio::sync::watch;
 
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
@@ -23,6 +26,12 @@ pub enum TurnInput {
     UserInput {
         content: Vec<UserInput>,
         client_id: Option<String>,
+        /// Durable reservation associated with this accepted input, if available.
+        ///
+        /// This is intentionally process-local: serialized or restored queue entries do not
+        /// carry an association and cannot claim a newly admitted input identity.
+        #[serde(skip)]
+        input_association: Option<InputAssociation>,
     },
     // Preserve the existing serialized format while carrying injection API metadata
     // through the in-memory queue.
@@ -78,6 +87,7 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    turn_input_admission: Semaphore,
 }
 
 struct PendingMailboxCommunication {
@@ -92,7 +102,22 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            turn_input_admission: Semaphore::new(1),
         }
+    }
+
+    /// Serialize reply-bearing turn-input admission transactions for this session.
+    ///
+    /// Semaphore waiters proceed in poll order; this does not establish ordering by timestamp,
+    /// client ID, or input origin. The gate covers only `handle` / `handle_recovery` admission,
+    /// not mailbox/task lifecycle, interrupts, shutdown, or unrelated settings updates.
+    /// Callers acquire it before active-turn and per-turn-state locks. It is not a durability,
+    /// human-origin, or transcript-evidence guarantee.
+    pub(super) async fn acquire_admission(&self) -> SemaphorePermit<'_> {
+        self.turn_input_admission
+            .acquire()
+            .await
+            .expect("turn-input admission semaphore is never closed")
     }
 
     pub(crate) async fn subscribe_activity(
@@ -481,6 +506,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                     client_id: None,
+                    input_association: None,
                 }],
             )
             .await;
@@ -502,6 +528,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                     client_id: None,
+                    input_association: None,
                 }],
             )
             .await;

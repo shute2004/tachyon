@@ -318,6 +318,23 @@ async fn apply_metadata_update(
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
                     })?;
+            if let (Some(updated_at), Some(existing)) =
+                (patch.updated_at.as_ref(), existing.as_ref())
+                && patch.is_empty_except_updated_at()
+                && rollout_path
+                    .as_deref()
+                    .is_none_or(|path| path == existing.rollout_path.as_path())
+            {
+                let touched = state_db
+                    .touch_thread_updated_at(thread_id, *updated_at)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!("failed to update thread timestamp for {thread_id}: {err}"),
+                    })?;
+                if touched {
+                    return Ok(());
+                }
+            }
             let project_id = if existing.is_none()
                 && let Some(Some(project_id)) = patch.project_id.as_ref()
                 && state_db

@@ -46,7 +46,19 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - text, tool-input, and reasoning deltas;
 - request completion and provider-reported token usage.
 
-The Rust definitions live in `codex-rs/core/src/model_runtime/ir.rs` during extraction.
+The Rust definitions live in the `tachyon-model` crate at
+`codex-rs/tachyon-model/src/lib.rs`. This crate depends only on `std` and `serde_json`,
+not on Core, provider protocols, authentication, or UI crates. Core's
+`codex-rs/core/src/model_runtime/ir.rs` re-exports those same types for existing callers;
+there is no second IR definition or conversion between the two import paths.
+
+The existing provider, protocol, transport, and route identities likewise belong to
+`tachyon-model::route`; Core retains `model_runtime::route` as a compatibility re-export.
+Endpoint resolution, authentication, and concrete transport execution remain adapter-owned.
+
+The existing twelve IR semantics tests live with the owning crate. Core separately checks
+cross-path type identity and its adapter conversions. This ownership move does not yet make
+the complete model runtime or agent loop independent of Codex.
 
 Tool runtimes use a separate result-side vocabulary for client discovery: `ToolResultContent::DiscoveredTools`
 contains result-specific semantic function/free-form declarations with namespace, schema or grammar,

@@ -49,7 +49,7 @@ impl Session {
             (
                 state
                     .previous_turn_settings()
-                    .map(|previous| previous.model)
+                    .map(|previous| previous.model_selection.model_id().to_string())
                     .or_else(|| {
                         state
                             .base_instructions_provenance

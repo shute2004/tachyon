@@ -122,13 +122,21 @@ ModelTurnRuntime                           Codex adapter
 
 The Codex adapter still provides explicit migration paths for provider-specific or not-yet-extracted semantics. Request shapes that cannot round-trip through the canonical request IR remain on the legacy `Prompt` fallback. On the event side, product/backend notifications and unsupported output shapes remain on an explicit Codex compatibility side channel rather than being forced into `ModelEvent`.
 
-The model-runtime source layout now includes canonical request and event conversion bridges:
+The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
+which has no Core, provider, authentication, or UI dependency. Core retains its existing IR
+import path through re-exports. The model-runtime source layout includes:
 
 ```text
+codex-rs/tachyon-model/src/
+├── lib.rs                   # canonical provider-neutral request/event vocabulary
+├── route.rs                 # provider/protocol/transport identities
+└── tests.rs                 # focused IR semantics tests
+
 codex-rs/core/src/model_runtime/
 ├── mod.rs                   # Tachyon-facing runtime boundary
-├── ir.rs                    # canonical provider-neutral request/event vocabulary
-├── ir_tests.rs              # focused IR semantics tests
+├── ir.rs                    # compatibility re-exports from tachyon-model
+├── ir_tests.rs              # cross-path type identity test
+├── route.rs                 # compatibility re-exports from tachyon-model::route
 ├── codex_request.rs         # transitional request conversion / lossless fallback boundary
 ├── codex_request_tests.rs   # focused request conversion tests
 ├── codex_event.rs           # transitional event conversion / compatibility boundary

@@ -432,13 +432,16 @@ impl CodexThread {
         let (reply, result) = oneshot::channel();
         self.io
             .tx_sub
-            .send(Submission {
-                id: new_submission_id(),
-                op: Op::SuspendTurnAndShutdown { reply },
-                trace: current_span_w3c_trace_context(),
-                parent_turn_id: None,
-                root_turn_id: None,
-            })
+            .send(
+                Submission {
+                    id: new_submission_id(),
+                    op: Op::SuspendTurnAndShutdown { reply },
+                    trace: current_span_w3c_trace_context(),
+                    parent_turn_id: None,
+                    root_turn_id: None,
+                }
+                .into(),
+            )
             .await
             .map_err(|_| CodexErr::Fatal("thread session has stopped".to_string()))?;
         let outcome = result
