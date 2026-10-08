@@ -109,10 +109,32 @@ struct PowershellParserProcess {
     // Request ids are monotonic within one child process so the caller can detect protocol
     // desynchronization if stdout is contaminated or the child is unexpectedly replaced.
     next_request_id: u64,
+    diagnostic_label: Option<&'static str>,
 }
 
 impl PowershellParserProcess {
     fn spawn(executable: &str) -> std::io::Result<Self> {
+        Self::spawn_inner(executable, /*diagnostic_label*/ None)
+    }
+
+    fn spawn_with_diagnostics(
+        executable: &str,
+        diagnostic_label: &'static str,
+    ) -> std::io::Result<Self> {
+        Self::spawn_inner(executable, Some(diagnostic_label))
+    }
+
+    fn spawn_inner(
+        executable: &str,
+        diagnostic_label: Option<&'static str>,
+    ) -> std::io::Result<Self> {
+        emit_parser_diagnostic(
+            diagnostic_label,
+            "spawn",
+            "start",
+            /*pid*/ None,
+            /*request_id*/ None,
+        );
         let mut command = Command::new(executable);
         command
             .args([
@@ -127,6 +149,7 @@ impl PowershellParserProcess {
             .stderr(Stdio::null());
         codex_protocol::shell_environment::scrub_non_inheritable_env_vars(&mut command);
         let mut child = command.spawn()?;
+        let child_id = child.id();
         let stdin = match take_child_stdin(&mut child) {
             Ok(stdin) => stdin,
             Err(error) => {
@@ -141,12 +164,30 @@ impl PowershellParserProcess {
                 return Err(error);
             }
         };
+        emit_parser_diagnostic(
+            diagnostic_label,
+            "spawn",
+            "ok",
+            Some(child_id),
+            /*request_id*/ None,
+        );
         Ok(Self {
             child,
             stdin,
             stdout,
             next_request_id: 0,
+            diagnostic_label,
         })
+    }
+
+    fn emit(&self, stage: &str, status: &str, request_id: Option<u64>) {
+        emit_parser_diagnostic(
+            self.diagnostic_label,
+            stage,
+            status,
+            Some(self.child.id()),
+            request_id,
+        );
     }
 
     fn parse(&mut self, script: &str) -> std::io::Result<PowershellParseOutcome> {
@@ -157,16 +198,22 @@ impl PowershellParserProcess {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let mut request_json = serialize_request(&request)?;
         request_json.push('\n');
+        self.emit("write", "start", Some(request.id));
         self.stdin.write_all(request_json.as_bytes())?;
+        self.emit("write", "ok", Some(request.id));
+        self.emit("flush", "start", Some(request.id));
         self.stdin.flush()?;
+        self.emit("flush", "ok", Some(request.id));
 
         let mut response_line = String::new();
+        self.emit("read_reply", "start", Some(request.id));
         if self.stdout.read_line(&mut response_line)? == 0 {
             return Err(std::io::Error::new(
                 ErrorKind::UnexpectedEof,
                 "PowerShell parser closed stdout",
             ));
         }
+        self.emit("read_reply", "ok", Some(request.id));
 
         let response = deserialize_response(&response_line)?;
         // Requests are serialized today; the id still catches protocol desyncs if stdout is
@@ -188,8 +235,28 @@ impl PowershellParserProcess {
 
 impl Drop for PowershellParserProcess {
     fn drop(&mut self) {
+        self.emit("drop", "start", /*request_id*/ None);
         kill_child(&mut self.child);
+        self.emit("drop", "ok", /*request_id*/ None);
     }
+}
+
+fn emit_parser_diagnostic(
+    label: Option<&'static str>,
+    stage: &str,
+    status: &str,
+    pid: Option<u32>,
+    request_id: Option<u64>,
+) {
+    let Some(label) = label else {
+        return;
+    };
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "powershell_parser_diag label={label} stage={stage} status={status} pid={pid:?} request_id={request_id:?}"
+    );
+    let _ = stderr.flush();
 }
 
 fn take_child_stdin(child: &mut Child) -> std::io::Result<ChildStdin> {
@@ -270,7 +337,27 @@ fn kill_child(child: &mut Child) {
 mod tests {
     use super::*;
     use crate::powershell::try_find_powershell_executable_blocking;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+
+    fn find_powershell_with_diagnostics(label: &'static str) -> Option<AbsolutePathBuf> {
+        emit_parser_diagnostic(
+            Some(label),
+            "discovery",
+            "start",
+            /*pid*/ None,
+            /*request_id*/ None,
+        );
+        let powershell = try_find_powershell_executable_blocking();
+        emit_parser_diagnostic(
+            Some(label),
+            "discovery",
+            if powershell.is_some() { "ok" } else { "none" },
+            /*pid*/ None,
+            /*request_id*/ None,
+        );
+        powershell
+    }
 
     #[test]
     fn parser_process_handles_multiple_requests() {
@@ -343,11 +430,13 @@ mod tests {
 
     #[test]
     fn parser_process_rejects_using_statements() {
-        let Some(powershell) = try_find_powershell_executable_blocking() else {
+        let Some(powershell) = find_powershell_with_diagnostics("using_statements") else {
             return;
         };
         let powershell = powershell.as_path().to_str().unwrap();
-        let mut parser = PowershellParserProcess::spawn(powershell).unwrap();
+        let mut parser =
+            PowershellParserProcess::spawn_with_diagnostics(powershell, "using_statements")
+                .unwrap();
 
         let parsed = parser
             .parse("using module ./codex_poc.psm1\nGet-Content Cargo.toml")
@@ -357,11 +446,12 @@ mod tests {
 
     #[test]
     fn parser_process_rejects_trap_blocks() {
-        let Some(powershell) = try_find_powershell_executable_blocking() else {
+        let Some(powershell) = find_powershell_with_diagnostics("trap_blocks") else {
             return;
         };
         let powershell = powershell.as_path().to_str().unwrap();
-        let mut parser = PowershellParserProcess::spawn(powershell).unwrap();
+        let mut parser =
+            PowershellParserProcess::spawn_with_diagnostics(powershell, "trap_blocks").unwrap();
 
         let parsed = parser
             .parse(
