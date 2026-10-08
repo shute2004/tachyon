@@ -434,6 +434,10 @@ pub(crate) fn read_resource_request_params(
     params
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the established threadless resource-read API and its explicit execution dependencies."
+)]
 pub async fn read_mcp_resource(
     config: &McpConfig,
     auth: Option<&CodexAuth>,
