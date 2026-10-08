@@ -127,9 +127,11 @@ Hosts may also supply a canonical `ModelBackend` through `ModelRuntime::from_bac
 canonical events without Codex sidecars. The selected runtime is fixed for the session;
 provider identity is checked before each request. Canonical backends require representable
 history and tool declarations, and reject unsupported prompts rather than silently using a
-legacy fallback. Tool output schemas and custom namespace descriptions are not yet represented
-by this IR, so the default full tool set is not supported by canonical backends. Compaction, realtime,
-and delegated-child backend migration are not completed by this sampling slice.
+legacy fallback. Function output schemas and explicit namespace groups preserve generic
+tool contracts, descriptions, empty groups and declaration order. Hosted WebSearch remains
+unsupported by canonical backends; client-discovery results retain their separate flat
+declaration vocabulary. Compaction, realtime and delegated-child backend migration are not
+completed by this sampling slice.
 
 The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
 which has no Core, provider, authentication, or UI dependency. Core retains its existing IR

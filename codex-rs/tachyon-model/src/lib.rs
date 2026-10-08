@@ -133,6 +133,7 @@ pub enum ModelToolSpec {
         name: String,
         description: String,
         input_schema: Value,
+        output_schema: Option<Value>,
         strict: bool,
         availability: ModelToolAvailability,
         purpose: ModelToolPurpose,
@@ -145,6 +146,14 @@ pub enum ModelToolSpec {
         input_format: ModelFreeformInputFormat,
         availability: ModelToolAvailability,
         purpose: ModelToolPurpose,
+    },
+    /// An explicitly grouped set of tools, preserving its provider-neutral description and order.
+    ///
+    /// Children are individual function or free-form declarations with no namespace of their own.
+    Namespace {
+        name: String,
+        description: String,
+        tools: Vec<ModelToolSpec>,
     },
 }
 

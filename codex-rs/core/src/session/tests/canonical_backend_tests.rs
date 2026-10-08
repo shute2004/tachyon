@@ -43,6 +43,7 @@ use tachyon_model::ModelToolCall;
 use tachyon_model::ModelToolCallId;
 use tachyon_model::ModelToolInput;
 use tachyon_model::ModelToolInputKind;
+use tachyon_model::ModelToolSpec;
 use tachyon_model::ModelUsage;
 use tachyon_model::backend::ModelBackend;
 use tachyon_model::backend::ModelBackendError;
@@ -287,22 +288,39 @@ async fn canonical_backend_test_config(codex_home: &std::path::Path) -> crate::c
     config.ephemeral = true;
     config.update_plan_enabled = true;
     config
-        .features
-        .disable(Feature::ShellTool)
-        .expect("disable shell tool for canonical backend tests");
-    config
-        .features
-        .disable(Feature::ViewImage)
-        .expect("disable view image for canonical backend tests");
-    config
-        .features
-        .disable(Feature::Collab)
-        .expect("disable collaboration for canonical backend tests");
-    config
         .web_search_mode
         .set(WebSearchMode::Disabled)
         .expect("disable web search for canonical backend tests");
     config
+}
+
+async fn canonical_eof_test_config(codex_home: &std::path::Path) -> crate::config::Config {
+    let mut config = canonical_backend_test_config(codex_home).await;
+    config
+        .features
+        .disable(Feature::ShellTool)
+        .expect("disable shell tool for bounded EOF test");
+    config
+        .features
+        .disable(Feature::ViewImage)
+        .expect("disable view image for bounded EOF test");
+    config
+        .features
+        .disable(Feature::Collab)
+        .expect("disable collaboration for bounded EOF test");
+    config
+}
+
+fn find_model_function<'a>(tools: &'a [ModelToolSpec], name: &str) -> Option<&'a ModelToolSpec> {
+    tools.iter().find_map(|tool| match tool {
+        ModelToolSpec::Function {
+            name: tool_name, ..
+        } if tool_name == name => Some(tool),
+        ModelToolSpec::Namespace {
+            tools: children, ..
+        } => find_model_function(children, name),
+        ModelToolSpec::Function { .. } | ModelToolSpec::Freeform { .. } => None,
+    })
 }
 
 fn assert_successful_turn(events: &[EventMsg], label: &str) {
@@ -433,13 +451,15 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
     assert_eq!(requests[1].turn_index, 0);
     assert_eq!(requests[2].turn_index, 1);
     assert!(requests.iter().all(|request| request.model_id == model_id));
-    assert!(requests
-        .first()
-        .expect("initial request")
-        .request
-        .tools
-        .iter()
-        .any(|tool| matches!(tool, tachyon_model::ModelToolSpec::Function { name, .. } if name == "update_plan")));
+    let initial_tools = &requests.first().expect("initial request").request.tools;
+    assert!(find_model_function(initial_tools, "update_plan").is_some());
+    match find_model_function(initial_tools, "view_image") {
+        Some(ModelToolSpec::Function {
+            output_schema: Some(output_schema),
+            ..
+        }) => assert_eq!(output_schema["type"], "object"),
+        _ => panic!("expected the local view_image declaration and output schema"),
+    }
     assert!(requests[1].request.input.iter().any(|item| matches!(
         item,
         ModelInputItem::ToolResult(result) if result.call_id.0 == "call-plan"
@@ -517,7 +537,7 @@ async fn canonical_eof_is_non_retryable_and_codex_eof_keeps_legacy_error() {
     assert!(!canonical_eof_error.is_retryable());
 
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
-    let config = canonical_backend_test_config(codex_home.path()).await;
+    let config = canonical_eof_test_config(codex_home.path()).await;
     let backend = Arc::new(FakeBackend::closing_without_completion());
     let options = StartThreadOptions::new(config.clone())
         .with_model_runtime(ModelRuntime::from_backend(backend.clone()));

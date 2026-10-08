@@ -79,9 +79,14 @@ Canonical output reaches the existing history and tool handlers through a transi
 projection, without invented Codex event context or response IDs. Raw Responses telemetry
 remains exclusive to the Codex path. The Codex adapter retains its lossless legacy fallback;
 a canonical backend instead rejects prompts containing unsupported history or tool declarations.
-Tool output schemas and custom namespace descriptions are not represented yet; these are
-unextracted tool semantics, not inherently provider-specific mechanisms. Consequently the
-default full tool set is not supported by this canonical sampling slice.
+Function tool declarations retain their optional JSON output schemas. Explicit namespace
+groups preserve descriptions, empty groups, duplicate group boundaries and declaration order;
+their children do not declare another namespace. The Codex adapter rejects nested groups and
+discovery children instead of inventing conflict-resolution semantics. Legacy flat namespaced
+declarations retain their existing grouping behavior, separately from explicit groups.
+Hosted WebSearch remains unsupported by this canonical sampling slice. Client-discovery output
+retains its existing flat vocabulary and rejects explicit groups or output-schema declarations;
+this request-side extension does not silently expand the discovery protocol.
 
 This slice does not implement canonical compaction, reasoning-content section starts, or
 automatic backend inheritance for delegated child threads. Those operations remain

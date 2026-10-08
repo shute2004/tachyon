@@ -60,6 +60,7 @@ fn deferred_discovery_semantics_do_not_require_tool_search_wire_type() {
         name: "expensive_tool".to_string(),
         description: "Loaded after discovery".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        output_schema: None,
         strict: false,
         availability: ModelToolAvailability::Deferred,
         purpose: ModelToolPurpose::Invocation,
@@ -69,6 +70,7 @@ fn deferred_discovery_semantics_do_not_require_tool_search_wire_type() {
         name: "discover_tools".to_string(),
         description: "Discover additional tools".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        output_schema: None,
         strict: false,
         availability: ModelToolAvailability::Immediate,
         purpose: ModelToolPurpose::Discovery,
@@ -90,6 +92,106 @@ fn deferred_discovery_semantics_do_not_require_tool_search_wire_type() {
             ..
         }
     ));
+}
+
+#[test]
+fn tool_declarations_preserve_group_metadata_order_and_function_schemas() {
+    let output_schema = serde_json::json!({
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"]
+    });
+    let tools = vec![
+        ModelToolSpec::Namespace {
+            name: "workspace".to_string(),
+            description: "Workspace tools with custom guidance".to_string(),
+            tools: vec![
+                ModelToolSpec::Function {
+                    namespace: None,
+                    name: "read_file".to_string(),
+                    description: "Read a file".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    output_schema: Some(output_schema.clone()),
+                    strict: false,
+                    availability: ModelToolAvailability::Immediate,
+                    purpose: ModelToolPurpose::Invocation,
+                },
+                ModelToolSpec::Freeform {
+                    namespace: None,
+                    name: "apply_patch".to_string(),
+                    description: "Apply a patch".to_string(),
+                    input_format: ModelFreeformInputFormat::Text,
+                    availability: ModelToolAvailability::Immediate,
+                    purpose: ModelToolPurpose::Invocation,
+                },
+            ],
+        },
+        ModelToolSpec::Namespace {
+            name: "workspace".to_string(),
+            description: "A distinct empty group".to_string(),
+            tools: Vec::new(),
+        },
+        ModelToolSpec::Function {
+            namespace: None,
+            name: "plain_tool".to_string(),
+            description: "No output contract".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            strict: false,
+            availability: ModelToolAvailability::Immediate,
+            purpose: ModelToolPurpose::Invocation,
+        },
+    ];
+
+    let [
+        ModelToolSpec::Namespace {
+            name: first_name,
+            description: first_description,
+            tools: first_tools,
+        },
+        ModelToolSpec::Namespace {
+            name: second_name,
+            description: second_description,
+            tools: second_tools,
+        },
+        ModelToolSpec::Function {
+            name: plain_name,
+            output_schema: plain_output_schema,
+            ..
+        },
+    ] = tools.as_slice()
+    else {
+        panic!("expected two distinct groups followed by the root tool");
+    };
+    assert_eq!(first_name, "workspace");
+    assert_eq!(first_description, "Workspace tools with custom guidance");
+    assert_eq!(second_name, "workspace");
+    assert_eq!(second_description, "A distinct empty group");
+    assert!(second_tools.is_empty());
+    assert_eq!(plain_name, "plain_tool");
+    assert_eq!(plain_output_schema, &None);
+
+    let [
+        ModelToolSpec::Function {
+            namespace: first_namespace,
+            name: first_tool,
+            output_schema: first_output_schema,
+            ..
+        },
+        ModelToolSpec::Freeform {
+            namespace: second_namespace,
+            name: second_tool,
+            ..
+        },
+    ] = first_tools.as_slice()
+    else {
+        panic!("expected ordered function and free-form group children");
+    };
+    assert_eq!(first_namespace, &None);
+    assert_eq!(first_tool, "read_file");
+    assert_eq!(first_output_schema, &Some(output_schema));
+    assert_eq!(second_namespace, &None);
+    assert_eq!(second_tool, "apply_patch");
 }
 
 #[test]
