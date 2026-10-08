@@ -1,6 +1,8 @@
 #![cfg(target_os = "windows")]
 
 use super::WindowsSandboxSessionRequest;
+use super::backends::legacy::LegacySessionSpawnRequest;
+use super::backends::legacy::spawn_windows_sandbox_session_legacy_with_observer;
 use super::spawn_windows_sandbox_session_elevated_for_permission_profile;
 use super::spawn_windows_sandbox_session_for_level;
 use super::spawn_windows_sandbox_session_legacy;
@@ -18,6 +20,7 @@ use codex_utils_pty::ProcessDriver;
 use codex_utils_pty::ProcessSignal;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Seek;
@@ -40,9 +43,22 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+use windows_sys::Win32::Security::EqualSid;
+use windows_sys::Win32::Security::GetTokenInformation;
+use windows_sys::Win32::Security::SID_AND_ATTRIBUTES;
+use windows_sys::Win32::Security::TOKEN_GROUPS;
+use windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS;
+use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::Security::TOKEN_USER;
+use windows_sys::Win32::Security::TokenHasRestrictions;
+use windows_sys::Win32::Security::TokenIsRestricted;
+use windows_sys::Win32::Security::TokenRestrictedSids;
+use windows_sys::Win32::Security::TokenUser;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -147,6 +163,152 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(25));
     }
     path.exists()
+}
+
+unsafe fn child_token_diagnostic(
+    process: HANDLE,
+    expected_cap_sids: &[(&str, Option<*mut c_void>)],
+    expected_logon_sid: &[u8],
+    everyone_sid: &[u8],
+) -> Result<String, String> {
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn OpenProcessToken(
+            ProcessHandle: HANDLE,
+            DesiredAccess: u32,
+            TokenHandle: *mut HANDLE,
+        ) -> i32;
+    }
+
+    let mut raw_token = 0;
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw_token) } == 0 {
+        return Err(format!("OpenProcessToken(child) failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    let token_owner = unsafe { OwnedHandle::from_raw_handle(raw_token as _) };
+    let token = token_owner.as_raw_handle() as HANDLE;
+    let query = |information_class| -> Result<Vec<u8>, String> {
+        let mut needed = 0;
+        unsafe {
+            GetTokenInformation(
+                token,
+                information_class,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            );
+        }
+        if needed == 0 {
+            return Err(format!(
+                "GetTokenInformation({information_class}) size query failed: {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        let mut buffer = vec![0; needed as usize];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                information_class,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "GetTokenInformation({information_class}) failed: {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        if needed as usize > buffer.len() {
+            return Err(format!(
+                "GetTokenInformation({information_class}) returned an oversized result"
+            ));
+        }
+        buffer.truncate(needed as usize);
+        Ok(buffer)
+    };
+    let user_buffer = query(TokenUser)?;
+    if user_buffer.len() < std::mem::size_of::<TOKEN_USER>() {
+        return Err("GetTokenInformation(TokenUser) returned a short result".to_string());
+    }
+    let user = unsafe { std::ptr::read_unaligned(user_buffer.as_ptr().cast::<TOKEN_USER>()) };
+    if user.User.Sid.is_null() {
+        return Err("GetTokenInformation(TokenUser) returned a null SID".to_string());
+    }
+
+    let restricted_buffer = query(TokenRestrictedSids)?;
+    if restricted_buffer.len() < std::mem::size_of::<u32>() {
+        return Err("GetTokenInformation(TokenRestrictedSids) returned a short result".to_string());
+    }
+    let count =
+        unsafe { std::ptr::read_unaligned(restricted_buffer.as_ptr().cast::<u32>()) } as usize;
+    let entries = if count == 0 {
+        Vec::new()
+    } else {
+        let entries_offset = std::mem::offset_of!(TOKEN_GROUPS, Groups);
+        let entries_size = count
+            .checked_mul(std::mem::size_of::<SID_AND_ATTRIBUTES>())
+            .ok_or_else(|| "TokenRestrictedSids count overflowed".to_string())?;
+        if entries_offset > restricted_buffer.len()
+            || entries_size > restricted_buffer.len() - entries_offset
+        {
+            return Err("TokenRestrictedSids entries exceed the returned buffer".to_string());
+        }
+        (0..count)
+            .map(|index| unsafe {
+                std::ptr::read_unaligned(
+                    restricted_buffer
+                        .as_ptr()
+                        .add(entries_offset + index * std::mem::size_of::<SID_AND_ATTRIBUTES>())
+                        .cast::<SID_AND_ATTRIBUTES>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let attributes_for = |expected_sid| {
+        entries.iter().find_map(|entry| {
+            (!entry.Sid.is_null() && unsafe { EqualSid(entry.Sid, expected_sid) } != 0)
+                .then_some(entry.Attributes)
+        })
+    };
+    let cap_membership = expected_cap_sids
+        .iter()
+        .map(|(label, sid)| match sid {
+            Some(sid) => match attributes_for(*sid) {
+                Some(attributes) => {
+                    format!("{label}:present(attrs=0x{attributes:08x})")
+                }
+                None => format!("{label}:absent_from_child_token"),
+            },
+            None => format!("{label}:no_active_capability"),
+        })
+        .collect::<Vec<_>>();
+    let logon_attributes = attributes_for(expected_logon_sid.as_ptr() as *mut c_void);
+    let everyone_attributes = attributes_for(everyone_sid.as_ptr() as *mut c_void);
+    let user_restricted_attributes = attributes_for(user.User.Sid);
+    let attributes = entries
+        .iter()
+        .map(|entry| format!("0x{:08x}", entry.Attributes))
+        .collect::<Vec<_>>();
+    let token_flag = |information_class| -> Result<bool, String> {
+        let buffer = query(information_class)?;
+        if buffer.len() < std::mem::size_of::<u32>() {
+            return Err(format!(
+                "GetTokenInformation({information_class}) returned a short flag"
+            ));
+        }
+        Ok(unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<u32>()) } != 0)
+    };
+    let is_restricted = token_flag(TokenIsRestricted)?;
+    let has_restrictions = token_flag(TokenHasRestrictions)?;
+
+    Ok(format!(
+        "is_restricted={is_restricted} has_restrictions={has_restrictions} restricted_sid_count={} restricted_sid_attributes={attributes:?} capability_membership={cap_membership:?} logon_sid_attributes={logon_attributes:?} everyone_sid_attributes={everyone_attributes:?} token_user_attributes=0x{:08x} token_user_in_restricted_sids={user_restricted_attributes:?}",
+        entries.len(),
+        user.User.Attributes
+    ))
 }
 
 fn open_process_for_wait(pid: u32) -> std::io::Result<OwnedHandle> {
@@ -718,6 +880,15 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
         fs::write(&outside_file, "outside").expect("seed outside file");
 
+        let current_token = unsafe { crate::token::get_current_token_for_restriction() }
+            .expect("open current process token for expected logon SID");
+        let current_token = unsafe { OwnedHandle::from_raw_handle(current_token as _) };
+        let expected_logon_sid = unsafe {
+            crate::token::get_logon_sid_bytes(current_token.as_raw_handle() as HANDLE)
+        }
+        .expect("read expected logon SID");
+        let everyone_sid = unsafe { crate::token::world_sid() }.expect("read Everyone SID");
+
         let parent_acl_before = [
             icacls_snapshot("before outside_root", &outside_root).await,
             icacls_snapshot("before outside_file", &outside_file).await,
@@ -731,6 +902,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             &script,
             concat!(
                 "@echo off\r\n",
+                "set /p __codex_token_gate=LEGACY-TOKEN-DIAGNOSTIC-GATE:\r\n",
                 "del /f /q \"%WORKSPACE_DELETE%\"\r\n",
                 "del /f /q \"%TEMP_DELETE%\"\r\n",
                 "del /f /q \"%TMP_DELETE%\"\r\n",
@@ -767,9 +939,11 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         ]);
 
         let permission_profile = PermissionProfile::workspace_write();
-        let spawned = spawn_windows_sandbox_session_legacy(
+        let mut child_token_snapshot = None;
+        let workspace_roots = workspace_roots_for(workspace.as_path());
+        let request = LegacySessionSpawnRequest::new(
             &permission_profile,
-            workspace_roots_for(workspace.as_path()).as_slice(),
+            workspace_roots.as_slice(),
             codex_home.path(),
             vec![
                 "C:\\Windows\\System32\\cmd.exe".to_string(),
@@ -783,15 +957,61 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             &[],
             &[],
             /*tty*/ false,
-            /*stdin_open*/ false,
+            /*stdin_open*/ true,
             /*use_private_desktop*/ true,
+        );
+        let spawned = spawn_windows_sandbox_session_legacy_with_observer(
+            request,
+            |child_process, active_write_roots| {
+                let expected_cap_sids = [
+                    ("workspace", workspace.as_path()),
+                    ("TEMP", temp_root.as_path()),
+                    ("TMP", tmp_root.as_path()),
+                ]
+                .map(|(label, path)| {
+                    let path_key = crate::path_normalization::canonical_path_key(path);
+                    let sid = active_write_roots
+                        .iter()
+                        .find(|root_sid| {
+                            crate::path_normalization::canonical_path_key(
+                                root_sid.root.as_path(),
+                            ) == path_key
+                        })
+                        .map(|root_sid| root_sid.sid.as_ptr());
+                    (label, sid)
+                });
+                child_token_snapshot = Some(unsafe {
+                    child_token_diagnostic(
+                        child_process,
+                        &expected_cap_sids,
+                        &expected_logon_sid,
+                        &everyone_sid,
+                    )
+                });
+            },
         )
         .await
         .expect("spawn legacy delete session");
+        let stdin_release = spawned
+            .session
+            .writer_sender()
+            .send(b"\r\n".to_vec())
+            .await;
         let (stdout, exit_code) =
             collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
                 .await;
         let stdout = String::from_utf8_lossy(&stdout);
+        match child_token_snapshot {
+            Some(Ok(snapshot)) => println!("actual legacy child token: {snapshot}"),
+            Some(Err(error)) => println!("actual legacy child token query failed: {error}"),
+            None => println!("actual legacy child token was not observed"),
+        }
+        if let Err(error) = stdin_release {
+            println!("failed to release legacy child stdin gate: {error}");
+        }
+        println!(
+            "legacy constructor source flags: DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED (not reported by GetTokenInformation)"
+        );
         let parent_acl_after = [
             icacls_snapshot("after outside_root", &outside_root).await,
             icacls_snapshot("after outside_file", &outside_file).await,

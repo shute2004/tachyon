@@ -2920,12 +2920,9 @@ async fn try_run_sampling_request(
                 ));
             }
             HarnessSamplingEvent::Other(ModelRuntimeEvent::Model { event, codex }) => {
-                break Err(CodexErr::Stream(
-                    format!(
-                        "invalid transitional model event context: event={event:?}, codex={codex:?}"
-                    )
-                    .into(),
-                ));
+                break Err(CodexErr::Stream(format!(
+                    "invalid transitional model event context: event={event:?}, codex={codex:?}"
+                )));
             }
         }
     };
