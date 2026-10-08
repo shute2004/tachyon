@@ -7,9 +7,9 @@ use codex_protocol::models::ResponseItem;
 /// reused as the semantic classification for a future canonical `HistoryItem`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ResponsesToolPairingClass {
-    FunctionCallOutput,
-    ToolSearchOutput,
-    CustomToolCallOutput,
+    FunctionCall,
+    ToolSearch,
+    CustomToolCall,
 }
 
 /// Which side of a tool call/result pair an item represents.
@@ -39,7 +39,7 @@ pub(crate) struct HistoryToolCorrelation<'a> {
 pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrelation<'_>> {
     match item {
         ResponseItem::FunctionCall { call_id, .. } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCall,
             side: HistoryToolSide::Call,
             call_id,
             local_counterpart_required: true,
@@ -49,7 +49,7 @@ pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrela
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCall,
             side: HistoryToolSide::Call,
             call_id,
             local_counterpart_required: true,
@@ -58,7 +58,7 @@ pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrela
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCallOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::FunctionCall,
             side: HistoryToolSide::Output,
             call_id,
             local_counterpart_required: true,
@@ -67,7 +67,7 @@ pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrela
             call_id: Some(call_id),
             ..
         } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearchOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearch,
             side: HistoryToolSide::Call,
             call_id,
             local_counterpart_required: true,
@@ -77,20 +77,20 @@ pub(crate) fn tool_correlation(item: &ResponseItem) -> Option<HistoryToolCorrela
             execution,
             ..
         } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearchOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::ToolSearch,
             side: HistoryToolSide::Output,
             call_id,
             // Server-owned search outputs may arrive without a client-side call in history.
             local_counterpart_required: execution != "server",
         }),
         ResponseItem::CustomToolCall { call_id, .. } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCallOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCall,
             side: HistoryToolSide::Call,
             call_id,
             local_counterpart_required: true,
         }),
         ResponseItem::CustomToolCallOutput { call_id, .. } => Some(HistoryToolCorrelation {
-            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCallOutput,
+            compatibility_pairing_class: ResponsesToolPairingClass::CustomToolCall,
             side: HistoryToolSide::Output,
             call_id,
             local_counterpart_required: true,
@@ -128,11 +128,11 @@ mod tests {
         let output = tool_correlation(&output).expect("output correlation");
         assert_eq!(
             call.compatibility_pairing_class,
-            ResponsesToolPairingClass::FunctionCallOutput
+            ResponsesToolPairingClass::FunctionCall
         );
         assert_eq!(
             output.compatibility_pairing_class,
-            ResponsesToolPairingClass::FunctionCallOutput
+            ResponsesToolPairingClass::FunctionCall
         );
         assert_eq!(call.call_id, output.call_id);
         assert_eq!(call.side, HistoryToolSide::Call);
@@ -154,7 +154,7 @@ mod tests {
         let correlation = tool_correlation(&output).expect("tool search correlation");
         assert_eq!(
             correlation.compatibility_pairing_class,
-            ResponsesToolPairingClass::ToolSearchOutput
+            ResponsesToolPairingClass::ToolSearch
         );
         assert_eq!(correlation.side, HistoryToolSide::Output);
         assert!(!correlation.local_counterpart_required);

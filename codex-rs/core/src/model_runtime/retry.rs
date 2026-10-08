@@ -46,6 +46,10 @@ impl Default for ModelStreamRetryState {
 ///
 /// `allow_unbounded_connection_retry` is an explicit policy input so the generic retry module does
 /// not need to know which concrete backends opt out of that behavior.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "retry policy needs its state, request, session context, and backend runtime independently"
+)]
 pub(crate) async fn handle_retryable_turn_runtime_error(
     retry_state: &mut ModelStreamRetryState,
     max_retries: u64,
