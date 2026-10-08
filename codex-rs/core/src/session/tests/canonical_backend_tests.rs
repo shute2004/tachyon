@@ -1,6 +1,8 @@
 use super::build_test_config;
 use super::make_session_and_context;
 use super::raw_history_items;
+use crate::agent::control::SpawnAgentForkMode;
+use crate::agent::control::SpawnAgentOptions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
 use crate::model_runtime::ModelRuntime;
@@ -19,6 +21,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
@@ -68,6 +72,8 @@ struct BackendState {
     turn_count: usize,
     requested_provider_ids: Vec<String>,
     requests: Vec<RecordedRequest>,
+    child_session_factory_calls: usize,
+    child_sessions: Vec<Arc<Mutex<BackendState>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +81,7 @@ struct FakeBackend {
     state: Arc<Mutex<BackendState>>,
     route_provider_override: Option<String>,
     close_without_completion: bool,
+    simple_child_answer: bool,
 }
 
 impl FakeBackend {
@@ -83,6 +90,7 @@ impl FakeBackend {
             state: Arc::new(Mutex::new(BackendState::default())),
             route_provider_override: route_provider_override.map(str::to_string),
             close_without_completion: false,
+            simple_child_answer: false,
         }
     }
 
@@ -99,6 +107,21 @@ impl FakeBackend {
 
     fn turn_count(&self) -> usize {
         self.state.lock().expect("backend state").turn_count
+    }
+
+    fn child_session_factory_calls(&self) -> usize {
+        self.state
+            .lock()
+            .expect("backend state")
+            .child_session_factory_calls
+    }
+
+    fn child_sessions(&self) -> Vec<Arc<Mutex<BackendState>>> {
+        self.state
+            .lock()
+            .expect("backend state")
+            .child_sessions
+            .clone()
     }
 }
 
@@ -128,6 +151,29 @@ impl ModelBackend for FakeBackend {
             turn_index,
             request_index: 0,
             close_without_completion: self.close_without_completion,
+            simple_answer: self.simple_child_answer,
+        })
+    }
+
+    fn new_child_session(
+        &self,
+    ) -> ModelBackendFuture<'_, Result<Arc<dyn ModelBackend>, ModelBackendError>> {
+        let parent_state = Arc::clone(&self.state);
+        let route_provider_override = self.route_provider_override.clone();
+        Box::pin(async move {
+            let mut parent_state_guard = parent_state.lock().expect("backend state");
+            parent_state_guard.child_session_factory_calls += 1;
+            let child_state = Arc::new(Mutex::new(BackendState::default()));
+            parent_state_guard
+                .child_sessions
+                .push(Arc::clone(&child_state));
+            drop(parent_state_guard);
+            Ok(Arc::new(Self {
+                state: child_state,
+                route_provider_override,
+                close_without_completion: false,
+                simple_child_answer: true,
+            }) as Arc<dyn ModelBackend>)
         })
     }
 }
@@ -138,6 +184,7 @@ struct FakeTurnBackend {
     turn_index: usize,
     request_index: usize,
     close_without_completion: bool,
+    simple_answer: bool,
 }
 
 impl ModelTurnBackend for FakeTurnBackend {
@@ -163,6 +210,8 @@ impl ModelTurnBackend for FakeTurnBackend {
             });
         let events = if self.close_without_completion {
             vec![ModelEvent::Started]
+        } else if self.simple_answer {
+            child_answer_events(self.turn_index, request_index)
         } else {
             events_for_request(self.turn_index, request_index)
         };
@@ -173,6 +222,23 @@ impl ModelTurnBackend for FakeTurnBackend {
             Ok(Box::pin(source) as ModelEventStream)
         })
     }
+}
+
+fn child_answer_events(turn_index: usize, request_index: usize) -> Vec<ModelEvent> {
+    let id = ModelItemId(format!("child-answer-{turn_index}-{request_index}"));
+    vec![
+        ModelEvent::Started,
+        ModelEvent::OutputItemStarted(ModelOutputItemStart::Message {
+            id: id.clone(),
+            phase: Some(ModelMessagePhase::Final),
+        }),
+        ModelEvent::OutputItemCompleted(ModelOutputItem::Message {
+            id,
+            phase: Some(ModelMessagePhase::Final),
+            content: vec![ModelContent::Text("child backend answer".to_string())],
+        }),
+        completion(3, 3, Some(true)),
+    ]
 }
 
 struct FakeEventSource {
@@ -493,6 +559,137 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
         .shutdown_and_wait()
         .await
         .expect("shutdown test thread");
+}
+
+#[tokio::test]
+async fn codex_runtime_leaves_child_sessions_on_the_legacy_path() {
+    let (session, _) = make_session_and_context().await;
+    assert!(
+        session
+            .services
+            .model_runtime()
+            .new_child_session()
+            .await
+            .expect("Codex runtime preserves its legacy child path")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delegated_children_get_independent_backends_for_spawn_and_full_history_fork() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let mut config = canonical_backend_test_config(codex_home.path()).await;
+    // Full-history forks load their source from the persistent thread store.
+    config.ephemeral = false;
+    let parent_backend = Arc::new(FakeBackend::new(None));
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(parent_backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let parent = manager.start_thread(options).await.expect("start parent");
+
+    submit_user_turn(&parent.thread, "write parent history").await;
+    let parent_events = wait_for_turn_end(&parent.thread).await;
+    assert_successful_turn(&parent_events, "parent canonical turn");
+
+    let source = || {
+        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: parent.thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }))
+    };
+    let collaboration = parent
+        .thread
+        .session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            config.clone(),
+            vec![UserInput::Text {
+                text: "answer as a delegated child".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source(),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn delegated child");
+    let collaboration_thread = manager
+        .get_thread(collaboration.thread_id)
+        .await
+        .expect("collaboration child should be registered");
+    let collaboration_events = wait_for_turn_end(&collaboration_thread).await;
+    assert_successful_turn(&collaboration_events, "collaboration child canonical turn");
+
+    let fork = parent
+        .thread
+        .session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            config,
+            vec![UserInput::Text {
+                text: "answer as a full-history child".to_string(),
+                text_elements: Vec::new(),
+            }],
+            source(),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some("call-full-history".to_string()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                parent_thread_id: Some(parent.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fork delegated child with full history");
+    let fork_thread = manager
+        .get_thread(fork.thread_id)
+        .await
+        .expect("full-history child should be registered");
+    let fork_events = wait_for_turn_end(&fork_thread).await;
+    assert_successful_turn(&fork_events, "full-history child canonical turn");
+    assert!(
+        raw_history_items(&fork_thread.session.clone_history().await)
+            .into_iter()
+            .any(|item| matches!(
+                item,
+            ResponseItem::Message {
+                role,
+                phase: Some(MessagePhase::FinalAnswer),
+                content,
+                ..
+                } if role == "assistant" && content.iter().any(|part| matches!(
+                    part,
+                    ContentItem::OutputText { text } if text == "first turn answer"
+                ))
+            ))
+    );
+
+    assert_eq!(parent_backend.child_session_factory_calls(), 2);
+    let child_states = parent_backend.child_sessions();
+    assert_eq!(child_states.len(), 2);
+    assert!(!Arc::ptr_eq(&child_states[0], &parent_backend.state));
+    assert!(!Arc::ptr_eq(&child_states[1], &parent_backend.state));
+    assert!(!Arc::ptr_eq(&child_states[0], &child_states[1]));
+    for child_state in child_states {
+        let child_state = child_state.lock().expect("child backend state");
+        assert_eq!(child_state.turn_count, 1);
+        assert_eq!(child_state.requests.len(), 1);
+    }
+    assert_eq!(parent_backend.turn_count(), 1);
+    assert_eq!(parent_backend.requests().len(), 2);
+
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
 }
 
 #[tokio::test]

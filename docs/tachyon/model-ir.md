@@ -88,8 +88,16 @@ Hosted WebSearch remains unsupported by this canonical sampling slice. Client-di
 retains its existing flat vocabulary and rejects explicit groups or output-schema declarations;
 this request-side extension does not silently expand the discovery protocol.
 
-This slice does not implement canonical compaction, reasoning-content section starts, or
-automatic backend inheritance for delegated child threads. Those operations remain
+Delegated ThreadSpawn children with a registered matching parent use the parent's selected
+runtime to request an independent `ModelBackend::new_child_session` factory. Session-affinity
+and preparation state remain independent, while backend-private reusable transport/auth resources
+may be shared. An explicitly supplied child runtime wins without calling the parent factory.
+Unsupported child creation is a non-retryable error, not permission to fall back to Codex or
+share the parent factory. Already-running resumes return their existing session first. Codex
+parents retain the existing fresh-client path; Internal/Guardian sessions and general public
+forks are unchanged. Forked history does not copy provider-private continuation state.
+
+This slice does not implement canonical compaction or reasoning-content section starts. Those operations remain
 explicitly unsupported or on their existing Codex paths. Realtime and delegated WebSocket
 capability checks still retain the legacy client. The complete agent loop is not yet a
 standalone provider-neutral crate.

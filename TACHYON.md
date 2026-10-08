@@ -130,8 +130,11 @@ history and tool declarations, and reject unsupported prompts rather than silent
 legacy fallback. Function output schemas and explicit namespace groups preserve generic
 tool contracts, descriptions, empty groups and declaration order. Hosted WebSearch remains
 unsupported by canonical backends; client-discovery results retain their separate flat
-declaration vocabulary. Compaction, realtime and delegated-child backend migration are not
-completed by this sampling slice.
+declaration vocabulary. Delegated ThreadSpawn children inherit the selected backend through
+an independent child-session factory when their matching parent is registered. Explicit child
+runtime selection takes precedence; an unsupported child factory fails rather than falling back
+to Codex. Existing running resumes do not create another factory, and Codex parents retain their
+fresh-client path. Compaction and realtime backend migration are not completed by this slice.
 
 The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
 which has no Core, provider, authentication, or UI dependency. Core retains its existing IR

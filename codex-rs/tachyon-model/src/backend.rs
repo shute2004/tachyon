@@ -17,6 +17,7 @@ use std::fmt::Formatter;
 use std::fmt::{self};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
@@ -39,6 +40,27 @@ pub trait ModelBackend: std::fmt::Debug + Send + Sync {
     /// reusable provider-private resources behind the factory, but turn-affinity state must be
     /// fresh for every call.
     fn begin_turn(&self, provider_id: ModelProviderId) -> Box<dyn ModelTurnBackend>;
+
+    /// Creates an independent session-scoped backend for a delegated child session.
+    ///
+    /// The returned backend owns independent session-affinity and preparation state. An
+    /// implementation may reuse private transport or authentication resources behind that new
+    /// factory, but must not share the parent factory itself as the child's session runtime. The
+    /// returned backend still creates a fresh turn handle for every call to [`Self::begin_turn`].
+    ///
+    /// Backends that cannot create an independent child session return
+    /// [`ModelBackendError::UnsupportedRequest`]. This is reported to the caller and does not
+    /// authorize silently falling back to or sharing the parent runtime; a caller may explicitly
+    /// supply another child backend when appropriate.
+    fn new_child_session(
+        &self,
+    ) -> ModelBackendFuture<'_, Result<Arc<dyn ModelBackend>, ModelBackendError>> {
+        Box::pin(std::future::ready(Err(
+            ModelBackendError::UnsupportedRequest(
+                "independent child sessions are not supported by this backend".to_string(),
+            ),
+        )))
+    }
 
     /// Optionally prepare session-scoped resources before the first turn.
     ///

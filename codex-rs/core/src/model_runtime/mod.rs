@@ -165,6 +165,23 @@ impl ModelRuntime {
                 .map_err(model_backend_error_to_codex),
         }
     }
+
+    /// Creates an independent runtime for a delegated child session when the backend supports it.
+    ///
+    /// The Codex adapter keeps its existing child-session behavior, which constructs a fresh
+    /// legacy client in the child session. Canonical backends must return a separate session
+    /// factory rather than sharing this runtime's backend instance as the child's affinity owner.
+    pub(crate) async fn new_child_session(&self) -> Result<Option<Self>> {
+        match &self.backend {
+            ModelRuntimeBackend::Codex(_) => Ok(None),
+            ModelRuntimeBackend::Canonical(backend) => backend
+                .new_child_session()
+                .await
+                .map(Self::from_backend)
+                .map(Some)
+                .map_err(model_backend_error_to_codex),
+        }
+    }
 }
 
 /// Opaque model execution handle scoped to one harness turn.

@@ -226,3 +226,17 @@ fn factory_creates_provider_bound_turns_and_preserves_canonical_streams() {
         ]
     );
 }
+
+#[test]
+fn child_session_factory_is_unsupported_by_default() {
+    let backend = RecordingBackend::default();
+    let error = poll_ready(backend.new_child_session())
+        .expect_err("a backend must explicitly implement child-session creation");
+
+    assert_eq!(
+        error,
+        ModelBackendError::UnsupportedRequest(
+            "independent child sessions are not supported by this backend".to_string()
+        )
+    );
+}
