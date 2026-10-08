@@ -97,7 +97,7 @@ impl FakeBackend {
     fn closing_without_completion() -> Self {
         Self {
             close_without_completion: true,
-            ..Self::new(None)
+            ..Self::new(/*route_provider_override*/ None)
         }
     }
 
@@ -237,7 +237,7 @@ fn child_answer_events(turn_index: usize, request_index: usize) -> Vec<ModelEven
             phase: Some(ModelMessagePhase::Final),
             content: vec![ModelContent::Text("child backend answer".to_string())],
         }),
-        completion(3, 3, Some(true)),
+        completion(/*input_tokens*/ 3, /*total_tokens*/ 3, Some(true)),
     ]
 }
 
@@ -279,7 +279,11 @@ fn events_for_request(turn_index: usize, request_index: usize) -> Vec<ModelEvent
                     })),
                 },
             }),
-            completion(10, 12, Some(false)),
+            completion(
+                /*input_tokens*/ 10,
+                /*total_tokens*/ 12,
+                Some(false),
+            ),
         ];
     }
 
@@ -299,7 +303,7 @@ fn events_for_request(turn_index: usize, request_index: usize) -> Vec<ModelEvent
             phase: Some(ModelMessagePhase::Final),
             content: vec![ModelContent::Text(answer.to_string())],
         }),
-        completion(6, 6, Some(true)),
+        completion(/*input_tokens*/ 6, /*total_tokens*/ 6, Some(true)),
     ]
 }
 
@@ -446,7 +450,7 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
     let config = canonical_backend_test_config(codex_home.path()).await;
     let model_id = config.model.clone().expect("configured model");
     let provider_id = config.model_provider_id.clone();
-    let backend = Arc::new(FakeBackend::new(None));
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
     let options = StartThreadOptions::new(config.clone())
         .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
     assert!(
@@ -581,7 +585,7 @@ async fn delegated_children_get_independent_backends_for_spawn_and_full_history_
     let mut config = canonical_backend_test_config(codex_home.path()).await;
     // Full-history forks load their source from the persistent thread store.
     config.ephemeral = false;
-    let parent_backend = Arc::new(FakeBackend::new(None));
+    let parent_backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
     let options = StartThreadOptions::new(config.clone())
         .with_model_runtime(ModelRuntime::from_backend(parent_backend.clone()));
     let manager = ThreadManager::with_models_provider_for_tests(
@@ -702,7 +706,7 @@ async fn provider_mismatch_and_unsupported_prompt_fail_before_backend_stream() {
     ));
     assert!(mismatch_backend.requests().is_empty());
 
-    let matched_backend = Arc::new(FakeBackend::new(None));
+    let matched_backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
     let unsupported_error = stream_error_for_backend(matched_backend.clone()).await;
     assert!(matches!(
         unsupported_error.details(),
