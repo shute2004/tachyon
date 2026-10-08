@@ -17,10 +17,12 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenCountEvent;
@@ -72,6 +74,7 @@ struct BackendState {
     turn_count: usize,
     requested_provider_ids: Vec<String>,
     requests: Vec<RecordedRequest>,
+    scripted_streams: VecDeque<Vec<Result<ModelEvent, ModelBackendError>>>,
     child_session_factory_calls: usize,
     child_sessions: Vec<Arc<Mutex<BackendState>>>,
 }
@@ -122,6 +125,14 @@ impl FakeBackend {
             .expect("backend state")
             .child_sessions
             .clone()
+    }
+
+    fn queue_stream(&self, events: Vec<Result<ModelEvent, ModelBackendError>>) {
+        self.state
+            .lock()
+            .expect("backend state")
+            .scripted_streams
+            .push_back(events);
     }
 }
 
@@ -199,25 +210,28 @@ impl ModelTurnBackend for FakeTurnBackend {
     ) -> ModelBackendFuture<'a, Result<ModelEventStream, ModelBackendError>> {
         let request_index = self.request_index;
         self.request_index += 1;
-        self.state
-            .lock()
-            .expect("backend state")
-            .requests
-            .push(RecordedRequest {
+        let scripted_events = {
+            let mut state = self.state.lock().expect("backend state");
+            state.requests.push(RecordedRequest {
                 turn_index: self.turn_index,
                 model_id: model_id.to_string(),
                 request: request.clone(),
             });
-        let events = if self.close_without_completion {
-            vec![ModelEvent::Started]
-        } else if self.simple_answer {
-            child_answer_events(self.turn_index, request_index)
-        } else {
-            events_for_request(self.turn_index, request_index)
+            state.scripted_streams.pop_front()
         };
+        let events = scripted_events.unwrap_or_else(|| {
+            let fallback = if self.close_without_completion {
+                vec![ModelEvent::Started]
+            } else if self.simple_answer {
+                child_answer_events(self.turn_index, request_index)
+            } else {
+                events_for_request(self.turn_index, request_index)
+            };
+            fallback.into_iter().map(Ok).collect()
+        });
         Box::pin(async move {
             let source = FakeEventSource {
-                events: events.into_iter().map(Ok).collect(),
+                events: events.into_iter().collect(),
             };
             Ok(Box::pin(source) as ModelEventStream)
         })
@@ -379,6 +393,42 @@ async fn canonical_eof_test_config(codex_home: &std::path::Path) -> crate::confi
         .disable(Feature::Collab)
         .expect("disable collaboration for bounded EOF test");
     config
+}
+
+async fn canonical_local_compaction_test_config(
+    codex_home: &std::path::Path,
+) -> crate::config::Config {
+    let mut config = canonical_backend_test_config(codex_home).await;
+    config.model_provider.name = "Local compaction test provider".to_string();
+    config
+}
+
+fn compact_summary_events(text: &str) -> Vec<Result<ModelEvent, ModelBackendError>> {
+    let id = ModelItemId("canonical-compaction-summary".to_string());
+    vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::ReasoningSectionStarted {
+            item_id: ModelItemId("ignored-content-section".to_string()),
+            kind: tachyon_model::ModelReasoningDeltaKind::Content,
+            section_index: 0,
+        }),
+        Ok(ModelEvent::OutputItemStarted(
+            ModelOutputItemStart::Message {
+                id: id.clone(),
+                phase: Some(ModelMessagePhase::Final),
+            },
+        )),
+        Ok(ModelEvent::OutputItemCompleted(ModelOutputItem::Message {
+            id,
+            phase: Some(ModelMessagePhase::Final),
+            content: vec![ModelContent::Text(text.to_string())],
+        })),
+        Ok(completion(
+            /*input_tokens*/ 7,
+            /*total_tokens*/ 9,
+            Some(true),
+        )),
+    ]
 }
 
 fn find_model_function<'a>(tools: &'a [ModelToolSpec], name: &str) -> Option<&'a ModelToolSpec> {
@@ -563,6 +613,315 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
         .shutdown_and_wait()
         .await
         .expect("shutdown test thread");
+}
+
+#[tokio::test]
+async fn injected_canonical_manual_compaction_uses_completed_events_and_a_fresh_runtime() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+
+    submit_user_turn(&started.thread, "seed history for local compaction").await;
+    let seed_events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&seed_events, "seed canonical turn");
+
+    backend.queue_stream(compact_summary_events("canonical compaction summary"));
+    started
+        .thread
+        .submit(Op::Compact)
+        .await
+        .expect("submit local compact");
+    let compact_events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&compact_events, "canonical manual compaction");
+    assert!(
+        !compact_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    assert!(compact_events.iter().any(|event| matches!(
+        event,
+        EventMsg::TokenCount(TokenCountEvent {
+            info: Some(info),
+            ..
+        }) if info.last_token_usage.input_tokens == 7
+            && info.last_token_usage.total_tokens == 9
+    )));
+    let compacted_history = raw_history_items(&started.thread.session.clone_history().await);
+    assert!(compacted_history.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "user" && content.iter().any(|content| matches!(
+                content,
+                ContentItem::InputText { text }
+                    if text.contains("seed history for local compaction")
+            ))
+    )));
+    assert!(compacted_history.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message { content, .. }
+            if content.iter().any(|content| match content {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    text.contains("canonical compaction summary")
+                }
+                _ => false,
+            })
+    )));
+    assert!(!compacted_history.iter().any(|item| matches!(
+        item,
+        ResponseItem::FunctionCall { call_id, .. } if call_id == "call-plan"
+    )));
+    assert!(!compacted_history.iter().any(|item| matches!(
+        item,
+        ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
+            if call_id == "call-plan"
+    )));
+    assert!(!compacted_history.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "assistant" && content.iter().any(|content| matches!(
+                content,
+                ContentItem::OutputText { text } if text == "first turn answer"
+            ))
+    )));
+
+    submit_user_turn(&started.thread, "continue after local compaction").await;
+    let after_compaction_events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&after_compaction_events, "turn after canonical compaction");
+
+    let requests = backend.requests();
+    assert_eq!(
+        backend.turn_count(),
+        3,
+        "manual compaction gets its own handle"
+    );
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].turn_index, 0);
+    assert_eq!(requests[1].turn_index, 0);
+    assert_eq!(
+        requests[2].turn_index, 1,
+        "compaction has a dedicated handle"
+    );
+    assert_eq!(
+        requests[3].turn_index, 2,
+        "the next user turn gets a fresh handle"
+    );
+    assert!(requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("seed history for local compaction")
+            ))
+    )));
+    assert!(requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::ToolCall(call) if call.call_id.0 == "call-plan"
+    )));
+    assert!(requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::ToolResult(result) if result.call_id.0 == "call-plan"
+    )));
+    assert!(requests[3].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("canonical compaction summary")
+            ))
+    )));
+    assert!(requests[3].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("seed history for local compaction")
+            ))
+    )));
+    assert!(!requests[3].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::ToolCall(call) if call.call_id.0 == "call-plan"
+    )));
+    assert!(!requests[3].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::ToolResult(result) if result.call_id.0 == "call-plan"
+    )));
+
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
+async fn canonical_compaction_eof_is_non_retryable_and_unsupported_history_fails_closed() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let backend = Arc::new(FakeBackend::closing_without_completion());
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+    started
+        .thread
+        .submit(Op::Compact)
+        .await
+        .expect("submit local compact");
+    let eof_events = wait_for_turn_end(&started.thread).await;
+    assert!(eof_events.iter().any(|event| matches!(
+        event,
+        EventMsg::Error(error)
+            if error.message.contains("canonical model event stream closed before Completed")
+    )));
+    assert!(
+        !eof_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    assert_eq!(backend.turn_count(), 1);
+    assert_eq!(backend.requests().len(), 1, "canonical EOF is not retried");
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+    let seed_context = started
+        .thread
+        .session
+        .new_turn_with_default_settings("unsupported-history-seed".to_string(), Default::default())
+        .await;
+    started
+        .thread
+        .session
+        .record_conversation_items(
+            seed_context.as_ref(),
+            &[ResponseItem::AgentMessage {
+                id: None,
+                author: "worker".to_string(),
+                recipient: "root".to_string(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "provider-specific agent history".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            }],
+        )
+        .await;
+    started
+        .thread
+        .submit(Op::Compact)
+        .await
+        .expect("submit local compact");
+    let unsupported_events = wait_for_turn_end(&started.thread).await;
+    assert!(unsupported_events.iter().any(|event| matches!(
+        event,
+        EventMsg::Error(error) if error.message.contains("unsupported request data")
+    )));
+    assert!(
+        !unsupported_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    assert_eq!(backend.turn_count(), 1);
+    assert!(
+        backend.requests().is_empty(),
+        "unrepresentable canonical compaction must fail before streaming"
+    );
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
+async fn canonical_compaction_retries_retryable_failure_on_the_same_turn_handle() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    backend.queue_stream(vec![Err(ModelBackendError::Failed {
+        message: "temporary compact failure".to_string(),
+        retryable: true,
+    })]);
+    backend.queue_stream(compact_summary_events("retried compaction summary"));
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+    started
+        .thread
+        .submit(Op::Compact)
+        .await
+        .expect("submit local compact");
+    let events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&events, "retryable canonical compaction");
+    let requests = backend.requests();
+    assert_eq!(backend.turn_count(), 1, "retry keeps one turn runtime");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].turn_index, requests[1].turn_index);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
+async fn canonical_compaction_does_not_retry_non_retryable_backend_failure() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    backend.queue_stream(vec![Err(ModelBackendError::Failed {
+        message: "permanent compact failure".to_string(),
+        retryable: false,
+    })]);
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+    started
+        .thread
+        .submit(Op::Compact)
+        .await
+        .expect("submit local compact");
+    let events = wait_for_turn_end(&started.thread).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EventMsg::Error(error) if error.message.contains("permanent compact failure")
+    )));
+    assert_eq!(backend.turn_count(), 1);
+    assert_eq!(backend.requests().len(), 1);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
 }
 
 #[tokio::test]

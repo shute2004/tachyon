@@ -134,7 +134,11 @@ declaration vocabulary. Delegated ThreadSpawn children inherit the selected back
 an independent child-session factory when their matching parent is registered. Explicit child
 runtime selection takes precedence; an unsupported child factory fails rather than falling back
 to Codex. Existing running resumes do not create another factory, and Codex parents retain their
-fresh-client path. Compaction and realtime backend migration are not completed by this slice.
+fresh-client path. Local compaction also uses the selected runtime: completed output replaces
+history through the existing compaction path, retryable failures reuse the compaction turn
+handle, and unsupported prompts or premature canonical EOF fail without a Codex fallback.
+Codex rate-limit/reasoning notifications and real response IDs remain on the adapter path.
+Remote compaction and realtime backend migration are not completed by this slice.
 
 The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
 which has no Core, provider, authentication, or UI dependency. Core retains its existing IR

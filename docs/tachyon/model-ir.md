@@ -97,8 +97,16 @@ share the parent factory. Already-running resumes return their existing session 
 parents retain the existing fresh-client path; Internal/Guardian sessions and general public
 forks are unchanged. Forked history does not copy provider-private continuation state.
 
-This slice does not implement canonical compaction or reasoning-content section starts. Those operations remain
-explicitly unsupported or on their existing Codex paths. Realtime and delegated WebSocket
+Local compaction consumes canonical completed items and usage through the selected runtime,
+using the existing history-replacement logic. It ignores noncompletion stream structure,
+including reasoning-content section starts, as the Codex compaction path already does.
+Retryable failures reuse the compaction turn handle; nonretryable errors and premature
+canonical EOF terminate without a legacy fallback. Codex rate-limit/server-reasoning
+notifications and response IDs retain their existing adapter-specific behavior.
+
+Remote compaction and regular-sampling reasoning-content section starts are not implemented
+by this slice and remain explicitly unsupported or on their existing Codex paths.
+Realtime and delegated WebSocket
 capability checks still retain the legacy client. The complete agent loop is not yet a
 standalone provider-neutral crate.
 
