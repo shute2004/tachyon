@@ -252,7 +252,9 @@ impl ToolOutput for ToolSearchOutput {
 
 fn discovered_tool_specs(tool: &LoadableToolSpec) -> Option<Vec<DiscoveredToolSpec>> {
     match tool {
-        LoadableToolSpec::Function(tool) => Some(vec![discovered_function_tool(None, tool)?]),
+        LoadableToolSpec::Function(tool) => Some(vec![discovered_function_tool(
+            /*namespace*/ None, tool,
+        )?]),
         LoadableToolSpec::Namespace(namespace) => {
             if namespace.tools.is_empty()
                 || namespace.description != default_namespace_description(&namespace.name)

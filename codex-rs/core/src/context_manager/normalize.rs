@@ -167,15 +167,15 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
         }
 
         match correlation.compatibility_pairing_class {
-            ResponsesToolPairingClass::FunctionCallOutput => error_or_panic(format!(
+            ResponsesToolPairingClass::FunctionCall => error_or_panic(format!(
                 "Orphan function call output for call id: {}",
                 correlation.call_id
             )),
-            ResponsesToolPairingClass::CustomToolCallOutput => error_or_panic(format!(
+            ResponsesToolPairingClass::CustomToolCall => error_or_panic(format!(
                 "Orphan custom tool call output for call id: {}",
                 correlation.call_id
             )),
-            ResponsesToolPairingClass::ToolSearchOutput => error_or_panic(format!(
+            ResponsesToolPairingClass::ToolSearch => error_or_panic(format!(
                 "Orphan tool search output for call id: {}",
                 correlation.call_id
             )),

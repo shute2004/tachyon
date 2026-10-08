@@ -2899,12 +2899,9 @@ async fn try_run_sampling_request(
                 }
             }
             ModelRuntimeEvent::Model { event, codex } => {
-                break Err(CodexErr::Stream(
-                    format!(
-                        "invalid transitional model event context: event={event:?}, codex={codex:?}"
-                    )
-                    .into(),
-                ));
+                break Err(CodexErr::Stream(format!(
+                    "invalid transitional model event context: event={event:?}, codex={codex:?}"
+                )));
             }
         }
     };

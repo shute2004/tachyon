@@ -88,24 +88,23 @@ print_bazel_test_log_tails() {
   local testlogs_dir
 
   local -a bazel_info_args=(info)
-  if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
-    # `bazel info` needs the same CI config as the failed test invocation so
-    # platform-specific output roots match. On Windows, omitting `ci-windows`
-    # would point at `local_windows-fastbuild` even when the test ran with the
-    # MSVC host platform under `local_windows_msvc-fastbuild`.
-    bazel_info_args+=("--config=${ci_config}")
-  fi
+  # `bazel info` needs the same CI config as the failed test invocation so
+  # platform-specific output roots match. On Windows, omitting the selected
+  # config would point at a different host-platform output root.
+  bazel_info_args+=("--config=${bazel_ci_config}")
 
   # Only pass flags that affect Bazel's output-root selection or repository
   # lookup. Test/build-only flags such as execution logs or remote download
   # mode can make `bazel info` fail, which would hide the real test log path.
-  for arg in "${post_config_bazel_args[@]}"; do
-    case "$arg" in
-      --host_platform=* | --repo_contents_cache=* | --repository_cache=*)
-        bazel_info_args+=("$arg")
-        ;;
-    esac
-  done
+  if (( ${#post_config_bazel_args[@]} > 0 )); then
+    for arg in "${post_config_bazel_args[@]}"; do
+      case "$arg" in
+        --host_platform=* | --repo_contents_cache=* | --repository_cache=*)
+          bazel_info_args+=("$arg")
+          ;;
+      esac
+    done
+  fi
 
   testlogs_dir="$(run_bazel_with_startup_args \
     --noexperimental_remote_repo_contents_cache \
@@ -256,17 +255,35 @@ if [[ ${#bazel_args[@]} -eq 0 || ${#bazel_targets[@]} -eq 0 ]]; then
 fi
 
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
-  # Windows cross-compilation depends on authenticated RBE. Preserve the local
-  # Windows build shape when credentials are unavailable.
+  # Keep the Windows CI tuning while selecting the local GNU-ABI host below.
   ci_config=ci-windows
-  windows_msvc_host_platform=1
+fi
+
+if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  bazel_ci_config="$ci_config"
+else
+  # Local public-runner fallbacks need the CI Rust compiler tuning, but must
+  # not select an authenticated RBE config such as ci-linux.
+  bazel_ci_config=ci-local
 fi
 
 post_config_bazel_args=()
+caller_disk_cache_arg=""
+for arg in "${bazel_args[@]}"; do
+  if [[ "$arg" == --disk_cache=* ]]; then
+    caller_disk_cache_arg="$arg"
+  fi
+done
+if [[ -n "$caller_disk_cache_arg" ]]; then
+  # common:ci disables the disk cache. Reapply a caller's last explicit value
+  # after the CI config so local cache opt-ins and opt-outs both take effect.
+  post_config_bazel_args+=("$caller_disk_cache_arg")
+fi
+
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; then
   has_host_platform_override=0
   for arg in "${bazel_args[@]}"; do
-    if [[ "$arg" == --host_platform=* ]]; then
+    if [[ "$arg" == "--host_platform" || "$arg" == --host_platform=* ]]; then
       has_host_platform_override=1
       break
     fi
@@ -278,6 +295,52 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
     # Callers that need a different Windows target platform should pass an
     # explicit `--platforms=...` flag.
     post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
+  fi
+fi
+
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  has_host_platform_override=0
+  has_platform_override=0
+  has_extra_execution_platforms_override=0
+  has_extra_toolchains_override=0
+  for arg in "${bazel_args[@]}"; do
+    case "$arg" in
+      --host_platform | --host_platform=*)
+        has_host_platform_override=1
+        ;;
+      --platforms | --platforms=*)
+        has_platform_override=1
+        ;;
+      --extra_execution_platforms | --extra_execution_platforms=*)
+        has_extra_execution_platforms_override=1
+        ;;
+      --extra_toolchains | --extra_toolchains=*)
+        has_extra_toolchains_override=1
+        ;;
+    esac
+  done
+
+  if [[ $has_host_platform_override -eq 0 && $windows_msvc_host_platform -eq 0 ]]; then
+    post_config_bazel_args+=("--host_platform=//:local_windows")
+  fi
+
+  if [[ $has_platform_override -eq 0 ]]; then
+    post_config_bazel_args+=("--platforms=//:windows_x86_64_gnullvm")
+  fi
+
+  if [[ $has_extra_execution_platforms_override -eq 0 ]]; then
+    if [[ $windows_msvc_host_platform -eq 1 ]]; then
+      post_config_bazel_args+=("--extra_execution_platforms=//:windows_x86_64_msvc")
+    else
+      post_config_bazel_args+=("--extra_execution_platforms=//:windows_x86_64_gnullvm")
+    fi
+  fi
+  if [[ $has_extra_toolchains_override -eq 0 ]]; then
+    if [[ $windows_msvc_host_platform -eq 1 ]]; then
+      post_config_bazel_args+=("--extra_toolchains=//:windows_gnullvm_tests_on_msvc_host_toolchain")
+    else
+      post_config_bazel_args+=("--extra_toolchains=//:windows_gnullvm_tests_on_gnullvm_host_toolchain")
+    fi
   fi
 fi
 
@@ -385,10 +448,10 @@ bazel_run_args=(
 )
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
   echo "BuildBuddy API key is available; using remote Bazel configuration."
-  bazel_run_args+=("--config=${ci_config}")
 else
   echo "BuildBuddy API key is not available; using local Bazel configuration."
 fi
+bazel_run_args+=("--config=${bazel_ci_config}")
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")
 fi

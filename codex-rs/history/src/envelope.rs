@@ -29,6 +29,10 @@ impl<T, M> HistoryEnvelope<T, M> {
         }
     }
 
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "Keep the existing inherent accessor alongside Borrow<T> for source compatibility."
+    )]
     pub fn borrow(&self) -> &T {
         &self.item
     }
@@ -79,6 +83,12 @@ mod tests {
             HistoryEnvelope::with_metadata(String::from("first"), TestMetadata { budget: 2048 });
 
         assert_eq!(envelope.as_str(), "first");
+        let inherent_borrow = envelope.borrow();
+        let trait_borrow = std::borrow::Borrow::<String>::borrow(&envelope);
+        assert!(std::ptr::eq(inherent_borrow, trait_borrow));
+        assert_eq!(inherent_borrow, "first");
+        assert_eq!(envelope.metadata.as_ref().unwrap().budget, 2048);
+
         *envelope = String::from("second");
         assert_eq!(envelope.metadata.as_ref().unwrap().budget, 2048);
         assert_eq!(envelope.into_item(), "second");
