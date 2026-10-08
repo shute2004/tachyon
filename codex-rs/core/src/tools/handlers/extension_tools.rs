@@ -175,6 +175,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         };
         let additional_permissions = apply_granted_turn_permissions(
             invocation.session.as_ref(),
+            invocation.step_context.turn.as_ref(),
             environment,
             environment.cwd(),
             SandboxPermissions::UseDefault,

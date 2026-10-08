@@ -280,6 +280,7 @@ fn apply_patch_payload_command(payload: &ToolPayload) -> Option<String> {
 
 async fn effective_patch_permissions(
     session: &Session,
+    turn_context: &TurnContext,
     environment: &TurnEnvironment,
     action: &ApplyPatchAction,
     cwd: &PathUri,
@@ -296,8 +297,8 @@ async fn effective_patch_permissions(
             .granted_session_permissions(environment_id)
             .await
             .as_ref(),
-        session
-            .granted_turn_permissions(environment_id)
+        turn_context
+            .granted_permissions_for_environment(environment_id)
             .await
             .as_ref(),
     );
@@ -314,6 +315,7 @@ async fn effective_patch_permissions(
         .collect::<Result<Vec<_>, _>>()?;
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
+        turn_context,
         environment,
         cwd,
         crate::sandboxing::SandboxPermissions::UseDefault,
@@ -560,9 +562,15 @@ async fn execute_verified_patch(
     tool_ctx: ToolCtx,
 ) -> Result<String, FunctionCallError> {
     let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
-        effective_patch_permissions(tool_ctx.session.as_ref(), &turn_environment, &action, cwd)
-            .await
-            .unwrap_or_else(|_| patch_permissions_without_path_matching(&action));
+        effective_patch_permissions(
+            tool_ctx.session.as_ref(),
+            tool_ctx.step_context.turn.as_ref(),
+            &turn_environment,
+            &action,
+            cwd,
+        )
+        .await
+        .unwrap_or_else(|_| patch_permissions_without_path_matching(&action));
     let apply = apply_patch::prepare_apply_patch(
         &tool_ctx.step_context,
         &turn_environment,

@@ -2692,10 +2692,6 @@ impl Session {
 
         if crate::guardian::routes_approval_policy_to_guardian(approval_policy, approvals_reviewer)
         {
-            let originating_turn_state = {
-                let active = self.active_turn.lock().await;
-                active.as_ref().map(|active| Arc::clone(&active.turn_state))
-            };
             let action = ApprovalAction::RequestPermissions {
                 id: call_id.clone(),
                 turn_id: turn_context.sub_id.clone(),
@@ -2764,7 +2760,7 @@ impl Session {
             self.record_granted_request_permissions_for_turn(
                 &response,
                 &environment.environment_id,
-                originating_turn_state.as_ref(),
+                Some(turn_context.as_ref()),
             )
             .await;
             return Some(response);
@@ -2783,6 +2779,7 @@ impl Session {
                             tx_response,
                             requested_permissions: requested_permissions.clone(),
                             environment: environment.clone(),
+                            origin_turn: Arc::clone(turn_context),
                         },
                     )
                 }
@@ -2897,16 +2894,14 @@ impl Session {
         call_id: &str,
         response: RequestPermissionsResponse,
     ) {
-        let (entry, originating_turn_state) = {
+        let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    let entry = ts.remove_pending_request_permissions(call_id);
-                    let originating_turn_state = entry.as_ref().map(|_| Arc::clone(&at.turn_state));
-                    (entry, originating_turn_state)
+                    ts.remove_pending_request_permissions(call_id)
                 }
-                None => (None, None),
+                None => None,
             }
         };
         match entry {
@@ -2934,7 +2929,7 @@ impl Session {
                 self.record_granted_request_permissions_for_turn(
                     &response,
                     &entry.environment.environment_id,
-                    originating_turn_state.as_ref(),
+                    Some(entry.origin_turn.as_ref()),
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -2978,21 +2973,23 @@ impl Session {
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
-        originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        originating_turn_context: Option<&TurnContext>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
         match response.scope {
             PermissionGrantScope::Turn => {
-                if let Some(turn_state) = originating_turn_state {
-                    let mut ts = turn_state.lock().await;
+                if let Some(turn_context) = originating_turn_context {
                     let permissions: AdditionalPermissionProfile =
                         response.permissions.clone().into();
-                    ts.record_granted_permissions(environment_id, permissions);
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
-                    }
+                    turn_context
+                        .record_granted_permissions_for_environment(
+                            environment_id,
+                            permissions,
+                            response.strict_auto_review,
+                        )
+                        .await;
                 }
             }
             PermissionGrantScope::Session => {
@@ -3007,21 +3004,7 @@ impl Session {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "active turn reads must stay consistent with the matching turn state"
-    )]
-    pub(crate) async fn granted_turn_permissions(
-        &self,
-        environment_id: &str,
-    ) -> Option<AdditionalPermissionProfile> {
-        let active = self.active_turn.lock().await;
-        let active = active.as_ref()?;
-        let ts = active.turn_state.lock().await;
-        ts.granted_permissions(environment_id)
-    }
-
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn reads must stay consistent with the matching turn state"
+        reason = "active turn context and strict grants must be read together"
     )]
     pub(crate) async fn active_turn_context_and_strict_auto_review(
         &self,
@@ -3031,8 +3014,8 @@ impl Session {
         let task = active.task.as_ref()?;
         let turn_context = Arc::clone(&task.turn_context);
         let step_settings = turn_context.current_settings.load_full();
-        let ts = active.turn_state.lock().await;
-        Some((turn_context, step_settings, ts.strict_auto_review_enabled()))
+        let strict_auto_review = turn_context.strict_auto_review_enabled().await;
+        Some((turn_context, step_settings, strict_auto_review))
     }
 
     pub(crate) async fn granted_session_permissions(

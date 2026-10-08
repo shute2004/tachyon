@@ -14,6 +14,8 @@ use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+#[cfg(not(windows))]
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
@@ -282,12 +284,19 @@ async fn shell_mode_for_environment_uses_direct_mode_for_remote_environments() -
 
 #[tokio::test]
 #[cfg(not(windows))]
-async fn exec_command_reuses_foreign_windows_grant() {
+async fn exec_permissions_use_captured_turn_and_live_session_grants() {
     use codex_protocol::models::AdditionalPermissionProfile;
     use codex_protocol::models::FileSystemPermissions;
     use codex_utils_path_uri::PathUri;
 
-    let (session, mut turn) = make_session_and_context().await;
+    let (session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let turn_mut = Arc::get_mut(&mut turn).expect("single thread settings ref");
+    Arc::make_mut(&mut turn_mut.config)
+        .permissions
+        .approval_policy
+        .set(codex_protocol::protocol::AskForApproval::OnRequest)
+        .expect("test setup should allow updating approval policy");
+    let turn_b = session.new_default_turn().await;
 
     let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd");
     let granted_permissions = AdditionalPermissionProfile {
@@ -300,25 +309,41 @@ async fn exec_command_reuses_foreign_windows_grant() {
         )),
         ..Default::default()
     };
-    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
-    let turn_state = {
-        let active_turn = session.active_turn.lock().await;
-        Arc::clone(&active_turn.as_ref().expect("active turn").turn_state)
+    let other_turn_permissions = AdditionalPermissionProfile {
+        file_system: Some(FileSystemPermissions::from_read_write_path_uris(
+            /*read*/ Some(Vec::new()),
+            /*write*/
+            Some(vec![
+                PathUri::parse("file:///C:/workspace/other-turn").expect("valid other-turn grant"),
+            ]),
+        )),
+        ..Default::default()
     };
-    turn_state.lock().await.record_granted_permissions(
+    turn.record_granted_permissions_for_environment(
         codex_exec_server::REMOTE_ENVIRONMENT_ID,
         granted_permissions.clone(),
-    );
+        false,
+    )
+    .await;
+    turn_b
+        .record_granted_permissions_for_environment(
+            codex_exec_server::REMOTE_ENVIRONMENT_ID,
+            other_turn_permissions.clone(),
+            false,
+        )
+        .await;
+    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
 
     let environment = {
         let TurnEnvironmentState::Ready(environment) = turn
             .environments
             .environments
-            .first_mut()
+            .first()
             .expect("primary environment")
         else {
             panic!("primary environment should be ready");
         };
+        let mut environment = (*environment).clone();
         environment.selection.environment_id = codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string();
         environment.selection.cwd = cwd.clone();
         environment.selection.workspace_roots = vec![cwd.clone()];
@@ -331,7 +356,8 @@ async fn exec_command_reuses_foreign_windows_grant() {
     };
     let effective = crate::tools::handlers::apply_granted_turn_permissions(
         &session,
-        environment,
+        &turn,
+        &environment,
         &cwd,
         crate::sandboxing::SandboxPermissions::WithAdditionalPermissions,
         Some(granted_permissions.clone()),
@@ -339,7 +365,106 @@ async fn exec_command_reuses_foreign_windows_grant() {
     .await;
 
     assert!(effective.permissions_preapproved);
-    assert_eq!(effective.additional_permissions, Some(granted_permissions));
+    assert_eq!(
+        effective.additional_permissions,
+        Some(granted_permissions.clone())
+    );
+
+    let requested_permissions = codex_protocol::request_permissions::RequestPermissionProfile {
+        network: Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let expected_response = codex_protocol::request_permissions::RequestPermissionsResponse {
+        permissions: requested_permissions.clone(),
+        scope: codex_protocol::request_permissions::PermissionGrantScope::Session,
+        strict_auto_review: false,
+    };
+    let mut request_environment = turn
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
+    request_environment.environment_id = codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string();
+    let native_cwd = request_environment
+        .cwd
+        .to_abs_path()
+        .expect("primary environment cwd should be native");
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let call_id = "session-network-grant".to_string();
+    let request_handle = tokio::spawn({
+        let session = Arc::clone(&session);
+        let step_context = Arc::clone(&step_context);
+        let call_id = call_id.clone();
+        let request_environment = request_environment.clone();
+        async move {
+            session
+                .request_permissions_for_environment(
+                    &step_context,
+                    call_id,
+                    codex_protocol::request_permissions::RequestPermissionsArgs {
+                        environment_id: Some(codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string()),
+                        reason: Some("allow network access".to_string()),
+                        permissions: requested_permissions,
+                    },
+                    request_environment,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        }
+    });
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let event = rx
+                .recv()
+                .await
+                .expect("permission event channel should stay open");
+            if let codex_protocol::protocol::EventMsg::RequestPermissions(request) = event.msg {
+                break request;
+            }
+        }
+    })
+    .await
+    .expect("request_permissions event timed out");
+    assert_eq!(request.call_id, call_id);
+    assert_eq!(
+        request.environment_id.as_deref(),
+        Some(codex_exec_server::REMOTE_ENVIRONMENT_ID)
+    );
+    assert_eq!(request.cwd, Some(native_cwd));
+    session
+        .notify_request_permissions_response(&request.call_id, expected_response.clone())
+        .await;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), request_handle)
+        .await
+        .expect("request_permissions future timed out")
+        .expect("request_permissions join error");
+    assert_eq!(response, Some(expected_response));
+
+    let effective_with_late_session_grant = crate::tools::handlers::apply_granted_turn_permissions(
+        &session,
+        &turn,
+        &environment,
+        &cwd,
+        crate::sandboxing::SandboxPermissions::WithAdditionalPermissions,
+        None,
+    )
+    .await;
+    let effective_permissions = effective_with_late_session_grant
+        .additional_permissions
+        .expect("captured turn and current session grants should be applied");
+    assert_eq!(
+        &effective_permissions.file_system,
+        &granted_permissions.file_system
+    );
+    assert_eq!(
+        &effective_permissions.network,
+        &Some(codex_protocol::models::NetworkPermissions {
+            enabled: Some(true),
+        })
+    );
+    assert_ne!(effective_permissions, other_turn_permissions);
 }
 
 #[tokio::test]

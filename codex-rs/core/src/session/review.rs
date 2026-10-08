@@ -1,4 +1,5 @@
 use super::step_settings::ResolvedStepSettings;
+use super::turn_context::TurnGrants;
 use super::*;
 use arc_swap::ArcSwap;
 use std::sync::atomic::AtomicBool;
@@ -174,6 +175,7 @@ pub(super) async fn spawn_review_thread(
         turn_metadata_state,
         extension_data,
         turn_timing_state: Arc::new(TurnTimingState::default()),
+        turn_grants: Arc::new(tokio::sync::Mutex::new(TurnGrants::default())),
         terminal_error: Arc::new(Mutex::new(None)),
         server_model_warning_emitted: AtomicBool::new(false),
         model_verification_emitted: AtomicBool::new(false),
