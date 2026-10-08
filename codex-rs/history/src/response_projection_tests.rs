@@ -205,6 +205,64 @@ fn known_message_roles_phases_and_content_order_are_projected() {
 }
 
 #[test]
+fn image_detail_variants_and_absence_project_for_messages_and_tool_results() {
+    for (source_detail, history_detail) in [
+        (Some(ImageDetail::Auto), Some(HistoryImageDetail::Auto)),
+        (Some(ImageDetail::Low), Some(HistoryImageDetail::Low)),
+        (Some(ImageDetail::High), Some(HistoryImageDetail::High)),
+        (
+            Some(ImageDetail::Original),
+            Some(HistoryImageDetail::Original),
+        ),
+        (None, None),
+    ] {
+        canonical(
+            message(
+                "user",
+                vec![ContentItem::InputImage {
+                    image_url: "https://example.test/message.png".to_string(),
+                    detail: source_detail,
+                }],
+                None,
+            ),
+            history_message(
+                HistoryMessageRole::User,
+                None,
+                vec![HistoryMessageContent::Image {
+                    source: HistoryMediaSource::Uri("https://example.test/message.png".to_string()),
+                    detail: history_detail,
+                }],
+            ),
+        );
+
+        canonical(
+            function_result(
+                Some("image-call"),
+                FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::ContentItems(vec![
+                        FunctionCallOutputContentItem::InputImage {
+                            image_url: "https://example.test/tool-result.png".to_string(),
+                            detail: source_detail,
+                        },
+                    ]),
+                    success: Some(true),
+                },
+            ),
+            history_result(
+                "image-call",
+                vec![HistoryToolResultContent::Image {
+                    source: HistoryMediaSource::Uri(
+                        "https://example.test/tool-result.png".to_string(),
+                    ),
+                    detail: history_detail,
+                }],
+                Some(false),
+            ),
+        );
+    }
+}
+
+#[test]
 fn unknown_message_role_retains_exact_compatibility_envelope() {
     fallback(
         message(
