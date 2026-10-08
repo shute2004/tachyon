@@ -1223,7 +1223,16 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    let remote_compaction = if sess
+        .services
+        .model_runtime()
+        .supports_codex_remote_compaction()
+    {
+        turn_context.provider.capabilities().remote_compaction
+    } else {
+        RemoteCompactionSupport::Unsupported
+    };
+    match remote_compaction {
         RemoteCompactionSupport::V2
             if turn_context
                 .config

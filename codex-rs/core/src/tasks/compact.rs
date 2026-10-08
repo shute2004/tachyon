@@ -38,7 +38,16 @@ impl SessionTask for CompactTask {
             return Ok(None);
         }
 
-        let result = match ctx.provider.capabilities().remote_compaction {
+        let remote_compaction = if session
+            .services
+            .model_runtime()
+            .supports_codex_remote_compaction()
+        {
+            ctx.provider.capabilities().remote_compaction
+        } else {
+            RemoteCompactionSupport::Unsupported
+        };
+        let result = match remote_compaction {
             RemoteCompactionSupport::V2
                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
             {

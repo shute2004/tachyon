@@ -13,6 +13,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::error::CodexErr;
@@ -398,9 +399,7 @@ async fn canonical_eof_test_config(codex_home: &std::path::Path) -> crate::confi
 async fn canonical_local_compaction_test_config(
     codex_home: &std::path::Path,
 ) -> crate::config::Config {
-    let mut config = canonical_backend_test_config(codex_home).await;
-    config.model_provider.name = "Local compaction test provider".to_string();
-    config
+    canonical_backend_test_config(codex_home).await
 }
 
 fn compact_summary_events(text: &str) -> Vec<Result<ModelEvent, ModelBackendError>> {
@@ -618,7 +617,11 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
 #[tokio::test]
 async fn injected_canonical_manual_compaction_uses_completed_events_and_a_fresh_runtime() {
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
-    let config = canonical_local_compaction_test_config(codex_home.path()).await;
+    let mut config = canonical_local_compaction_test_config(codex_home.path()).await;
+    config
+        .features
+        .disable(Feature::RemoteCompactionV2)
+        .expect("disable remote compaction V2 for manual canonical compaction");
     let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
     let options = StartThreadOptions::new(config.clone())
         .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
@@ -627,6 +630,22 @@ async fn injected_canonical_manual_compaction_uses_completed_events_and_a_fresh_
         config.model_provider.clone(),
     );
     let started = manager.start_thread(options).await.expect("start thread");
+    let provider = {
+        started
+            .thread
+            .session
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .provider
+            .clone()
+    };
+    assert!(provider.info().is_openai());
+    assert_eq!(
+        provider.capabilities().remote_compaction,
+        RemoteCompactionSupport::V2
+    );
 
     submit_user_turn(&started.thread, "seed history for local compaction").await;
     let seed_events = wait_for_turn_end(&started.thread).await;
@@ -1139,6 +1158,141 @@ async fn canonical_eof_is_non_retryable_and_codex_eof_keeps_legacy_error() {
         .shutdown_and_wait()
         .await
         .expect("shutdown test thread");
+}
+
+#[tokio::test]
+async fn injected_canonical_auto_compaction_uses_local_runtime_with_openai_remote_v2_support() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let mut config = canonical_local_compaction_test_config(codex_home.path()).await;
+    config.model_auto_compact_token_limit = Some(200_000);
+    config
+        .features
+        .enable(Feature::RemoteCompactionV2)
+        .expect("enable remote compaction V2 for canonical auto compaction");
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    let answer_id = ModelItemId("canonical-auto-seed-answer".to_string());
+    backend.queue_stream(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::OutputItemStarted(
+            ModelOutputItemStart::Message {
+                id: answer_id.clone(),
+                phase: Some(ModelMessagePhase::Final),
+            },
+        )),
+        Ok(ModelEvent::OutputItemCompleted(ModelOutputItem::Message {
+            id: answer_id,
+            phase: Some(ModelMessagePhase::Final),
+            content: vec![ModelContent::Text(
+                "first auto-compaction answer".to_string(),
+            )],
+        })),
+        Ok(completion(
+            /*input_tokens*/ 250_000,
+            /*total_tokens*/ 250_002,
+            Some(true),
+        )),
+    ]);
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+    let provider = {
+        started
+            .thread
+            .session
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .provider
+            .clone()
+    };
+    assert!(provider.info().is_openai());
+    assert_eq!(
+        provider.capabilities().remote_compaction,
+        RemoteCompactionSupport::V2
+    );
+
+    submit_user_turn(&started.thread, "seed auto-compaction history").await;
+    let seed_events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&seed_events, "canonical auto-compaction seed turn");
+
+    backend.queue_stream(compact_summary_events("canonical auto-compaction summary"));
+    submit_user_turn(&started.thread, "continue after auto compaction").await;
+    let compact_and_follow_up_events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(
+        &compact_and_follow_up_events,
+        "canonical auto compaction and follow-up turn",
+    );
+    assert!(
+        compact_and_follow_up_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::ContextCompacted(_)))
+    );
+    assert!(
+        !compact_and_follow_up_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::RawResponseCompleted(_)))
+    );
+    assert!(compact_and_follow_up_events.iter().any(|event| matches!(
+        event,
+        EventMsg::TokenCount(TokenCountEvent {
+            info: Some(info),
+            ..
+        }) if info.last_token_usage.input_tokens == 7
+            && info.last_token_usage.total_tokens == 9
+    )));
+
+    let requests = backend.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text)
+                    if text.contains(crate::compact::SUMMARIZATION_PROMPT)
+            ))
+    )));
+    assert!(requests[1].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("seed auto-compaction history")
+            ))
+    )));
+    assert!(requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("canonical auto-compaction summary")
+            ))
+    )));
+    assert!(requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("continue after auto compaction")
+            ))
+    )));
+    assert!(!requests[2].request.input.iter().any(|item| matches!(
+        item,
+        ModelInputItem::Message(message)
+            if message.content.iter().any(|content| matches!(
+                content,
+                ModelContent::Text(text) if text.contains("first auto-compaction answer")
+            ))
+    )));
+
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
 }
 
 #[test]

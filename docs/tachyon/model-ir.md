@@ -103,6 +103,9 @@ including reasoning-content section starts, as the Codex compaction path already
 Retryable failures reuse the compaction turn handle; nonretryable errors and premature
 canonical EOF terminate without a legacy fallback. Codex rate-limit/server-reasoning
 notifications and response IDs retain their existing adapter-specific behavior.
+Both manual and automatic model compaction gate Codex remote dispatch on the selected
+runtime, not provider identity alone. Canonical backends remain local even with OpenAI
+remote V2 capability; the earlier TokenBudget path and Codex remote V1/V2 selection are unchanged.
 
 Remote compaction and regular-sampling reasoning-content section starts are not implemented
 by this slice and remain explicitly unsupported or on their existing Codex paths.

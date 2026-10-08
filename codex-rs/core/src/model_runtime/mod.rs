@@ -128,6 +128,11 @@ impl ModelRuntime {
         }
     }
 
+    /// Reports whether this runtime can execute the existing Codex remote-compaction path.
+    pub(crate) fn supports_codex_remote_compaction(&self) -> bool {
+        matches!(&self.backend, ModelRuntimeBackend::Codex(_))
+    }
+
     /// Creates a fresh execution handle for one harness turn bound to the selected provider.
     ///
     /// The provider identity is opaque to the runtime and remains independent from protocol,

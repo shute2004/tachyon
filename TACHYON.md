@@ -137,6 +137,8 @@ to Codex. Existing running resumes do not create another factory, and Codex pare
 fresh-client path. Local compaction also uses the selected runtime: completed output replaces
 history through the existing compaction path, retryable failures reuse the compaction turn
 handle, and unsupported prompts or premature canonical EOF fail without a Codex fallback.
+Manual and automatic model compaction select the runtime before provider remote-compaction
+capabilities: a canonical backend stays local even when the provider advertises Codex remote V2.
 Codex rate-limit/reasoning notifications and real response IDs remain on the adapter path.
 Remote compaction and realtime backend migration are not completed by this slice.
 
