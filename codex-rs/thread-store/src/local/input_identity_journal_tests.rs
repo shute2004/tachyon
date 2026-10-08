@@ -663,7 +663,7 @@ async fn non_unix_reservation_is_unsupported_before_journal_io() {
     use tempfile::TempDir;
 
     use super::super::LocalThreadStore;
-    use super::super::test_support::test_config;
+    use super::test_support::test_config;
     use crate::ThreadStore;
     use crate::ThreadStoreError;
 
