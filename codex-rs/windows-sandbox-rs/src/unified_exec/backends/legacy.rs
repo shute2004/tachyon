@@ -13,6 +13,7 @@ use crate::process::spawn_process_with_pipes;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::spawn_prep::LegacyAclSids;
 use crate::spawn_prep::LegacySessionSecurity;
+use crate::spawn_prep::RootCapabilitySid;
 use crate::spawn_prep::SpawnPrepOptions;
 use crate::spawn_prep::allow_null_device_for_workspace_write;
 use crate::spawn_prep::apply_legacy_session_acl_rules;
@@ -318,7 +319,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     codex_home: &Path,
     command: Vec<String>,
     cwd: &Path,
-    mut env_map: HashMap<String, String>,
+    env_map: HashMap<String, String>,
     timeout_ms: Option<u64>,
     additional_deny_read_paths: &[AbsolutePathBuf],
     additional_deny_write_paths: &[AbsolutePathBuf],
@@ -326,6 +327,100 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     stdin_open: bool,
     use_private_desktop: bool,
 ) -> Result<SpawnedProcess> {
+    spawn_windows_sandbox_session_legacy_inner(
+        LegacySessionSpawnRequest::new(
+            permission_profile,
+            workspace_roots,
+            codex_home,
+            command,
+            cwd,
+            env_map,
+            timeout_ms,
+            additional_deny_read_paths,
+            additional_deny_write_paths,
+            tty,
+            stdin_open,
+            use_private_desktop,
+        ),
+        |_, _| {},
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn spawn_windows_sandbox_session_legacy_with_observer(
+    request: LegacySessionSpawnRequest<'_>,
+    observe_child_process: impl FnOnce(HANDLE, &[RootCapabilitySid]),
+) -> Result<SpawnedProcess> {
+    spawn_windows_sandbox_session_legacy_inner(request, observe_child_process).await
+}
+
+pub(crate) struct LegacySessionSpawnRequest<'a> {
+    permission_profile: &'a PermissionProfile,
+    workspace_roots: &'a [AbsolutePathBuf],
+    codex_home: &'a Path,
+    command: Vec<String>,
+    cwd: &'a Path,
+    env_map: HashMap<String, String>,
+    timeout_ms: Option<u64>,
+    additional_deny_read_paths: &'a [AbsolutePathBuf],
+    additional_deny_write_paths: &'a [AbsolutePathBuf],
+    tty: bool,
+    stdin_open: bool,
+    use_private_desktop: bool,
+}
+
+impl<'a> LegacySessionSpawnRequest<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        permission_profile: &'a PermissionProfile,
+        workspace_roots: &'a [AbsolutePathBuf],
+        codex_home: &'a Path,
+        command: Vec<String>,
+        cwd: &'a Path,
+        env_map: HashMap<String, String>,
+        timeout_ms: Option<u64>,
+        additional_deny_read_paths: &'a [AbsolutePathBuf],
+        additional_deny_write_paths: &'a [AbsolutePathBuf],
+        tty: bool,
+        stdin_open: bool,
+        use_private_desktop: bool,
+    ) -> Self {
+        Self {
+            permission_profile,
+            workspace_roots,
+            codex_home,
+            command,
+            cwd,
+            env_map,
+            timeout_ms,
+            additional_deny_read_paths,
+            additional_deny_write_paths,
+            tty,
+            stdin_open,
+            use_private_desktop,
+        }
+    }
+}
+
+async fn spawn_windows_sandbox_session_legacy_inner(
+    request: LegacySessionSpawnRequest<'_>,
+    observe_child_process: impl FnOnce(HANDLE, &[RootCapabilitySid]),
+) -> Result<SpawnedProcess> {
+    let LegacySessionSpawnRequest {
+        permission_profile,
+        workspace_roots,
+        codex_home,
+        command,
+        cwd,
+        mut env_map,
+        timeout_ms,
+        additional_deny_read_paths,
+        additional_deny_write_paths,
+        tty,
+        stdin_open,
+        use_private_desktop,
+    } = request;
     let common = prepare_legacy_spawn_context(
         permission_profile,
         workspace_roots,
@@ -419,6 +514,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
             return Err(err);
         }
     };
+    observe_child_process(pi.hProcess, &security.write_root_sids);
     let hpc_handle = hpc.map(|hpc| Arc::new(StdMutex::new(Some(hpc))));
 
     let process_handle = Arc::new(StdMutex::new(Some(pi.hProcess)));
