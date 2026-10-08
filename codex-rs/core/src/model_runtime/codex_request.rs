@@ -593,7 +593,9 @@ fn model_discovered_tools(tools: &[Value]) -> Option<Vec<ModelToolSpec>> {
         let object = tool.as_object()?;
         match object.get("type")?.as_str()? {
             "function" => {
-                model_tools.push(model_discovered_function_tool(None, object)?);
+                model_tools.push(model_discovered_function_tool(
+                    /*namespace*/ None, object,
+                )?);
             }
             "namespace" => {
                 if !object_has_only_keys(object, &["type", "name", "description", "tools"]) {
@@ -682,14 +684,14 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
         match tool {
             ToolSpec::Function(tool) => {
                 model_tools.push(model_function_tool(
-                    None,
+                    /*namespace*/ None,
                     tool,
                     ModelToolPurpose::Invocation,
                 )?);
             }
             ToolSpec::Freeform(tool) => {
                 model_tools.push(model_freeform_tool(
-                    None,
+                    /*namespace*/ None,
                     tool,
                     ModelToolPurpose::Invocation,
                 )?);
