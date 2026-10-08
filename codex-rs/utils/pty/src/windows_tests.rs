@@ -379,6 +379,32 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     let Some(program) = find_powershell() else {
         return Ok(());
     };
+    let mut version_command = Command::new(&program);
+    version_command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "$PSVersionTable.PSVersion.ToString()",
+        ])
+        .kill_on_drop(true);
+    let version_output =
+        tokio::time::timeout(Duration::from_secs(5), version_command.output()).await;
+    let version_output = match version_output {
+        Ok(Ok(output)) => format!(
+            "status {:?}, stdout {:?}, stderr {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Ok(Err(err)) => format!("version probe failed: {err}"),
+        Err(_) => "version probe timed out after 5 seconds".to_string(),
+    };
+    let diagnostic_context = format!(
+        "selected PowerShell program `{program}`; version command output: {version_output}"
+    );
+    eprintln!("{diagnostic_context}");
+
     let args = vec!["-NoLogo".to_string(), "-NoProfile".to_string()];
     let env: HashMap<String, String> = std::env::vars().collect();
     let spawned = spawn_pty_process(
@@ -394,7 +420,13 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
     writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "TTL=", /*timeout_ms*/ 10_000).await?;
+    wait_for_output_contains(&mut output_rx, "TTL=", /*timeout_ms*/ 10_000)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "{diagnostic_context}: failed at readiness-marker stage (`TTL=`): {err}"
+            )
+        })?;
 
     writer.send(vec![0x03]).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -404,7 +436,12 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
         "Microsoft Windows",
         /*timeout_ms*/ 10_000,
     )
-    .await?;
+    .await
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "{diagnostic_context}: failed at post-Ctrl-C marker stage (`Microsoft Windows`): {err}"
+        )
+    })?;
 
     writer.send(b"exit 0\n".to_vec()).await?;
     let (remaining, exit_code) =

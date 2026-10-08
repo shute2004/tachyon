@@ -94,6 +94,22 @@ fn sandbox_log(codex_home: &Path) -> String {
         .unwrap_or_else(|err| format!("failed to read {}: {err}", log_path.display()))
 }
 
+async fn icacls_snapshot(label: &str, path: &Path) -> String {
+    let mut command = tokio::process::Command::new("icacls");
+    command.arg(path).kill_on_drop(true);
+    match timeout(Duration::from_secs(5), command.output()).await {
+        Ok(Ok(output)) => format!(
+            "[{label}] path={}\nstatus={}\nstdout={}\nstderr={}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Ok(Err(err)) => format!("[{label}] path={} error={err}", path.display()),
+        Err(_) => format!("[{label}] path={} timed out", path.display()),
+    }
+}
+
 fn workspace_roots_for(root: &Path) -> Vec<AbsolutePathBuf> {
     vec![AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace root")]
 }
@@ -702,6 +718,14 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&tmp_file, "tmp").expect("seed TMP file");
         fs::write(&outside_file, "outside").expect("seed outside file");
 
+        let parent_acl_before = [
+            icacls_snapshot("before outside_root", &outside_root).await,
+            icacls_snapshot("before outside_file", &outside_file).await,
+            icacls_snapshot("before workspace_file", &workspace_file).await,
+            icacls_snapshot("before protected_git_dir", &protected_git_dir).await,
+        ]
+        .join("\n\n");
+
         let script = workspace.join("delete-fixtures.cmd");
         fs::write(
             &script,
@@ -768,6 +792,14 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
                 .await;
         let stdout = String::from_utf8_lossy(&stdout);
+        let parent_acl_after = [
+            icacls_snapshot("after outside_root", &outside_root).await,
+            icacls_snapshot("after outside_file", &outside_file).await,
+        ]
+        .join("\n\n");
+        let cap_sid_path = codex_home.path().join("cap_sid");
+        let cap_sid_snapshot = fs::read_to_string(&cap_sid_path)
+            .unwrap_or_else(|err| format!("failed to read {}: {err}", cap_sid_path.display()));
 
         assert_eq!(
             (
@@ -779,7 +811,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 protected_git_dir.is_dir(),
             ),
             (0, false, false, false, Some("outside".to_string()), true),
-            "stdout={stdout:?}\n{}",
+            "stdout={stdout:?}\nparent_acl_before:\n{parent_acl_before}\nparent_acl_after:\n{parent_acl_after}\ncap_sid:\n{cap_sid_snapshot}\n{}",
             sandbox_log(codex_home.path())
         );
     });
