@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
-use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
@@ -10,7 +9,15 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::model_runtime::CodexModelRuntimeSideEvent;
+use crate::model_runtime::HarnessSamplingEvent;
+use crate::model_runtime::ModelRuntimeEvent;
 use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::SamplingModelStreamEvent;
+use crate::model_runtime::codex_local_compaction_prompt;
+use crate::model_runtime::ir::ModelEvent;
+use crate::model_runtime::normalize_sampling_event;
+use crate::model_runtime::try_model_request_from_prompt;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -54,7 +61,6 @@ use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
-use futures::prelude::*;
 use tracing::error;
 
 pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -281,11 +287,11 @@ async fn run_compact_task_inner_impl(
             .clone()
             .for_prompt(&turn_context.model_info().input_modalities);
         let turn_input_len = turn_input.len();
-        let prompt = Prompt {
-            input: turn_input,
-            base_instructions: sess.get_base_instructions().await,
-            ..Default::default()
-        };
+        let prompt = codex_local_compaction_prompt(
+            turn_input,
+            sess.get_base_instructions().await,
+            turn_context.as_ref(),
+        );
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),
@@ -330,7 +336,7 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) => {
-                if retries < max_retries {
+                if e.is_retryable() && retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
                     sess.notify_stream_error(
@@ -741,8 +747,10 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
 ) -> CodexResult<()> {
+    let model_request = try_model_request_from_prompt(prompt);
     let mut stream = turn_runtime
-        .stream(
+        .stream_migrating_request(
+            model_request.as_ref(),
             prompt,
             turn_context.model_info(),
             &turn_context.session_telemetry,
@@ -756,44 +764,85 @@ async fn drain_to_completed(
         )
         .await?;
     loop {
-        let maybe_event = stream.next().await;
-        let Some(event) = maybe_event else {
-            return Err(CodexErr::Stream(
-                "stream closed before response.completed".into(),
-            ));
+        let Some(event) = stream.next_event().await else {
+            return Err(stream.closed_stream_error());
         };
-        match event {
-            Ok(ResponseEvent::OutputItemDone(item)) => {
+        let event = event?;
+        let runtime_event = match event {
+            SamplingModelStreamEvent::Codex(event) => turn_runtime.map_stream_event(event),
+            SamplingModelStreamEvent::Canonical(event) => {
+                ModelRuntimeEvent::Model { event, codex: None }
+            }
+        };
+
+        if let ModelRuntimeEvent::Compatibility(side_event) = &runtime_event
+            && apply_codex_compaction_side_event(sess, turn_context, side_event).await
+        {
+            continue;
+        }
+
+        if !is_compaction_completion_event(&runtime_event) {
+            continue;
+        }
+        match normalize_sampling_event(runtime_event).map_err(CodexErr::InvalidRequest)? {
+            HarnessSamplingEvent::ItemCompleted(item) => {
                 sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
                     .await;
             }
-            Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
-                sess.set_server_reasoning_included(included).await;
-            }
-            Ok(ResponseEvent::RateLimits(snapshot)) => {
-                sess.update_rate_limits(turn_context, snapshot).await;
-            }
-            Ok(ResponseEvent::Completed {
+            HarnessSamplingEvent::Completed {
                 response_id,
                 token_usage,
                 ..
-            }) => {
-                sess.send_event(
-                    turn_context,
-                    EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
-                        response_id,
-                        token_usage: token_usage.clone(),
-                    }),
-                )
-                .await;
+            } => {
+                if let Some(response_id) = response_id {
+                    sess.send_event(
+                        turn_context,
+                        EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                            response_id,
+                            token_usage: token_usage.clone(),
+                        }),
+                    )
+                    .await;
+                }
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
                 return Ok(());
             }
-            Ok(_) => continue,
-            Err(e) => return Err(e),
+            HarnessSamplingEvent::ItemStarted(_) | HarnessSamplingEvent::Other(_) => continue,
         }
     }
+}
+
+async fn apply_codex_compaction_side_event(
+    sess: &Session,
+    turn_context: &TurnContext,
+    event: &CodexModelRuntimeSideEvent,
+) -> bool {
+    match event {
+        CodexModelRuntimeSideEvent::ServerReasoningIncluded(included) => {
+            sess.set_server_reasoning_included(*included).await;
+            true
+        }
+        CodexModelRuntimeSideEvent::RateLimits(snapshot) => {
+            sess.update_rate_limits(turn_context, snapshot.clone())
+                .await;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_compaction_completion_event(event: &ModelRuntimeEvent) -> bool {
+    matches!(
+        event,
+        ModelRuntimeEvent::Model {
+            event: ModelEvent::OutputItemCompleted(_) | ModelEvent::Completed(_),
+            ..
+        } | ModelRuntimeEvent::Compatibility(
+            CodexModelRuntimeSideEvent::OutputItemCompleted(_)
+                | CodexModelRuntimeSideEvent::Completed { .. }
+        )
+    )
 }
 
 #[cfg(test)]

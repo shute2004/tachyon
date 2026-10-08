@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpConfig;
 use crate::binding::McpBinding;
+use crate::binding::PreparedMcpCall;
 use crate::connection_manager::McpConnectionSet;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
@@ -446,6 +447,16 @@ impl McpRuntime {
             return None;
         }
         Self::binding_from_published_runtime(current, /*required_servers*/ &[]).await
+    }
+
+    /// Prepares an advertised tool against this publication's current catalog and client.
+    pub async fn prepare_call(&self, advertised_tool: &ToolInfo) -> Option<PreparedMcpCall> {
+        let current = self.current.load_full();
+        let config = Arc::clone(current.config.as_ref()?);
+        current
+            .connections
+            .prepare_call_for_tool(config, advertised_tool)
+            .await
     }
 
     /// Returns the latest published configuration without waiting for clients.

@@ -4,6 +4,7 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
+use codex_history::InputSource;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
@@ -14,6 +15,10 @@ use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
+use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -116,7 +121,7 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
 
     let mut ops = Vec::new();
     while let Ok(sub) = rx_sub.try_recv() {
-        ops.push(sub.op);
+        ops.push(sub.submission.op);
     }
     assert!(
         ops.iter().any(|op| matches!(op, Op::Interrupt)),
@@ -129,7 +134,7 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
 }
 
 #[tokio::test]
-async fn forward_ops_preserves_submission_trace_context() {
+async fn forward_ops_preserves_generic_and_synthetic_submission_metadata() {
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
@@ -143,37 +148,118 @@ async fn forward_ops_preserves_submission_trace_context() {
     let cancel = CancellationToken::new();
     let forward = tokio::spawn(forward_ops(Arc::clone(&io), rx_ops, cancel));
 
-    let submission = Submission {
-        id: "sub-1".to_string(),
-        op: Op::Interrupt,
-        trace: Some(codex_protocol::protocol::W3cTraceContext {
-            traceparent: Some(
-                "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
-            ),
-            tracestate: Some("vendor=state".to_string()),
-        }),
-        parent_turn_id: Some("parent-turn".to_string()),
-        root_turn_id: Some("root-turn".to_string()),
+    let (reply, reply_rx) = tokio::sync::oneshot::channel();
+    let trace = codex_protocol::protocol::W3cTraceContext {
+        traceparent: Some("00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string()),
+        tracestate: Some("vendor=state".to_string()),
     };
-    tx_ops.send(submission).await.unwrap();
+    let generic_trace = trace.clone();
+    tx_ops
+        .send(
+            Submission {
+                id: "generic-sub-1".to_string(),
+                op: Op::Interrupt,
+                trace: Some(generic_trace.clone()),
+                parent_turn_id: Some("generic-parent".to_string()),
+                root_turn_id: Some("generic-root".to_string()),
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
+    let generic_forwarded = timeout(Duration::from_secs(1), rx_sub.recv())
+        .await
+        .expect("forward_ops hung on generic submission")
+        .expect("generic forwarded submission missing");
+    assert_eq!(generic_forwarded.input_source, InputSource::Unknown);
+    assert_eq!(generic_forwarded.submission.id, "generic-sub-1");
+    assert!(matches!(generic_forwarded.submission.op, Op::Interrupt));
+    assert_eq!(generic_forwarded.submission.trace, Some(generic_trace));
+    assert_eq!(
+        generic_forwarded.submission.parent_turn_id.as_deref(),
+        Some("generic-parent")
+    );
+    assert_eq!(
+        generic_forwarded.submission.root_turn_id.as_deref(),
+        Some("generic-root")
+    );
+
+    let request_trace = trace.clone();
+    tx_ops
+        .send(SessionSubmission {
+            submission: Submission {
+                id: "sub-1".to_string(),
+                op: Op::TurnInput {
+                    request: Box::new(
+                        TurnInputRequest::user_input(vec![UserInput::Text {
+                            text: "forwarded synthetic prompt".to_string(),
+                            text_elements: Vec::new(),
+                        }])
+                        .with_trace(Some(request_trace.clone())),
+                    ),
+                    mode: TurnInputMode::StartIfIdle,
+                    reply,
+                },
+                trace: Some(trace.clone()),
+                parent_turn_id: Some("parent-turn".to_string()),
+                root_turn_id: Some("root-turn".to_string()),
+            },
+            input_source: InputSource::Synthetic,
+        })
+        .await
+        .unwrap();
     drop(tx_ops);
 
     let forwarded = timeout(Duration::from_secs(1), rx_sub.recv())
         .await
         .expect("forward_ops hung")
         .expect("forwarded submission missing");
-    assert_eq!("sub-1", forwarded.id);
-    assert!(matches!(forwarded.op, Op::Interrupt));
+    assert_eq!(forwarded.input_source, InputSource::Synthetic);
+    assert_eq!("sub-1", forwarded.submission.id);
+    assert_eq!(forwarded.submission.trace, Some(trace));
     assert_eq!(
-        forwarded.trace,
-        Some(codex_protocol::protocol::W3cTraceContext {
-            traceparent: Some(
-                "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
-            ),
-            tracestate: Some("vendor=state".to_string()),
-        })
+        forwarded.submission.parent_turn_id.as_deref(),
+        Some("parent-turn")
     );
-    assert_eq!(Some("parent-turn".to_string()), forwarded.parent_turn_id);
+    assert_eq!(
+        forwarded.submission.root_turn_id.as_deref(),
+        Some("root-turn")
+    );
+    let Op::TurnInput {
+        request,
+        reply,
+        mode,
+    } = forwarded.submission.op
+    else {
+        panic!("expected forwarded turn-input operation");
+    };
+    assert_eq!(mode, TurnInputMode::StartIfIdle);
+    assert_eq!(request.trace, Some(request_trace));
+    assert_eq!(
+        request.input,
+        codex_protocol::turn_input::TurnInput::UserInput {
+            content: vec![UserInput::Text {
+                text: "forwarded synthetic prompt".to_string(),
+                text_elements: Vec::new(),
+            }],
+            client_id: None,
+        }
+    );
+    reply
+        .send(Ok(TurnInputSubmission::Started {
+            turn_id: "forwarded-turn".to_string(),
+        }))
+        .expect("forwarded reply receiver should remain open");
+    let reply = reply_rx
+        .await
+        .expect("forwarded reply should arrive")
+        .expect("forwarded submission should succeed");
+    assert_eq!(
+        reply,
+        TurnInputSubmission::Started {
+            turn_id: "forwarded-turn".to_string(),
+        }
+    );
 
     timeout(Duration::from_secs(1), forward)
         .await

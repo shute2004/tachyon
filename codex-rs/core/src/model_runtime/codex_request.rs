@@ -697,27 +697,22 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                 )?);
             }
             ToolSpec::Namespace(namespace) => {
-                if namespace.description != default_namespace_description(&namespace.name) {
-                    return None;
-                }
+                let mut children = Vec::with_capacity(namespace.tools.len());
                 for tool in &namespace.tools {
                     match tool {
-                        ResponsesApiNamespaceTool::Function(tool) => {
-                            model_tools.push(model_function_tool(
-                                Some(namespace.name.clone()),
-                                tool,
-                                ModelToolPurpose::Invocation,
-                            )?)
-                        }
-                        ResponsesApiNamespaceTool::Custom(tool) => {
-                            model_tools.push(model_freeform_tool(
-                                Some(namespace.name.clone()),
-                                tool,
-                                ModelToolPurpose::Invocation,
-                            )?)
-                        }
+                        ResponsesApiNamespaceTool::Function(tool) => children.push(
+                            model_function_tool(None, tool, ModelToolPurpose::Invocation)?,
+                        ),
+                        ResponsesApiNamespaceTool::Custom(tool) => children.push(
+                            model_freeform_tool(None, tool, ModelToolPurpose::Invocation)?,
+                        ),
                     }
                 }
+                model_tools.push(ModelToolSpec::Namespace {
+                    name: namespace.name.clone(),
+                    description: namespace.description.clone(),
+                    tools: children,
+                });
             }
             ToolSpec::ToolSearch {
                 execution,
@@ -732,6 +727,7 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                     name: TOOL_SEARCH_NAME.to_string(),
                     description: description.clone(),
                     input_schema: serde_json::to_value(parameters).ok()?,
+                    output_schema: None,
                     strict: false,
                     availability: ModelToolAvailability::Immediate,
                     purpose: ModelToolPurpose::Discovery,
@@ -760,6 +756,7 @@ fn model_function_tool(
         name: tool.name.clone(),
         description: tool.description.clone(),
         input_schema: serde_json::to_value(&tool.parameters).ok()?,
+        output_schema: tool.output_schema.clone(),
         strict: tool.strict,
         availability: model_tool_availability(tool.defer_loading)?,
         purpose,
@@ -799,14 +796,19 @@ fn model_tool_availability(defer_loading: Option<bool>) -> Option<ModelToolAvail
 /// output values. Serialization remains inside this provider-specific conversion module.
 pub(super) fn tool_search_output_values_from_model(tools: &[ModelToolSpec]) -> Option<Vec<Value>> {
     // Model IR can represent a top-level free-form tool, but the current Codex client-discovery
-    // output vocabulary cannot. Keep this provider representability constraint at the adapter.
+    // output vocabulary cannot. Explicit groups also remain outside the flat discovery projection.
+    // Keep these provider representability constraints at the adapter.
     if tools.iter().any(|tool| {
         matches!(
             tool,
             ModelToolSpec::Freeform {
                 namespace: None,
                 ..
-            }
+            } | ModelToolSpec::Namespace { .. }
+                | ModelToolSpec::Function {
+                    output_schema: Some(_),
+                    ..
+                }
         )
     }) {
         return None;
@@ -821,29 +823,96 @@ pub(super) fn tool_search_output_values_from_model(tools: &[ModelToolSpec]) -> O
 
 fn codex_tools_from_model(tools: &[ModelToolSpec]) -> Result<Vec<ToolSpec>> {
     let mut output = Vec::new();
+    let mut last_legacy_namespace: Option<(usize, String)> = None;
     for tool in tools {
-        let namespace = match tool {
-            ModelToolSpec::Function { namespace, .. }
-            | ModelToolSpec::Freeform { namespace, .. } => namespace.as_deref(),
-        };
-        if let Some(namespace) = namespace {
-            let namespace_tool = codex_namespace_tool_from_model(tool)?;
-            if let Some(ToolSpec::Namespace(existing)) = output.last_mut()
-                && existing.name == namespace
-            {
-                existing.tools.push(namespace_tool);
-            } else {
-                output.push(ToolSpec::Namespace(ResponsesApiNamespace {
-                    name: namespace.to_string(),
-                    description: default_namespace_description(namespace),
-                    tools: vec![namespace_tool],
-                }));
+        match tool {
+            ModelToolSpec::Function {
+                namespace: Some(namespace),
+                ..
             }
-            continue;
+            | ModelToolSpec::Freeform {
+                namespace: Some(namespace),
+                ..
+            } => {
+                let namespace_tool = codex_namespace_tool_from_model(tool)?;
+                if let Some((index, previous_name)) = &last_legacy_namespace
+                    && previous_name == namespace
+                {
+                    let Some(ToolSpec::Namespace(existing)) = output.get_mut(*index) else {
+                        return Err(invalid_request(
+                            "legacy namespace grouping no longer matches its Codex tool",
+                        ));
+                    };
+                    existing.tools.push(namespace_tool);
+                } else {
+                    let index = output.len();
+                    output.push(ToolSpec::Namespace(ResponsesApiNamespace {
+                        name: namespace.clone(),
+                        description: default_namespace_description(namespace),
+                        tools: vec![namespace_tool],
+                    }));
+                    last_legacy_namespace = Some((index, namespace.clone()));
+                }
+            }
+            ModelToolSpec::Namespace {
+                name,
+                description,
+                tools: children,
+            } => {
+                let children = children
+                    .iter()
+                    .map(codex_explicit_namespace_tool_from_model)
+                    .collect::<Result<Vec<_>>>()?;
+                output.push(ToolSpec::Namespace(ResponsesApiNamespace {
+                    name: name.clone(),
+                    description: description.clone(),
+                    tools: children,
+                }));
+                last_legacy_namespace = None;
+            }
+            ModelToolSpec::Function {
+                namespace: None, ..
+            }
+            | ModelToolSpec::Freeform {
+                namespace: None, ..
+            } => {
+                output.push(codex_root_tool_from_model(tool)?);
+                last_legacy_namespace = None;
+            }
         }
-        output.push(codex_root_tool_from_model(tool)?);
     }
     Ok(output)
+}
+
+fn codex_explicit_namespace_tool_from_model(
+    tool: &ModelToolSpec,
+) -> Result<ResponsesApiNamespaceTool> {
+    match tool {
+        ModelToolSpec::Function {
+            namespace: None,
+            purpose: ModelToolPurpose::Invocation,
+            ..
+        }
+        | ModelToolSpec::Freeform {
+            namespace: None,
+            purpose: ModelToolPurpose::Invocation,
+            ..
+        } => codex_namespace_tool_from_model(tool),
+        ModelToolSpec::Function {
+            namespace: Some(_), ..
+        }
+        | ModelToolSpec::Freeform {
+            namespace: Some(_), ..
+        } => Err(invalid_request(
+            "explicit Codex namespace children cannot declare their own namespace",
+        )),
+        ModelToolSpec::Function { .. } | ModelToolSpec::Freeform { .. } => Err(invalid_request(
+            "discovery tools cannot be nested in an explicit Codex namespace",
+        )),
+        ModelToolSpec::Namespace { .. } => Err(invalid_request(
+            "nested Codex tool namespaces are not supported",
+        )),
+    }
 }
 
 fn codex_namespace_tool_from_model(tool: &ModelToolSpec) -> Result<ResponsesApiNamespaceTool> {
@@ -863,6 +932,9 @@ fn codex_namespace_tool_from_model(tool: &ModelToolSpec) -> Result<ResponsesApiN
         ModelToolSpec::Function { .. } | ModelToolSpec::Freeform { .. } => Err(invalid_request(
             "discovery tools cannot be nested in a Codex tool namespace",
         )),
+        ModelToolSpec::Namespace { .. } => Err(invalid_request(
+            "nested Codex tool namespaces are not supported",
+        )),
     }
 }
 
@@ -871,6 +943,7 @@ fn codex_root_tool_from_model(tool: &ModelToolSpec) -> Result<ToolSpec> {
         ModelToolSpec::Function {
             name,
             input_schema,
+            output_schema: None,
             strict,
             availability,
             purpose: ModelToolPurpose::Discovery,
@@ -897,6 +970,9 @@ fn codex_root_tool_from_model(tool: &ModelToolSpec) -> Result<ToolSpec> {
         ModelToolSpec::Function { .. } | ModelToolSpec::Freeform { .. } => Err(invalid_request(
             "canonical discovery tool cannot be represented by the Codex adapter",
         )),
+        ModelToolSpec::Namespace { .. } => Err(invalid_request(
+            "canonical namespace cannot be represented as a root Codex tool",
+        )),
     }
 }
 
@@ -905,6 +981,7 @@ fn codex_function_tool(tool: &ModelToolSpec) -> Result<ResponsesApiTool> {
         name,
         description,
         input_schema,
+        output_schema,
         strict,
         availability,
         purpose: ModelToolPurpose::Invocation,
@@ -920,7 +997,7 @@ fn codex_function_tool(tool: &ModelToolSpec) -> Result<ResponsesApiTool> {
         defer_loading: codex_defer_loading(*availability),
         parameters: serde_json::from_value(input_schema.clone())
             .map_err(|err| invalid_request(err.to_string()))?,
-        output_schema: None,
+        output_schema: output_schema.clone(),
     })
 }
 
@@ -956,7 +1033,8 @@ fn codex_freeform_tool(tool: &ModelToolSpec) -> Result<FreeformTool> {
 fn tool_description(tool: &ModelToolSpec) -> &str {
     match tool {
         ModelToolSpec::Function { description, .. }
-        | ModelToolSpec::Freeform { description, .. } => description,
+        | ModelToolSpec::Freeform { description, .. }
+        | ModelToolSpec::Namespace { description, .. } => description,
     }
 }
 

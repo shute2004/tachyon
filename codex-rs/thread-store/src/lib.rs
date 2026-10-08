@@ -6,6 +6,7 @@
 
 mod error;
 mod in_memory;
+mod input_identity;
 mod live_thread;
 mod local;
 mod projects;
@@ -15,6 +16,10 @@ mod thread_metadata_sync;
 mod thread_sections;
 mod types;
 
+#[cfg(test)]
+#[path = "input_identity_tests.rs"]
+mod input_identity_tests;
+
 pub use codex_state::MAX_QUEUE_ITEMS;
 pub use codex_state::ProjectSortKey;
 pub use codex_state::QueuedUserSubmissionRecord;
@@ -22,6 +27,10 @@ pub use error::ThreadStoreError;
 pub use error::ThreadStoreResult;
 pub use in_memory::InMemoryThreadStore;
 pub use in_memory::InMemoryThreadStoreCalls;
+pub use input_identity::InputIdentityContinuity;
+pub use input_identity::InputIdentityReservation;
+pub use input_identity::InputStreamIncarnation;
+pub use input_identity::ReservedInputIdentity;
 pub use live_thread::LiveThread;
 pub use live_thread::LiveThreadInitGuard;
 pub use local::LocalThreadStore;

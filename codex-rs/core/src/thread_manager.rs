@@ -8,6 +8,7 @@ use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::mcp::McpManager;
+use crate::model_runtime::ModelRuntime;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
 use crate::session::GitEnrichmentPolicy;
@@ -261,6 +262,12 @@ impl StartThreadOptions {
             client_mcp_extensions: ClientMcpExtensions::default(),
             reserved_thread_id: None,
         }
+    }
+
+    /// Uses `model_runtime` for regular sampling in the new thread.
+    pub fn with_model_runtime(mut self, model_runtime: ModelRuntime) -> Self {
+        self.thread_extension_init.insert(model_runtime);
+        self
     }
 }
 
@@ -1890,6 +1897,7 @@ impl ThreadManagerState {
             reserved_thread_id,
         } = options;
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
+        let mut thread_extension_init = thread_extension_init;
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(
                 self.environment_manager.as_ref(),
@@ -1922,6 +1930,20 @@ impl ThreadManagerState {
                     });
                 }
                 threads.remove(&resumed.conversation_id);
+            }
+        }
+        if thread_extension_init.get::<ModelRuntime>().is_none()
+            && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: source_parent_thread_id,
+                ..
+            }) = &session_source
+            && let Some(request_parent_thread_id) = parent_thread_id.as_ref()
+            && source_parent_thread_id == request_parent_thread_id
+            && let Ok(parent) = self.get_thread(*source_parent_thread_id).await
+        {
+            let parent_runtime = parent.session.services.model_runtime();
+            if let Some(child_runtime) = parent_runtime.new_child_session().await? {
+                thread_extension_init.insert(child_runtime);
             }
         }
         let (
@@ -2349,6 +2371,207 @@ fn append_interrupted_boundary(
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
+    }
+}
+
+#[cfg(test)]
+mod canonical_child_runtime_tests {
+    use super::StartThreadOptions;
+    use super::ThreadManager;
+    use super::ThreadSpawnRequest;
+    use crate::config::test_config;
+    use crate::model_runtime::ModelRuntime;
+    use codex_exec_server::EnvironmentManager;
+    use codex_history::InitialHistory;
+    use codex_history::ResumedHistory;
+    use codex_login::CodexAuth;
+    use codex_protocol::error::CodexErrorDetails;
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
+    use core_test_support::PathBufExt;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use tachyon_model::backend::ModelBackend;
+    use tachyon_model::backend::ModelBackendError;
+    use tachyon_model::backend::ModelBackendFuture;
+    use tachyon_model::backend::ModelEventStream;
+    use tachyon_model::backend::ModelTurnBackend;
+    use tachyon_model::route::ModelProtocol;
+    use tachyon_model::route::ModelProviderId;
+    use tachyon_model::route::ModelRoute;
+    use tachyon_model::route::ModelTransport;
+    use tempfile::tempdir;
+
+    #[derive(Debug, Default)]
+    struct ProbeBackend {
+        child_factory_calls: Arc<AtomicUsize>,
+        begin_turn_calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelBackend for ProbeBackend {
+        fn begin_turn(&self, provider_id: ModelProviderId) -> Box<dyn ModelTurnBackend> {
+            self.begin_turn_calls.fetch_add(1, Ordering::Relaxed);
+            Box::new(ProbeTurnBackend {
+                route: ModelRoute::new(
+                    provider_id,
+                    ModelProtocol::new("test.protocol"),
+                    ModelTransport::Http,
+                ),
+            })
+        }
+
+        fn new_child_session(
+            &self,
+        ) -> ModelBackendFuture<'_, Result<Arc<dyn ModelBackend>, ModelBackendError>> {
+            self.child_factory_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(std::future::ready(Err(
+                ModelBackendError::UnsupportedRequest(
+                    "probe backend cannot create an independent child session".to_string(),
+                ),
+            )))
+        }
+    }
+
+    struct ProbeTurnBackend {
+        route: ModelRoute,
+    }
+
+    impl ModelTurnBackend for ProbeTurnBackend {
+        fn route(&self) -> &ModelRoute {
+            &self.route
+        }
+
+        fn stream<'a>(
+            &'a mut self,
+            _model_id: &'a str,
+            _request: &'a tachyon_model::ModelRequest,
+        ) -> ModelBackendFuture<'a, Result<ModelEventStream, ModelBackendError>> {
+            Box::pin(std::future::ready(Err(
+                ModelBackendError::UnsupportedRequest(
+                    "probe turn does not stream in this test".to_string(),
+                ),
+            )))
+        }
+    }
+
+    fn thread_spawn_source(parent_thread_id: codex_protocol::ThreadId) -> SessionSource {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn explicit_child_runtime_wins_and_unsupported_parent_factory_fails_closed() {
+        let temp_home = tempdir().expect("temporary Codex home");
+        let mut config = test_config().await;
+        config.codex_home = temp_home.path().join("codex-home").abs();
+        config.cwd = config.codex_home.clone();
+        std::fs::create_dir_all(&config.codex_home).expect("create Codex home");
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.to_path_buf(),
+            Arc::new(EnvironmentManager::default_for_tests()),
+        );
+        let parent_backend = Arc::new(ProbeBackend::default());
+        let parent = manager
+            .start_thread(
+                StartThreadOptions::new(config.clone())
+                    .with_model_runtime(ModelRuntime::from_backend(parent_backend.clone())),
+            )
+            .await
+            .expect("start parent thread");
+
+        let explicit_backend = Arc::new(ProbeBackend::default());
+        let mut explicit_options = StartThreadOptions::new(config.clone())
+            .with_model_runtime(ModelRuntime::from_backend(explicit_backend.clone()));
+        explicit_options.session_source = Some(thread_spawn_source(parent.thread_id));
+        let mut explicit_request = ThreadSpawnRequest::new(
+            explicit_options,
+            Arc::clone(&manager.state.auth_manager),
+            parent.thread.session.services.agent_control.clone(),
+        );
+        explicit_request.parent_thread_id = Some(parent.thread_id);
+        let explicit_child = manager
+            .state
+            .spawn_thread(explicit_request)
+            .await
+            .expect("explicit child backend should be retained");
+        explicit_child
+            .thread
+            .session
+            .services
+            .model_runtime()
+            .begin_turn_for_provider("test-provider");
+        assert_eq!(explicit_backend.begin_turn_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            parent_backend.child_factory_calls.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(parent_backend.begin_turn_calls.load(Ordering::Relaxed), 0);
+
+        let mut duplicate_resume_options = StartThreadOptions::new(config.clone());
+        duplicate_resume_options.session_source = Some(thread_spawn_source(parent.thread_id));
+        duplicate_resume_options.initial_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: parent.thread_id,
+            history: Arc::new(Vec::new()),
+            rollout_path: None,
+        });
+        let mut duplicate_resume_request = ThreadSpawnRequest::new(
+            duplicate_resume_options,
+            Arc::clone(&manager.state.auth_manager),
+            parent.thread.session.services.agent_control.clone(),
+        );
+        duplicate_resume_request.parent_thread_id = Some(parent.thread_id);
+        let duplicate_resume = manager
+            .state
+            .spawn_thread(duplicate_resume_request)
+            .await
+            .expect("an already-running resume returns the existing thread");
+        assert_eq!(duplicate_resume.thread_id, parent.thread_id);
+        assert!(Arc::ptr_eq(&duplicate_resume.thread, &parent.thread));
+        assert_eq!(
+            parent_backend.child_factory_calls.load(Ordering::Relaxed),
+            0,
+            "an already-running resume must not create a child backend"
+        );
+
+        let mut unsupported_options = StartThreadOptions::new(config);
+        unsupported_options.session_source = Some(thread_spawn_source(parent.thread_id));
+        let mut unsupported_request = ThreadSpawnRequest::new(
+            unsupported_options,
+            Arc::clone(&manager.state.auth_manager),
+            parent.thread.session.services.agent_control.clone(),
+        );
+        unsupported_request.parent_thread_id = Some(parent.thread_id);
+        let registered_before = manager.state.threads.read().await.len();
+        let error = match manager.state.spawn_thread(unsupported_request).await {
+            Ok(_) => panic!("unsupported factory must not fall back to a shared runtime"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.details(),
+            CodexErrorDetails::InvalidRequest(message)
+                if message.contains("cannot create an independent child session")
+        ));
+        assert!(!error.is_retryable());
+        assert_eq!(
+            parent_backend.child_factory_calls.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            manager.state.threads.read().await.len(),
+            registered_before,
+            "failed child creation must not register or start a legacy child"
+        );
+        manager
+            .shutdown_all_threads_bounded(std::time::Duration::from_secs(10))
+            .await;
     }
 }
 

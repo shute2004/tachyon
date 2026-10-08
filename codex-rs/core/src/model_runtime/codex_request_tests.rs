@@ -186,6 +186,37 @@ fn client_tool_search_maps_to_discovery_semantics_without_wire_variant() {
 }
 
 #[test]
+fn client_discovery_output_keeps_explicit_groups_out_of_its_flat_vocabulary() {
+    let group = ModelToolSpec::Namespace {
+        name: "workspace".to_string(),
+        description: "Custom guidance".to_string(),
+        tools: Vec::new(),
+    };
+
+    assert_eq!(tool_search_output_values_from_model(&[group]), None);
+}
+
+#[test]
+fn client_discovery_output_rejects_function_output_schemas_without_changing_none_case() {
+    let function = |output_schema| ModelToolSpec::Function {
+        namespace: None,
+        name: "discovered_tool".to_string(),
+        description: "A discovered tool".to_string(),
+        input_schema: json!({"type": "object"}),
+        output_schema,
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Invocation,
+    };
+
+    assert_eq!(
+        tool_search_output_values_from_model(&[function(Some(json!({"type": "string"})))]),
+        None
+    );
+    assert!(tool_search_output_values_from_model(&[function(None)]).is_some());
+}
+
+#[test]
 fn default_namespace_description_round_trips_as_namespace_semantics() {
     let parameters: JsonSchema = serde_json::from_value(json!({
         "type": "object",
@@ -212,27 +243,277 @@ fn default_namespace_description_round_trips_as_namespace_semantics() {
     let request = assert_prompt_request_semantics_round_trip(&prompt);
     assert!(matches!(
         request.tools.as_slice(),
-        [ModelToolSpec::Function {
-            namespace: Some(namespace),
-            name,
-            ..
-        }] if namespace == "workspace" && name == "read_file"
+        [ModelToolSpec::Namespace {
+            name: namespace,
+            description,
+            tools,
+        }] if namespace == "workspace"
+            && *description == default_namespace_description("workspace")
+            && matches!(tools.as_slice(), [ModelToolSpec::Function {
+                namespace: None,
+                name,
+                output_schema: None,
+                ..
+            }] if name == "read_file")
     ));
 }
 
 #[test]
-fn custom_namespace_description_stays_on_legacy_path() {
+fn custom_namespace_description_and_empty_group_round_trip() {
     let prompt = prompt_with(
         Vec::new(),
         vec![ToolSpec::Namespace(ResponsesApiNamespace {
             name: "workspace".to_string(),
-            description: "Custom namespace guidance that the canonical IR cannot preserve"
-                .to_string(),
+            description: "Custom namespace guidance".to_string(),
             tools: Vec::new(),
         })],
     );
 
-    assert_eq!(try_model_request_from_prompt(&prompt), None);
+    let request = assert_prompt_request_semantics_round_trip(&prompt);
+    assert!(matches!(
+        request.tools.as_slice(),
+        [ModelToolSpec::Namespace { name, description, tools }]
+            if name == "workspace"
+                && description == "Custom namespace guidance"
+                && tools.is_empty()
+    ));
+}
+
+#[test]
+fn namespace_groups_preserve_order_duplicates_mixed_children_and_output_schemas() {
+    let schema: JsonSchema = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }))
+    .expect("valid schema");
+    let output_schema = json!({
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"],
+        "additionalProperties": false
+    });
+    let prompt = prompt_with(
+        Vec::new(),
+        vec![
+            ToolSpec::Function(ResponsesApiTool {
+                name: "root_tool".to_string(),
+                description: "Root tool".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: schema.clone(),
+                output_schema: None,
+            }),
+            ToolSpec::Namespace(ResponsesApiNamespace {
+                name: "workspace".to_string(),
+                description: "First custom description".to_string(),
+                tools: vec![
+                    ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+                        name: "read_file".to_string(),
+                        description: "Read a file".to_string(),
+                        strict: true,
+                        defer_loading: None,
+                        parameters: schema.clone(),
+                        output_schema: Some(output_schema.clone()),
+                    }),
+                    ResponsesApiNamespaceTool::Custom(FreeformTool {
+                        name: "apply_patch".to_string(),
+                        description: "Apply a patch".to_string(),
+                        defer_loading: Some(true),
+                        format: FreeformToolFormat {
+                            r#type: FREEFORM_GRAMMAR_FORMAT.to_string(),
+                            syntax: "lark".to_string(),
+                            definition: "start: patch".to_string(),
+                        },
+                    }),
+                ],
+            }),
+            ToolSpec::Namespace(ResponsesApiNamespace {
+                name: "workspace".to_string(),
+                description: "Second custom description".to_string(),
+                tools: Vec::new(),
+            }),
+            ToolSpec::Namespace(ResponsesApiNamespace {
+                name: "workspace".to_string(),
+                description: "Third custom description".to_string(),
+                tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+                    name: "write_file".to_string(),
+                    description: "Write a file".to_string(),
+                    strict: false,
+                    defer_loading: Some(true),
+                    parameters: schema,
+                    output_schema: None,
+                })],
+            }),
+        ],
+    );
+
+    let request = assert_prompt_request_semantics_round_trip(&prompt);
+    let [
+        ModelToolSpec::Function {
+            namespace: None,
+            name: root_name,
+            output_schema: None,
+            ..
+        },
+        ModelToolSpec::Namespace {
+            name: first_name,
+            description: first_description,
+            tools: first_tools,
+        },
+        ModelToolSpec::Namespace {
+            name: second_name,
+            description: second_description,
+            tools: second_tools,
+        },
+        ModelToolSpec::Namespace {
+            name: third_name,
+            description: third_description,
+            tools: third_tools,
+        },
+    ] = request.tools.as_slice()
+    else {
+        panic!("expected root tool followed by three distinct namespace groups");
+    };
+    assert_eq!(root_name, "root_tool");
+    assert_eq!(first_name, "workspace");
+    assert_eq!(first_description, "First custom description");
+    assert_eq!(second_name, "workspace");
+    assert_eq!(second_description, "Second custom description");
+    assert!(second_tools.is_empty());
+    assert_eq!(third_name, "workspace");
+    assert_eq!(third_description, "Third custom description");
+
+    assert!(matches!(
+        first_tools.as_slice(),
+        [
+            ModelToolSpec::Function {
+                namespace: None,
+                name,
+                output_schema: Some(schema),
+                ..
+            },
+            ModelToolSpec::Freeform {
+                namespace: None,
+                name: freeform_name,
+                availability: ModelToolAvailability::Deferred,
+                ..
+            }
+        ] if name == "read_file" && schema == &output_schema && freeform_name == "apply_patch"
+    ));
+    assert!(matches!(
+        third_tools.as_slice(),
+        [ModelToolSpec::Function {
+            namespace: None,
+            name,
+            output_schema: None,
+            availability: ModelToolAvailability::Deferred,
+            ..
+        }] if name == "write_file"
+    ));
+}
+
+#[test]
+fn legacy_flat_namespace_leaves_keep_grouping_without_merging_explicit_groups() {
+    let prompt = prompt_with(Vec::new(), Vec::new());
+    let mut request = try_model_request_from_prompt(&prompt).expect("empty prompt is canonical");
+    let input_schema = json!({"type": "object", "properties": {}});
+    let function = |name: &str, output_schema: Option<serde_json::Value>| ModelToolSpec::Function {
+        namespace: Some("workspace".to_string()),
+        name: name.to_string(),
+        description: name.to_string(),
+        input_schema: input_schema.clone(),
+        output_schema,
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Invocation,
+    };
+    request.tools = vec![
+        ModelToolSpec::Namespace {
+            name: "workspace".to_string(),
+            description: "Explicit one".to_string(),
+            tools: Vec::new(),
+        },
+        function("flat_one", None),
+        function("flat_two", Some(json!({"type": "string"}))),
+        ModelToolSpec::Namespace {
+            name: "workspace".to_string(),
+            description: "Explicit two".to_string(),
+            tools: Vec::new(),
+        },
+        function("flat_three", None),
+    ];
+
+    let rebuilt = prompt_from_model_request(&request, &prompt).expect("flat leaves rebuild");
+    let [
+        ToolSpec::Namespace(first_explicit),
+        ToolSpec::Namespace(first_flat_group),
+        ToolSpec::Namespace(second_explicit),
+        ToolSpec::Namespace(second_flat_group),
+    ] = rebuilt.tools.as_ref()
+    else {
+        panic!("expected explicit groups and separately coalesced flat groups");
+    };
+    assert_eq!(first_explicit.description, "Explicit one");
+    assert!(first_explicit.tools.is_empty());
+    assert_eq!(
+        first_flat_group.description,
+        default_namespace_description("workspace")
+    );
+    assert!(matches!(
+        first_flat_group.tools.as_slice(),
+        [
+            ResponsesApiNamespaceTool::Function(first),
+            ResponsesApiNamespaceTool::Function(second)
+        ] if first.name == "flat_one"
+            && first.output_schema.is_none()
+            && second.name == "flat_two"
+            && second.output_schema == Some(json!({"type": "string"}))
+    ));
+    assert_eq!(second_explicit.description, "Explicit two");
+    assert!(second_explicit.tools.is_empty());
+    assert_eq!(
+        second_flat_group.description,
+        default_namespace_description("workspace")
+    );
+    assert!(matches!(
+        second_flat_group.tools.as_slice(),
+        [ResponsesApiNamespaceTool::Function(tool)] if tool.name == "flat_three"
+    ));
+}
+
+#[test]
+fn explicit_namespace_rejects_nested_discovery_and_conflicting_children() {
+    let prompt = prompt_with(Vec::new(), Vec::new());
+    let request = || try_model_request_from_prompt(&prompt).expect("empty prompt is canonical");
+    let group = |tools| ModelToolSpec::Namespace {
+        name: "workspace".to_string(),
+        description: "Workspace".to_string(),
+        tools,
+    };
+    let function = |namespace, purpose| ModelToolSpec::Function {
+        namespace,
+        name: "tool".to_string(),
+        description: "Tool".to_string(),
+        input_schema: json!({"type": "object"}),
+        output_schema: None,
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose,
+    };
+
+    for invalid_group in [
+        group(vec![group(Vec::new())]),
+        group(vec![function(
+            Some("other".to_string()),
+            ModelToolPurpose::Invocation,
+        )]),
+        group(vec![function(None, ModelToolPurpose::Discovery)]),
+    ] {
+        let mut invalid_request = request();
+        invalid_request.tools = vec![invalid_group];
+        assert!(prompt_from_model_request(&invalid_request, &prompt).is_err());
+    }
 }
 
 #[test]
@@ -405,34 +686,61 @@ fn responses_encrypted_tool_schema_stays_on_legacy_path() {
 }
 
 #[test]
-fn function_tool_output_schema_stays_on_legacy_path_until_ir_supports_it() {
+fn function_output_schema_round_trips_raw_json_independently_of_input_markers() {
     let parameters: JsonSchema = serde_json::from_value(json!({
         "type": "object",
         "properties": {},
         "additionalProperties": false
     }))
     .expect("valid schema");
+    let output_schema = json!({
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "encrypted": {"provider_marker_like_key": true},
+        "required": ["result"],
+        "additionalProperties": false
+    });
 
     let prompt = prompt_with(
         Vec::new(),
-        vec![ToolSpec::Function(ResponsesApiTool {
-            name: "structured_result_tool".to_string(),
-            description: "Has a harness-owned output contract".to_string(),
-            strict: false,
-            defer_loading: None,
-            parameters,
-            output_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "result": {"type": "string"}
-                },
-                "required": ["result"],
-                "additionalProperties": false
-            })),
-        })],
+        vec![
+            ToolSpec::Function(ResponsesApiTool {
+                name: "structured_result_tool".to_string(),
+                description: "Has a harness-owned output contract".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: parameters.clone(),
+                output_schema: Some(output_schema.clone()),
+            }),
+            ToolSpec::Function(ResponsesApiTool {
+                name: "plain_result_tool".to_string(),
+                description: "Has no output contract".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters,
+                output_schema: None,
+            }),
+        ],
     );
 
-    assert_eq!(try_model_request_from_prompt(&prompt), None);
+    let request = assert_prompt_request_semantics_round_trip(&prompt);
+    assert!(matches!(
+        request.tools.as_slice(),
+        [
+            ModelToolSpec::Function {
+                name: with_output,
+                output_schema: Some(actual),
+                ..
+            },
+            ModelToolSpec::Function {
+                name: without_output,
+                output_schema: None,
+                ..
+            }
+        ] if with_output == "structured_result_tool"
+            && actual == &output_schema
+            && without_output == "plain_result_tool"
+    ));
 }
 
 #[test]

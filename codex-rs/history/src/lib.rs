@@ -30,11 +30,17 @@ use serde::Serializer;
 use serde::de::Error as _;
 
 mod envelope;
+mod input_association;
+mod input_identity;
 mod item;
 mod response_projection;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
+pub use input_association::InputAssociation;
+pub use input_association::InputSource;
+pub use input_identity::InputIdentity;
+pub use input_identity::InputStreamIncarnation;
 pub use item::HistoryImageDetail;
 pub use item::HistoryItem;
 pub use item::HistoryMediaSource;
@@ -68,6 +74,13 @@ pub struct CodexHarnessMetadata {
     /// Measured in tokens, with any tool-specific allowance already included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_token_limit_override: Option<usize>,
+
+    /// Descriptive identity and source for an original input history record.
+    ///
+    /// This provider-neutral value temporarily uses the migration-era metadata sidecar. It is
+    /// forgeable data, not proof of admission, persistence, or transcript completeness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_association: Option<InputAssociation>,
 }
 
 /// Transitional compatibility alias for Responses-shaped history callers.
@@ -420,3 +433,11 @@ mod tests;
 #[cfg(test)]
 #[path = "response_projection_tests.rs"]
 mod response_projection_tests;
+
+#[cfg(test)]
+#[path = "input_identity_tests.rs"]
+mod input_identity_tests;
+
+#[cfg(test)]
+#[path = "input_association_tests.rs"]
+mod input_association_tests;

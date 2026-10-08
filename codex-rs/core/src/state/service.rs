@@ -92,6 +92,8 @@ pub(crate) struct SessionServices {
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) time_provider: Arc<dyn TimeProvider>,
+    /// Session-scoped Tachyon model runtime selected when this thread was started.
+    pub(crate) model_runtime: ModelRuntime,
     /// Transitional Codex model client. Callers moving into the Tachyon model boundary should use
     /// [`SessionServices::model_runtime`] rather than depending on this field directly.
     pub(crate) model_client: ModelClient,
@@ -102,12 +104,8 @@ pub(crate) struct SessionServices {
 }
 
 impl SessionServices {
-    /// Returns the session-scoped Tachyon model runtime backed by the transitional Codex client.
-    ///
-    /// `ModelClient` remains stored here until all harness call sites have migrated. Because
-    /// `ModelClient` clones share the same internal state, constructing this lightweight wrapper
-    /// preserves the existing session-scoped provider, recovery, and reusable backend cache.
+    /// Returns the session-scoped Tachyon model runtime selected for this thread.
     pub(crate) fn model_runtime(&self) -> ModelRuntime {
-        ModelRuntime::from_codex_client(self.model_client.clone())
+        self.model_runtime.clone()
     }
 }

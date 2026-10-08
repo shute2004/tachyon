@@ -2,6 +2,8 @@ mod archive_thread;
 mod create_thread;
 mod delete_thread;
 mod helpers;
+#[cfg(unix)]
+mod input_identity_journal;
 mod list_threads;
 mod live_writer;
 mod model_context;
@@ -25,10 +27,16 @@ mod update_thread_metadata;
 mod writer_lock;
 
 #[cfg(test)]
+#[path = "input_identity_journal_tests.rs"]
+mod input_identity_journal_tests;
+#[cfg(test)]
 #[path = "pending_thread_metadata_tests.rs"]
 mod pending_thread_metadata_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+#[path = "timestamp_metadata_tests.rs"]
+mod timestamp_metadata_tests;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -57,6 +65,7 @@ use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
 use crate::DeleteThreadsParams;
 use crate::DeletedProject;
+use crate::InputIdentityReservation;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListProjectsParams;
@@ -460,6 +469,56 @@ impl ThreadStore for LocalThreadStore {
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::resume_thread(self, params).await })
+    }
+
+    fn reserve_input_identity(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, InputIdentityReservation> {
+        #[cfg(not(unix))]
+        {
+            let _ = thread_id;
+            Box::pin(async {
+                Err(ThreadStoreError::Unsupported {
+                    operation: "reserve_input_identity",
+                })
+            })
+        }
+
+        #[cfg(unix)]
+        {
+            Box::pin(async move {
+                let live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+                let is_live = self.live_recorders.lock().await.contains_key(&thread_id);
+                if !is_live {
+                    return Err(ThreadStoreError::ThreadNotFound { thread_id });
+                }
+
+                let store = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = input_identity_journal::reserve(
+                        store.config.codex_home.as_path(),
+                        thread_id,
+                    )
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to reserve input identity for thread {thread_id}: {err}"
+                        ),
+                    });
+                    // Keep the per-thread guard and complete store clone alive if the async
+                    // caller is cancelled while this blocking journal transaction is queued.
+                    drop(live_writer_guard);
+                    drop(store);
+                    result
+                })
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!(
+                        "input identity reservation worker failed for thread {thread_id}: {err}"
+                    ),
+                })?
+            })
+        }
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {

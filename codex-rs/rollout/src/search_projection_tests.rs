@@ -1,7 +1,10 @@
+use std::num::NonZeroU64;
+
 use codex_history::CodexHarnessMetadata;
 use codex_history::HistoryItemProjection;
 use codex_history::HistoryProjectionFallback;
 use codex_history::project_response_item;
+use codex_protocol::ThreadId;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
@@ -9,6 +12,9 @@ use codex_protocol::models::ResponseItem;
 use serde_json::json;
 
 use super::conversation_text_from_item;
+use crate::InputAssociation;
+use crate::InputIdentity;
+use crate::InputSource;
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
 use crate::RolloutLine;
@@ -73,6 +79,15 @@ fn canonical_message_text_ignores_images_and_audio_in_source_order() {
 
 #[test]
 fn metadata_bearing_envelope_is_preserved_during_projection() {
+    let input_association = InputAssociation {
+        identity: InputIdentity {
+            thread_id: ThreadId::from_u128(0x0123456789abcdef0123456789abcdef),
+            incarnation: serde_json::from_value(json!("fedcba98-7654-3210-fedc-ba9876543210"))
+                .expect("fixed incarnation is valid"),
+            sequence: NonZeroU64::new(u64::MAX).expect("maximum sequence is nonzero"),
+        },
+        source: InputSource::Unknown,
+    };
     let envelope = ResponseItemEnvelope::with_metadata(
         message(
             "user",
@@ -83,6 +98,7 @@ fn metadata_bearing_envelope_is_preserved_during_projection() {
         CodexHarnessMetadata {
             client_authored: true,
             fallback_token_limit_override: Some(4096),
+            input_association: Some(input_association),
         },
     );
     let item = RolloutItem::ResponseItem(envelope.clone());
@@ -105,7 +121,14 @@ fn metadata_bearing_envelope_is_preserved_during_projection() {
         Some("metadata stays attached".to_string())
     );
 
-    let encoded_after = serde_json::to_vec(&line).expect("rollout line should serialize");
+    let decoded_line = crate::parse_rollout_line_bytes(&encoded_before)
+        .expect("serialized rollout line should decode");
+    let RolloutItem::ResponseItem(decoded_envelope) = &decoded_line.item else {
+        panic!("expected response item");
+    };
+    assert_eq!(decoded_envelope.item, envelope.item);
+    assert_eq!(decoded_envelope, &envelope);
+    let encoded_after = serde_json::to_vec(&decoded_line).expect("decoded line should serialize");
     assert_eq!(encoded_after, encoded_before);
 }
 

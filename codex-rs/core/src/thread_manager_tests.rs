@@ -1298,6 +1298,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                     plugin_display_name: plugin_id.clone(),
                     plugin_id,
                     selection_order: 0,
+                    source_environment_id: environment_id.clone(),
                     config: Box::new(server),
                 }]
             })

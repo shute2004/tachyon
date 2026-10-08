@@ -120,6 +120,7 @@ pub(super) fn metadata_from_discovery(
     Some(SelectedPluginMetadata {
         plugin_id: selected_root.id.clone(),
         plugin_display_name: manifest.display_name().to_string(),
+        source_environment_id: environment_id.clone(),
         servers,
         connector_ids,
     })

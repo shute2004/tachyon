@@ -19,7 +19,6 @@ use codex_exec_server_protocol::RequestId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
@@ -33,6 +32,16 @@ use crate::connection::JsonRpcConnection;
 use crate::connection::JsonRpcConnectionEvent;
 use crate::connection::JsonRpcTransport;
 use crate::rpc_server_requests::RpcServerRequestSender;
+
+#[path = "rpc_pending_request.rs"]
+mod rpc_pending_request;
+use rpc_pending_request::PendingRequestGuard;
+use rpc_pending_request::PendingRequests;
+use rpc_pending_request::lock_pending;
+
+#[cfg(test)]
+#[path = "rpc_cancellation_tests.rs"]
+mod cancellation_tests;
 
 pub(crate) const SESSION_ALREADY_ATTACHED_ERROR_CODE: i64 = -32010;
 const MAX_IN_FLIGHT_REGULAR_CALLS: usize = 1024;
@@ -301,7 +310,7 @@ where
 
 pub(crate) struct RpcClient {
     write_tx: mpsc::Sender<JSONRPCMessage>,
-    pending: Arc<Mutex<HashMap<RequestId, PendingRequest>>>,
+    pending: Arc<StdMutex<PendingRequests>>,
     inbound_request_ids: Arc<StdMutex<HashSet<RequestId>>>,
     // Shared transport state from `JsonRpcConnection`. Calls use this to fail
     // immediately when the socket closes, even if no JSON-RPC error response
@@ -325,7 +334,7 @@ impl RpcClient {
             task_handles: transport_tasks,
             transport,
         } = connection;
-        let pending = Arc::new(Mutex::new(HashMap::<RequestId, PendingRequest>::new()));
+        let pending = Arc::new(StdMutex::new(HashMap::<RequestId, PendingRequest>::new()));
         let closed = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = mpsc::channel(128);
 
@@ -373,7 +382,7 @@ impl RpcClient {
             };
 
             closed_for_reader.store(true, Ordering::Release);
-            drain_pending(&pending_for_reader).await;
+            drain_pending(&pending_for_reader);
             let _ = event_tx
                 .send(RpcClientEvent::Disconnected {
                     reason: disconnect_reason,
@@ -501,7 +510,7 @@ impl RpcClient {
         for task in &self.transport_tasks {
             task.abort();
         }
-        drain_pending(&self.pending).await;
+        drain_pending(&self.pending);
     }
 
     // Callers keep this permit until `call_inner` returns, so an executor
@@ -593,24 +602,21 @@ impl RpcClient {
     {
         let request_id = RequestId::Integer(self.next_request_id.fetch_add(1, Ordering::SeqCst));
         let (response_tx, response_rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
+        let _pending_cleanup = {
+            let mut pending = lock_pending(&self.pending);
             // Registering the pending request and checking disconnect must be
             // atomic with the reader's drain_pending path. Otherwise a call
             // can sneak in after the drain and wait forever.
             if self.closed.load(Ordering::Acquire) || *self.disconnected_rx.borrow() {
                 return Err(RpcCallError::Closed);
             }
-            pending.retain(|_, response_tx| !response_tx.is_closed());
             pending.insert(request_id.clone(), response_tx);
-        }
+            PendingRequestGuard::new(Arc::clone(&self.pending), request_id.clone())
+        };
 
         let params = match serde_json::to_value(params) {
             Ok(params) => params,
-            Err(err) => {
-                self.pending.lock().await.remove(&request_id);
-                return Err(RpcCallError::Json(err));
-            }
+            Err(err) => return Err(RpcCallError::Json(err)),
         };
         if self
             .write_tx
@@ -623,7 +629,6 @@ impl RpcClient {
             .await
             .is_err()
         {
-            self.pending.lock().await.remove(&request_id);
             return Err(RpcCallError::Closed);
         }
 
@@ -638,7 +643,6 @@ impl RpcClient {
             RpcCallTimeout::After(call_timeout) => match timeout(call_timeout, response_rx).await {
                 Ok(response) => response,
                 Err(_) => {
-                    self.pending.lock().await.remove(&request_id);
                     return Err(RpcCallError::TimedOut {
                         method: method.to_string(),
                         timeout: call_timeout,
@@ -656,7 +660,7 @@ impl RpcClient {
 
     #[cfg(test)]
     pub(crate) async fn pending_request_count(&self) -> usize {
-        self.pending.lock().await.len()
+        lock_pending(&self.pending).len()
     }
 }
 
@@ -774,18 +778,20 @@ where
 }
 
 async fn handle_server_message(
-    pending: &Mutex<HashMap<RequestId, PendingRequest>>,
+    pending: &StdMutex<PendingRequests>,
     event_tx: &mpsc::Sender<RpcClientEvent>,
     message: JSONRPCMessage,
 ) -> Result<(), String> {
     match message {
         JSONRPCMessage::Response(JSONRPCResponse { id, result }) => {
-            if let Some(pending) = pending.lock().await.remove(&id) {
+            let pending_response = lock_pending(pending).remove(&id);
+            if let Some(pending) = pending_response {
                 let _ = pending.send(Ok(result));
             }
         }
         JSONRPCMessage::Error(JSONRPCError { id, error }) => {
-            if let Some(pending) = pending.lock().await.remove(&id) {
+            let pending_response = lock_pending(pending).remove(&id);
+            if let Some(pending) = pending_response {
                 let _ = pending.send(Err(RpcCallError::Server(error)));
             }
         }
@@ -808,9 +814,9 @@ async fn handle_server_message(
     Ok(())
 }
 
-async fn drain_pending(pending: &Mutex<HashMap<RequestId, PendingRequest>>) {
+fn drain_pending(pending: &StdMutex<PendingRequests>) {
     let pending = {
-        let mut pending = pending.lock().await;
+        let mut pending = lock_pending(pending);
         pending
             .drain()
             .map(|(_, pending)| pending)
@@ -869,7 +875,9 @@ mod tests {
             .expect("reserved capacity must remain available for controller responses");
     }
 
-    async fn read_jsonrpc_line<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> JSONRPCMessage
+    pub(super) async fn read_jsonrpc_line<R>(
+        lines: &mut tokio::io::Lines<BufReader<R>>,
+    ) -> JSONRPCMessage
     where
         R: tokio::io::AsyncRead + Unpin,
     {

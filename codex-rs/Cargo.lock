@@ -2868,6 +2868,7 @@ dependencies = [
  "sha1 0.10.6",
  "shlex",
  "similar",
+ "tachyon-model",
  "tempfile",
  "test-case",
  "test-log",
@@ -13725,6 +13726,13 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "tachyon-model"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

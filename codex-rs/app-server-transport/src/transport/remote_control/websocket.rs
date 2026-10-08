@@ -782,8 +782,7 @@ impl RemoteControlWebsocket {
                         self.status_publisher
                             .publish_status(RemoteControlConnectionStatus::Errored);
                         let reconnect_attempt = self.reconnect_attempt.saturating_add(1);
-                        let (reconnect_delay, reconnect_backoff_reset) =
-                            next_reconnect_delay(&mut self.reconnect_attempt);
+                        let reconnect_delay = next_reconnect_delay(&mut self.reconnect_attempt);
                         let enrollment = self.current_enrollment.snapshot();
                         warn!(
                             websocket_url = %remote_control_target.websocket_url,
@@ -793,19 +792,12 @@ impl RemoteControlWebsocket {
                             error_kind = ?err.kind(),
                             reconnect_attempt,
                             reconnect_delay = ?reconnect_delay,
-                            reconnect_backoff_reset,
                             has_enrollment = enrollment.is_some(),
                             server_id = ?enrollment.as_ref().map(|enrollment| enrollment.server_id.as_str()),
                             environment_id = ?enrollment.as_ref().map(|enrollment| enrollment.environment_id.as_str()),
                             subscribe_cursor_present = subscribe_cursor.is_some(),
                             "failed to connect to app-server remote control websocket"
                         );
-                        if reconnect_backoff_reset {
-                            info!(
-                                reconnect_backoff_cap = ?REMOTE_CONTROL_RECONNECT_BACKOFF_CAP,
-                                "reset app-server remote control websocket reconnect backoff after cap"
-                            );
-                        }
                         reconnect_delay
                     };
                     tokio::select! {
@@ -1309,15 +1301,15 @@ async fn build_remote_control_websocket_request(
     Ok(request)
 }
 
-fn next_reconnect_delay(reconnect_attempt: &mut u64) -> (std::time::Duration, bool) {
+fn next_reconnect_delay(reconnect_attempt: &mut u64) -> std::time::Duration {
     let reconnect_delay = backoff(*reconnect_attempt).min(REMOTE_CONTROL_RECONNECT_BACKOFF_CAP);
-    let reconnect_backoff_reset = reconnect_delay == REMOTE_CONTROL_RECONNECT_BACKOFF_CAP;
-    *reconnect_attempt = if reconnect_backoff_reset {
-        0
-    } else {
-        (*reconnect_attempt).saturating_add(1)
-    };
-    (reconnect_delay, reconnect_backoff_reset)
+    // Stay at the cap during sustained failures, including duplicate-presence
+    // conflicts. Success or an auth change resets backoff in the connect loop.
+    // Stop advancing the exponent too, so a long failure streak cannot overflow it.
+    if reconnect_delay < REMOTE_CONTROL_RECONNECT_BACKOFF_CAP {
+        *reconnect_attempt = (*reconnect_attempt).saturating_add(1);
+    }
+    reconnect_delay
 }
 
 pub(super) async fn connect_remote_control_websocket(
@@ -1819,6 +1811,10 @@ fn format_remote_control_websocket_connect_error(
 }
 
 #[cfg(test)]
+#[path = "websocket_retry_tests.rs"]
+mod retry_tests;
+
+#[cfg(test)]
 #[path = "websocket_refresh_tests.rs"]
 mod refresh_tests;
 
@@ -1891,26 +1887,6 @@ mod tests {
         enrollment: Option<RemoteControlEnrollment>,
     ) -> CurrentRemoteControlEnrollment {
         Arc::new(RemoteControlEnrollmentState::new(enrollment))
-    }
-
-    #[test]
-    fn next_reconnect_delay_resets_after_cap() {
-        let mut reconnect_attempt = 9;
-
-        let (reconnect_delay, reconnect_backoff_reset) =
-            next_reconnect_delay(&mut reconnect_attempt);
-
-        assert_eq!(reconnect_delay, REMOTE_CONTROL_RECONNECT_BACKOFF_CAP);
-        assert!(reconnect_backoff_reset);
-        assert_eq!(reconnect_attempt, 0);
-
-        let (reconnect_delay, reconnect_backoff_reset) =
-            next_reconnect_delay(&mut reconnect_attempt);
-
-        assert!(reconnect_delay >= Duration::from_millis(180));
-        assert!(reconnect_delay <= Duration::from_millis(220));
-        assert!(!reconnect_backoff_reset);
-        assert_eq!(reconnect_attempt, 1);
     }
 
     #[test]

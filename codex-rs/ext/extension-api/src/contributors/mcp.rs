@@ -143,6 +143,8 @@ pub enum McpServerContribution {
         plugin_id: String,
         plugin_display_name: String,
         selection_order: usize,
+        /// Environment that supplied the plugin, independent of the server's execution environment.
+        source_environment_id: String,
         config: Box<McpServerConfig>,
     },
     /// Records a plugin selected for this thread and any connector IDs it declares.

@@ -1,0 +1,11 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "tachyon-model"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

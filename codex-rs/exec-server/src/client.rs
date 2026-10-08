@@ -133,7 +133,6 @@ mod network_policy_audit;
 mod recovery;
 #[path = "client_refresh.rs"]
 mod refresh;
-#[cfg(test)]
 pub(crate) use recovery::is_environment_offline_error;
 pub(crate) use recovery::is_retryable_recovery_error;
 pub(crate) use recovery::is_retryable_registry_error;

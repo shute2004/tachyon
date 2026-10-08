@@ -6,6 +6,7 @@ use codex_core::config::Constrained;
 use codex_core::find_thread_path_by_id_str;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
+use codex_history::InputSource;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -1178,6 +1179,7 @@ async fn review_input_isolated_from_parent_history() {
     })
     .await;
     let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    codex.shutdown_and_wait().await.unwrap();
 
     // Assert the request `input` contains the environment context followed by the user review prompt.
     let request = request_log.single_request();
@@ -1212,6 +1214,27 @@ async fn review_input_isolated_from_parent_history() {
         review_text, review_prompt,
         "user message should only contain the raw review prompt"
     );
+    let forbidden_identity_fields = ["input_association", "input_identity"];
+    let mut provider_body_values = vec![&body];
+    while let Some(value) = provider_body_values.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                for field in &forbidden_identity_fields {
+                    assert!(
+                        !object.contains_key(*field),
+                        "provider request body leaked nested {field} history metadata"
+                    );
+                }
+                provider_body_values.extend(object.values());
+            }
+            serde_json::Value::Array(values) => provider_body_values.extend(values),
+            _ => {}
+        }
+    }
+    let review_thread_id = body["client_metadata"]["thread_id"]
+        .as_str()
+        .expect("review request should include its thread ID")
+        .to_string();
 
     // Ensure the REVIEW_PROMPT rubric is sent via instructions.
     let instructions = body["instructions"].as_str().expect("instructions string");
@@ -1221,22 +1244,48 @@ async fn review_input_isolated_from_parent_history() {
     let path = codex.rollout_path().expect("rollout path");
     let text = std::fs::read_to_string(&path).expect("read rollout file");
     let mut saw_interruption_message = false;
+    let mut legacy_parent_seed_record_count = 0;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
         let rl = codex_rollout::decode_rollout_line(v).expect("rollout line");
-        if let RolloutItem::ResponseItem(envelope) = rl.item
-            && let ResponseItem::Message { role, content, .. } = envelope.item
-            && role == "user"
-        {
-            for c in content {
-                if let ContentItem::InputText { text } = c
-                    && text.contains("User initiated a review task, but was interrupted.")
-                {
-                    saw_interruption_message = true;
-                    break;
+        if let RolloutItem::ResponseItem(envelope) = rl.item {
+            let is_legacy_parent_seed = match &envelope.item {
+                ResponseItem::Message { role, content, .. } if role == "user" => {
+                    content.iter().any(|item| {
+                        matches!(item, ContentItem::InputText { text } if text == "parent: earlier user message")
+                    })
+                }
+                ResponseItem::Message { role, content, .. } if role == "assistant" => {
+                    content.iter().any(|item| {
+                        matches!(item, ContentItem::OutputText { text } if text == "parent: assistant reply")
+                    })
+                }
+                _ => false,
+            };
+            if is_legacy_parent_seed {
+                legacy_parent_seed_record_count += 1;
+                assert!(
+                    envelope
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.input_association)
+                        .is_none(),
+                    "legacy parent history must remain unassociated"
+                );
+            }
+            if let ResponseItem::Message { role, content, .. } = envelope.item
+                && role == "user"
+            {
+                for c in content {
+                    if let ContentItem::InputText { text } = c
+                        && text.contains("User initiated a review task, but was interrupted.")
+                    {
+                        saw_interruption_message = true;
+                        break;
+                    }
                 }
             }
         }
@@ -1248,6 +1297,62 @@ async fn review_input_isolated_from_parent_history() {
         saw_interruption_message,
         "expected user interruption message in rollout"
     );
+    assert_eq!(legacy_parent_seed_record_count, 2);
+
+    let review_rollout_path = find_thread_path_by_id_str(
+        codex_home.path(),
+        &review_thread_id,
+        /*state_db_ctx*/ None,
+    )
+    .await
+    .unwrap()
+    .expect("review child should have a rollout");
+    let review_rollout = std::fs::read_to_string(review_rollout_path)
+        .expect("review child rollout should be readable");
+    let mut raw_review_prompt_record_count = 0;
+    let mut associated_record_count = 0;
+    let mut review_prompt_associations = Vec::new();
+    for line in review_rollout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let rollout_line = codex_rollout::parse_rollout_line(line).expect("review rollout line");
+        let RolloutItem::ResponseItem(envelope) = rollout_line.item else {
+            continue;
+        };
+        let is_raw_review_prompt = matches!(
+            &envelope.item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && content.len() == 1
+                    && matches!(
+                        &content[0],
+                        ContentItem::InputText { text } if text == &review_prompt
+                    )
+        );
+        if is_raw_review_prompt {
+            raw_review_prompt_record_count += 1;
+        }
+        if let Some(association) = envelope
+            .metadata
+            .and_then(|metadata| metadata.input_association)
+        {
+            associated_record_count += 1;
+            assert!(
+                is_raw_review_prompt,
+                "only the original raw review prompt may have an input association"
+            );
+            review_prompt_associations.push(association);
+        }
+    }
+    assert_eq!(raw_review_prompt_record_count, 1);
+    assert_eq!(associated_record_count, 1);
+    let association = review_prompt_associations
+        .pop()
+        .expect("raw review prompt input association");
+    assert_eq!(association.source, InputSource::Synthetic);
+    assert_eq!(association.identity.thread_id.to_string(), review_thread_id);
+    assert!(association.identity.sequence.get() > 0);
 
     let _codex_home_guard = codex_home;
     server.verify().await;

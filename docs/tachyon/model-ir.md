@@ -46,7 +46,72 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - text, tool-input, and reasoning deltas;
 - request completion and provider-reported token usage.
 
-The Rust definitions live in `codex-rs/core/src/model_runtime/ir.rs` during extraction.
+The Rust definitions live in the `tachyon-model` crate at
+`codex-rs/tachyon-model/src/lib.rs`. This crate depends only on `std` and `serde_json`,
+not on Core, provider protocols, authentication, or UI crates. Core's
+`codex-rs/core/src/model_runtime/ir.rs` re-exports those same types for existing callers;
+there is no second IR definition or conversion between the two import paths.
+
+The existing provider, protocol, transport, and route identities likewise belong to
+`tachyon-model::route`; Core retains `model_runtime::route` as a compatibility re-export.
+Endpoint resolution, authentication, and concrete transport execution remain adapter-owned.
+
+The existing twelve IR semantics tests live with the owning crate. Core separately checks
+cross-path type identity and its adapter conversions. This ownership move does not yet make
+the complete model runtime or agent loop independent of Codex.
+
+## Executable backend boundary
+
+`tachyon-model::backend` defines a session-scoped `ModelBackend` factory, a fresh
+provider-bound `ModelTurnBackend` for each harness turn, and an ordered canonical event
+source. A selected model ID is passed separately from the provider identity. Backends own
+their endpoint, authentication, transport, and reusable private resources; these do not
+cross the canonical contract.
+
+A host selects this runtime with `ModelRuntime::from_backend` and
+`StartThreadOptions::with_model_runtime`. Session startup snapshots that selection, rather
+than looking it up from mutable extension data on every turn. The normal sampling path
+keeps one backend handle across tool follow-ups and checks its provider identity before
+each request. Fatal or unsupported requests are not retried; retryable backend failures
+use the existing bounded stream retry policy.
+
+Canonical output reaches the existing history and tool handlers through a transitional
+projection, without invented Codex event context or response IDs. Raw Responses telemetry
+remains exclusive to the Codex path. The Codex adapter retains its lossless legacy fallback;
+a canonical backend instead rejects prompts containing unsupported history or tool declarations.
+Function tool declarations retain their optional JSON output schemas. Explicit namespace
+groups preserve descriptions, empty groups, duplicate group boundaries and declaration order;
+their children do not declare another namespace. The Codex adapter rejects nested groups and
+discovery children instead of inventing conflict-resolution semantics. Legacy flat namespaced
+declarations retain their existing grouping behavior, separately from explicit groups.
+Hosted WebSearch remains unsupported by this canonical sampling slice. Client-discovery output
+retains its existing flat vocabulary and rejects explicit groups or output-schema declarations;
+this request-side extension does not silently expand the discovery protocol.
+
+Delegated ThreadSpawn children with a registered matching parent use the parent's selected
+runtime to request an independent `ModelBackend::new_child_session` factory. Session-affinity
+and preparation state remain independent, while backend-private reusable transport/auth resources
+may be shared. An explicitly supplied child runtime wins without calling the parent factory.
+Unsupported child creation is a non-retryable error, not permission to fall back to Codex or
+share the parent factory. Already-running resumes return their existing session first. Codex
+parents retain the existing fresh-client path; Internal/Guardian sessions and general public
+forks are unchanged. Forked history does not copy provider-private continuation state.
+
+Local compaction consumes canonical completed items and usage through the selected runtime,
+using the existing history-replacement logic. It ignores noncompletion stream structure,
+including reasoning-content section starts, as the Codex compaction path already does.
+Retryable failures reuse the compaction turn handle; nonretryable errors and premature
+canonical EOF terminate without a legacy fallback. Codex rate-limit/server-reasoning
+notifications and response IDs retain their existing adapter-specific behavior.
+Both manual and automatic model compaction gate Codex remote dispatch on the selected
+runtime, not provider identity alone. Canonical backends remain local even with OpenAI
+remote V2 capability; the earlier TokenBudget path and Codex remote V1/V2 selection are unchanged.
+
+Remote compaction and regular-sampling reasoning-content section starts are not implemented
+by this slice and remain explicitly unsupported or on their existing Codex paths.
+Realtime and delegated WebSocket
+capability checks still retain the legacy client. The complete agent loop is not yet a
+standalone provider-neutral crate.
 
 Tool runtimes use a separate result-side vocabulary for client discovery: `ToolResultContent::DiscoveredTools`
 contains result-specific semantic function/free-form declarations with namespace, schema or grammar,

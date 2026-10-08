@@ -9,6 +9,7 @@
 //! options only apply on Started.
 
 use super::TurnInput;
+use super::input_association::reserve_input_association;
 use super::session::Session;
 use super::session::SessionConfiguration;
 use super::session::SessionSettingsUpdate;
@@ -18,6 +19,7 @@ use super::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
+use codex_history::InputSource;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -41,6 +43,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "turn_input_admission_tests.rs"]
+mod admission_tests;
 #[cfg(test)]
 #[path = "turn_input_tests.rs"]
 mod tests;
@@ -194,8 +199,21 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    handle_with_source(session, request, mode, submission_id, InputSource::Unknown).await
+}
+
+pub(super) async fn handle_with_source(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    mode: TurnInputMode,
+    submission_id: String,
+    input_source: InputSource,
+) -> CodexResult<TurnInputSubmission> {
+    let _admission = session.input_queue.acquire_admission().await;
     match mode {
-        TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
+        TurnInputMode::StartOrSteer => {
+            start_or_steer(session, request, submission_id, input_source).await
+        }
         TurnInputMode::StartIfIdle => {
             let kind = match &request.input {
                 SubmittedTurnInput::UserInput { content, .. } if !content.is_empty() => {
@@ -205,10 +223,17 @@ pub(super) async fn handle(
                 | SubmittedTurnInput::ResponseItem(_)
                 | SubmittedTurnInput::InterAgentCommunication(_) => TurnStartKind::Automatic,
             };
-            start_if_idle(session, request, submission_id, kind).await
+            start_if_idle(session, request, submission_id, kind, input_source).await
         }
         TurnInputMode::Steer { expected_turn_id } => {
-            steer(session, request, expected_turn_id, submission_id).await
+            steer(
+                session,
+                request,
+                expected_turn_id,
+                submission_id,
+                input_source,
+            )
+            .await
         }
     }
 }
@@ -219,19 +244,28 @@ pub(super) async fn handle_recovery(
     start_options: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let _admission = session.input_queue.acquire_admission().await;
     let request = TurnInputRequest::user_input(Vec::new())
         .with_thread_settings(thread_settings)
         .on_start(TurnStartOptions {
             turn_trigger: Some("retry".to_string()),
             ..start_options
         });
-    start_if_idle(session, request, submission_id, TurnStartKind::Recovery).await
+    start_if_idle(
+        session,
+        request,
+        submission_id,
+        TurnStartKind::Recovery,
+        InputSource::Unknown,
+    )
+    .await
 }
 
 async fn start_or_steer(
     session: &Arc<Session>,
     request: TurnInputRequest,
     submission_id: String,
+    input_source: InputSource,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
         input,
@@ -265,6 +299,7 @@ async fn start_or_steer(
             client_id.clone(),
             responsesapi_client_metadata.clone(),
             incoming_root_turn_id,
+            input_source,
         )
         .await
     {
@@ -298,11 +333,17 @@ async fn start_or_steer(
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
             turn_context.session_telemetry.user_prompt(&items);
+            let input_association = if items.is_empty() {
+                None
+            } else {
+                reserve_input_association(session, input_source).await
+            };
             let mut task_input = merge_additional_context_input(session, additional_context).await;
             if !items.is_empty() {
                 task_input.push(TurnInput::UserInput {
                     content: items,
                     client_id,
+                    input_association,
                 });
             }
             session
@@ -321,6 +362,7 @@ async fn start_if_idle(
     request: TurnInputRequest,
     submission_id: String,
     kind: TurnStartKind,
+    input_source: InputSource,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
         input,
@@ -407,6 +449,11 @@ async fn start_if_idle(
         .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
 
+    let input_association = if kind == TurnStartKind::User {
+        reserve_input_association(session, input_source).await
+    } else {
+        None
+    };
     let mut task_input = merge_additional_context_input(session, additional_context).await;
     match kind {
         TurnStartKind::User => {
@@ -414,7 +461,7 @@ async fn start_if_idle(
             if let SubmittedTurnInput::UserInput { content, .. } = &input {
                 turn_context.session_telemetry.user_prompt(content);
             }
-            task_input.push(pending_turn_input(input));
+            task_input.push(pending_turn_input(input, input_association));
         }
         TurnStartKind::Automatic => {
             // Empty automatic user input resumes sampling without a new message.
@@ -423,7 +470,7 @@ async fn start_if_idle(
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        vec![pending_turn_input(input)],
+                        vec![pending_turn_input(input, None)],
                     )
                     .await;
             }
@@ -445,6 +492,7 @@ async fn steer(
     request: TurnInputRequest,
     expected_turn_id: String,
     submission_id: String,
+    input_source: InputSource,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
         input,
@@ -477,6 +525,7 @@ async fn steer(
             client_id,
             responsesapi_client_metadata,
             incoming_root_turn_id,
+            input_source,
         )
         .await
     {
@@ -557,6 +606,7 @@ impl Session {
         client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
         incoming_root_turn_id: Option<Option<String>>,
+        input_source: InputSource,
     ) -> Result<String, NotSubmittedReason> {
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
@@ -607,6 +657,10 @@ impl Session {
             .session_telemetry
             .user_prompt(input);
 
+        // Keep the active-turn lock until both the accepted input and its optional durable
+        // reservation are attached to the queue. The queue consumer takes this same lock before
+        // draining, so it cannot observe the input before the association is ready.
+        let input_association = reserve_input_association(self, input_source).await;
         let mut pending_input = merge_additional_context_input(self, additional_context).await;
 
         if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
@@ -619,6 +673,7 @@ impl Session {
         pending_input.push(TurnInput::UserInput {
             content: std::mem::take(input),
             client_id: client_user_message_id,
+            input_association,
         });
         if let Some(incoming_root_turn_id) = incoming_root_turn_id
             && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
@@ -653,11 +708,16 @@ async fn merge_additional_context_input(
         .collect()
 }
 
-fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
+fn pending_turn_input(
+    input: SubmittedTurnInput,
+    input_association: Option<codex_history::InputAssociation>,
+) -> TurnInput {
     match input {
-        SubmittedTurnInput::UserInput { content, client_id } => {
-            TurnInput::UserInput { content, client_id }
-        }
+        SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
+            content,
+            client_id,
+            input_association,
+        },
         SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
         SubmittedTurnInput::InterAgentCommunication(communication) => {
             TurnInput::InterAgentCommunication(communication)

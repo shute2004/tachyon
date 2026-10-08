@@ -15,6 +15,7 @@ use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
 use crate::DeleteThreadsParams;
 use crate::DeletedProject;
+use crate::InputIdentityReservation;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListProjectsParams;
@@ -75,6 +76,23 @@ pub trait ThreadStore: Any + Send + Sync {
     /// already paginated should override this instead of relying on core to infer storage behavior.
     fn default_history_mode(&self) -> ThreadHistoryMode {
         ThreadHistoryMode::Legacy
+    }
+
+    /// Reserves an identity for a future input-journal entry.
+    ///
+    /// Implementations must check and durably reserve the next non-zero sequence before
+    /// returning success. If durable reservation is unavailable, the failure must remain
+    /// observable rather than returning a volatile identity. A reservation does not prove that
+    /// input was accepted, approved, or recorded in canonical transcript history.
+    fn reserve_input_identity(
+        &self,
+        _thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, InputIdentityReservation> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "reserve_input_identity",
+            })
+        })
     }
 
     /// Creates a new live thread.

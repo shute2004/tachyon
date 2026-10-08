@@ -72,6 +72,7 @@ use codex_extension_api::TurnContextContributionInput;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::unstable_features_warning_event;
+use codex_history::InputSource;
 use codex_history::RolloutItem;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
@@ -105,7 +106,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::EnteredReviewModeItem;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
-use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
@@ -219,6 +219,7 @@ mod environment;
 pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
+mod input_association;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -234,6 +235,7 @@ pub(crate) mod session;
 mod step_activation;
 pub(crate) mod step_context;
 pub(crate) mod step_settings;
+mod submission;
 mod thread_settings;
 pub(crate) mod time_reminder;
 mod token_budget;
@@ -256,6 +258,7 @@ use self::session::Session;
 use self::session::SessionConfiguration;
 use self::session::SessionSettingsCommit;
 pub(crate) use self::session::SessionSettingsUpdate;
+pub(crate) use self::submission::SessionSubmission;
 #[cfg(test)]
 use self::turn::AssistantMessageStreamParsers;
 use self::turn::agent_message_text;
@@ -275,7 +278,7 @@ mod rollout_reconstruction_tests;
 /// `realtime_active -> false` transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreviousTurnSettings {
-    pub(crate) model: String,
+    pub(crate) model_selection: crate::model_runtime::HistoricalModelSelection,
     pub(crate) comp_hash: Option<String>,
     pub(crate) realtime_active: Option<bool>,
 }
@@ -381,7 +384,7 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// submission senders be dropped to terminate the session loop. The shared
 /// completion future observes that shutdown.
 pub(crate) struct SessionIo {
-    pub(crate) tx_sub: Sender<Submission>,
+    pub(crate) tx_sub: Sender<SessionSubmission>,
     pub(crate) rx_event: Receiver<Event>,
     // Last known status of the agent.
     pub(crate) agent_status: watch::Receiver<AgentStatus>,
@@ -850,12 +853,20 @@ impl SessionIo {
     }
 
     /// Use sparingly: prefer `submit()` so submission IDs are generated consistently.
-    pub(crate) async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
-        if sub.trace.is_none() {
-            sub.trace = current_span_w3c_trace_context();
+    pub(crate) async fn submit_with_id(&self, sub: Submission) -> CodexResult<()> {
+        self.submit_session_submission(sub.into()).await
+    }
+
+    /// Submits an envelope received from another internal Core session without losing its source.
+    pub(crate) async fn submit_session_submission(
+        &self,
+        mut submission: SessionSubmission,
+    ) -> CodexResult<()> {
+        if submission.submission.trace.is_none() {
+            submission.submission.trace = current_span_w3c_trace_context();
         }
         self.tx_sub
-            .send(sub)
+            .send(submission)
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(())
@@ -867,22 +878,45 @@ impl SessionIo {
     /// session loop exits before replying, the caller gets `InternalAgentDied`.
     pub(crate) async fn submit_turn_input(
         &self,
+        request: TurnInputRequest,
+        mode: TurnInputMode,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_source(request, mode, InputSource::Unknown)
+            .await
+    }
+
+    /// Submits a turn input constructed internally by a Core-owned producer.
+    pub(crate) async fn submit_synthetic_turn_input(
+        &self,
+        request: TurnInputRequest,
+        mode: TurnInputMode,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_source(request, mode, InputSource::Synthetic)
+            .await
+    }
+
+    async fn submit_turn_input_with_source(
+        &self,
         mut request: TurnInputRequest,
         mode: TurnInputMode,
+        input_source: InputSource,
     ) -> CodexResult<TurnInputSubmission> {
         let id = new_submission_id();
         let (reply_tx, reply_rx) = oneshot::channel();
         let trace = request.trace.take();
-        self.submit_with_id(Submission {
-            id,
-            op: Op::TurnInput {
-                request: Box::new(request),
-                mode,
-                reply: reply_tx,
+        self.submit_session_submission(SessionSubmission {
+            submission: Submission {
+                id,
+                op: Op::TurnInput {
+                    request: Box::new(request),
+                    mode,
+                    reply: reply_tx,
+                },
+                trace,
+                parent_turn_id: None,
+                root_turn_id: None,
             },
-            trace,
-            parent_turn_id: None,
-            root_turn_id: None,
+            input_source,
         })
         .await?;
         reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
@@ -1389,7 +1423,7 @@ impl Session {
                 let curr: &str = turn_context.model_info().slug.as_str();
                 if let Some(prev) = previous_turn_settings
                     .as_ref()
-                    .map(|settings| settings.model.as_str())
+                    .map(|settings| settings.model_selection.model_id())
                     .filter(|model| *model != curr)
                 {
                     warn!("resuming session with different model: previous={prev}, current={curr}");
@@ -4228,27 +4262,6 @@ impl Session {
             self.emit_turn_item_started(turn_context, &item).await;
             self.emit_turn_item_completed(turn_context, item).await;
         }
-    }
-
-    pub(crate) async fn record_user_prompt_and_emit_turn_item(
-        &self,
-        turn_context: &TurnContext,
-        input: &[UserInput],
-        client_id: Option<String>,
-        persist_context: PersistContext,
-    ) {
-        // Persist the user message to history, but emit the turn item from `UserInput` so
-        // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
-        // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let response_item = self.response_item_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
-            .await;
-        let mut user_message_item = UserMessageItem::new(input);
-        user_message_item.client_id = client_id;
-        let turn_item = TurnItem::UserMessage(user_message_item);
-        self.emit_turn_item_started(turn_context, &turn_item).await;
-        self.emit_turn_item_completed(turn_context, turn_item).await;
-        self.ensure_rollout_materialized(persist_context).await;
     }
 
     pub(crate) async fn notify_stream_error(

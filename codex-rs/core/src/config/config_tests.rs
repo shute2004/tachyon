@@ -5687,6 +5687,7 @@ url = "https://sample.example/mcp"
                     "Selected Plugin".to_string(),
                 ),
                 /*selection_order*/ 0,
+                codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
                 selected.clone(),
             )],
         )

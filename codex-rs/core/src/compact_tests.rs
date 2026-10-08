@@ -1,4 +1,7 @@
 use super::*;
+use crate::client_common::ResponseEvent;
+use crate::model_runtime::ModelRuntimeEvent;
+use crate::model_runtime::normalize_sampling_event;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::ResponseItemId;
@@ -9,8 +12,12 @@ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+use tachyon_model::ModelCompletion;
+use tachyon_model::ModelEvent;
 
 async fn process_compacted_history_with_test_session(
     compacted_history: Vec<ResponseItem>,
@@ -66,6 +73,163 @@ fn user_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[tokio::test]
+async fn compaction_codex_side_events_preserve_reasoning_and_rate_limit_updates() {
+    let (session, turn_context, events) =
+        crate::session::tests::make_session_and_context_with_rx().await;
+    let encrypted_content = "x".repeat(/*n*/ 2_048);
+    let reasoning = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some(encrypted_content.clone()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            &[reasoning, user_message("reasoning boundary")],
+        )
+        .await;
+    let seeded_reasoning = events
+        .recv()
+        .await
+        .expect("seed reasoning raw response item");
+    assert!(matches!(
+        seeded_reasoning.msg,
+        EventMsg::RawResponseItem(event)
+            if matches!(
+                &event.item,
+                ResponseItem::Reasoning {
+                    encrypted_content: Some(content),
+                    ..
+                } if content == &encrypted_content
+            )
+    ));
+    let seeded_user_message = events.recv().await.expect("seed user raw response item");
+    assert!(matches!(
+        seeded_user_message.msg,
+        EventMsg::RawResponseItem(event)
+            if matches!(
+                &event.item,
+                ResponseItem::Message {
+                    role,
+                    content,
+                    ..
+                } if role.as_str() == "user"
+                    && matches!(
+                        content.as_slice(),
+                        [ContentItem::InputText { text }] if text == "reasoning boundary"
+                    )
+            )
+    ));
+    let total_without_server_reasoning = session.get_total_token_usage().await;
+    assert!(total_without_server_reasoning > 0);
+
+    let mut turn_runtime = session
+        .services
+        .model_runtime()
+        .begin_turn_for_provider(turn_context.config.model_provider_id.clone());
+    let reasoning_event =
+        turn_runtime.map_stream_event(ResponseEvent::ServerReasoningIncluded(true));
+    let ModelRuntimeEvent::Compatibility(reasoning_side_event) = reasoning_event else {
+        panic!("server reasoning inclusion must remain a Codex side event");
+    };
+    assert!(
+        apply_codex_compaction_side_event(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &reasoning_side_event,
+        )
+        .await
+    );
+    assert!(
+        session.get_total_token_usage().await < total_without_server_reasoning,
+        "server-reported reasoning must not be counted a second time"
+    );
+
+    let rate_limits = RateLimitSnapshot {
+        limit_id: Some("codex-compaction-limit".to_string()),
+        limit_name: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let rate_limit_event = turn_runtime.map_stream_event(ResponseEvent::RateLimits(rate_limits));
+    let ModelRuntimeEvent::Compatibility(rate_limit_side_event) = rate_limit_event else {
+        panic!("rate limits must remain a Codex side event");
+    };
+    assert!(
+        apply_codex_compaction_side_event(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &rate_limit_side_event,
+        )
+        .await
+    );
+    assert!(matches!(
+        events.recv().await.expect("rate-limit token count event").msg,
+        EventMsg::TokenCount(TokenCountEvent {
+            rate_limits: Some(rate_limits),
+            ..
+        }) if rate_limits.limit_id.as_deref() == Some("codex-compaction-limit")
+    ));
+}
+
+#[tokio::test]
+async fn compaction_completion_normalization_keeps_codex_response_id_only() {
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let mut turn_runtime = session
+        .services
+        .model_runtime()
+        .begin_turn_for_provider(turn_context.config.model_provider_id.clone());
+    let codex_completion = turn_runtime.map_stream_event(ResponseEvent::Completed {
+        response_id: "legacy-response-id".to_string(),
+        token_usage: None,
+        end_turn: Some(true),
+    });
+    assert!(is_compaction_completion_event(&codex_completion));
+    assert!(matches!(
+        normalize_sampling_event(codex_completion),
+        Ok(HarnessSamplingEvent::Completed {
+            response_id: Some(response_id),
+            end_turn: Some(true),
+            ..
+        }) if response_id == "legacy-response-id"
+    ));
+
+    let canonical_completion = ModelRuntimeEvent::Model {
+        event: ModelEvent::Completed(ModelCompletion {
+            usage: None,
+            end_turn: Some(true),
+        }),
+        codex: None,
+    };
+    assert!(is_compaction_completion_event(&canonical_completion));
+    assert!(matches!(
+        normalize_sampling_event(canonical_completion),
+        Ok(HarnessSamplingEvent::Completed {
+            response_id: None,
+            end_turn: Some(true),
+            ..
+        })
+    ));
+
+    let content_section_start = ModelRuntimeEvent::Model {
+        event: ModelEvent::ReasoningSectionStarted {
+            item_id: tachyon_model::ModelItemId("reasoning-item".to_string()),
+            kind: tachyon_model::ModelReasoningDeltaKind::Content,
+            section_index: 0,
+        },
+        codex: None,
+    };
+    assert!(!is_compaction_completion_event(&content_section_start));
 }
 
 #[test]
@@ -757,8 +921,14 @@ async fn process_compacted_history_reinjects_model_switch_message() {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }];
+    let (_, turn_context) = crate::session::tests::make_session_and_context().await;
+    let mut previous_context_item = turn_context.to_turn_context_item();
+    previous_context_item.model = "previous-regular-model".to_string();
     let previous_turn_settings = PreviousTurnSettings {
-        model: "previous-regular-model".to_string(),
+        model_selection:
+            crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                &previous_context_item,
+            ),
         comp_hash: None,
         realtime_active: None,
     };

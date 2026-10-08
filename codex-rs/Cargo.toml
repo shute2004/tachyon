@@ -93,6 +93,7 @@ members = [
     "responses-api-proxy",
     "response-debug-context",
     "sandboxing",
+    "tachyon-model",
     "stdio-to-uds",
     "otel",
     "tui",
@@ -230,6 +231,7 @@ codex-mcp-extension = { path = "ext/mcp" }
 codex-mcp-server = { path = "mcp-server" }
 codex-model-provider-info = { path = "model-provider-info" }
 codex-models-manager = { path = "models-manager" }
+tachyon-model = { path = "tachyon-model" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }

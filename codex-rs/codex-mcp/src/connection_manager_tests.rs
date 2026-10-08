@@ -188,6 +188,39 @@ fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
     }
 }
 
+fn create_test_tool_with_connector(
+    server_name: &str,
+    tool_name: &str,
+    connector_id: &str,
+    description: &str,
+    schema_property: &str,
+    read_only: bool,
+) -> ToolInfo {
+    let mut tool = create_test_tool(server_name, tool_name);
+    tool.connector_id = Some(connector_id.to_string());
+    tool.connector_name = Some(format!("{connector_id} display name"));
+    tool.tool.description = Some(description.to_string().into());
+    let mut properties = JsonObject::new();
+    properties.insert(
+        schema_property.to_string(),
+        serde_json::json!({ "type": "string" }),
+    );
+    let mut input_schema = JsonObject::new();
+    input_schema.insert("type".to_string(), serde_json::json!("object"));
+    input_schema.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(properties),
+    );
+    tool.tool.input_schema = Arc::new(input_schema);
+    tool.tool.annotations = Some(
+        rmcp::model::ToolAnnotations::new()
+            .read_only(read_only)
+            .destructive(!read_only)
+            .open_world(!read_only),
+    );
+    tool
+}
+
 fn create_codex_apps_tools_cache_context(
     codex_home: PathBuf,
     account_id: Option<&str>,
@@ -226,6 +259,28 @@ async fn capture_binding(manager: &Arc<McpConnectionSet>) -> McpBinding {
         .await
 }
 
+fn test_mcp_call_config(manager: &McpConnectionSet) -> Arc<crate::McpConfig> {
+    let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+    config.server_permission_profiles = manager
+        .servers
+        .keys()
+        .map(|name| (name.clone(), PermissionProfile::default()))
+        .collect();
+    Arc::new(config)
+}
+
+fn create_test_connection_set(server_name: &str, client: AsyncManagedClient) -> McpConnectionSet {
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(server_name, client);
+    manager
+}
+
 fn create_test_server_info(title: &str) -> McpServerInfo {
     McpServerInfo {
         name: "codex-apps".to_string(),
@@ -243,6 +298,60 @@ impl InProcessTransportFactory for TestInProcessTransportFactory {
     fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
         async {
             let (client_stream, _server_stream) = tokio::io::duplex(1);
+            Ok(client_stream)
+        }
+        .boxed()
+    }
+}
+
+#[derive(Clone)]
+struct DelayedCallTestTransportFactory {
+    call_started: Arc<Notify>,
+    release_call: Arc<Notify>,
+}
+
+impl ServerHandler for DelayedCallTestTransportFactory {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(vec![Tool::new(
+            "slow".to_string(),
+            "Delayed test tool",
+            Arc::new(JsonObject::default()),
+        )]))
+    }
+
+    async fn call_tool(
+        &self,
+        _request: rmcp::model::CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        self.call_started.notify_one();
+        self.release_call.notified().await;
+        Ok(rmcp::model::CallToolResult::success(Vec::new()).into())
+    }
+}
+
+impl InProcessTransportFactory for DelayedCallTestTransportFactory {
+    fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
+        let server = self.clone();
+        async move {
+            let (client_stream, server_stream) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+                server
+                    .serve(server_stream)
+                    .await
+                    .expect("serve delayed-call MCP server")
+                    .waiting()
+                    .await
+                    .expect("delayed-call MCP server completes");
+            });
             Ok(client_stream)
         }
         .boxed()
@@ -2470,6 +2579,25 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
             .collect::<Vec<_>>(),
         vec!["client_local_tool"]
     );
+    let config = test_mcp_call_config(&manager);
+    let current_client_tool = manager
+        .prepare_call_for_tool(Arc::clone(&config), &step.tools()[0])
+        .await
+        .expect("a ready client tool is prepared from the current client catalog");
+    assert_eq!(
+        current_client_tool.tool_info().tool.name.as_ref(),
+        "client_local_tool"
+    );
+    assert!(
+        manager
+            .prepare_call_for_tool(
+                config,
+                &create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool"),
+            )
+            .await
+            .is_none(),
+        "the stale shared cache entry is not the ready client's callable catalog"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -3859,7 +3987,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             .expect("valid actor authorization header"),
     );
     let hosted_auth = CodexAuth::Headers(AuthHeaders::new(actor_headers));
-    let runtime_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut runtime_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
     let cases = [
         ("missing", None, None, None, false),
         ("empty", Some(("Authorization", "")), None, None, false),
@@ -3930,6 +4058,12 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             server_json["env_http_headers"] = serde_json::json!({ name: value });
         }
         let server_config = serde_json::from_value::<McpServerConfig>(server_json)?;
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_config(
+            "fake-first-party".to_string(),
+            server_config.clone(),
+        ));
+        runtime_config.mcp_server_catalog = catalog.build();
         let mcp_servers = crate::effective_mcp_servers_from_configured(
             HashMap::from([("fake-first-party".to_string(), server_config)]),
             &runtime_config,
@@ -4898,7 +5032,15 @@ async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::
     )?;
     let runtime_context = McpRuntimeContext::new(environment_manager, PathBuf::from("/tmp"));
     let codex_home = tempdir()?;
-    let mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    let mut host_owned_config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
+    host_owned_config.environment_id = "customer-executor".to_string();
+    catalog.register(crate::McpServerRegistration::from_config(
+        "docs".to_string(),
+        host_owned_config,
+    ));
+    mcp_config.mcp_server_catalog = catalog.build();
     let [config, refreshed_config] = [McpServerAuth::OAuth, McpServerAuth::ChatGpt].map(|auth| {
         let mut config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
         config.environment_id = "customer-executor".to_string();
@@ -5394,4 +5536,590 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
         vec!["search".to_string()]
     );
     assert_eq!(new_call.tool_approval_mode(), AppToolApproval::Approve);
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_requires_one_exact_current_apps_identity() {
+    let current_a = create_test_tool_with_connector(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "shared-name",
+        "connector-a",
+        "current connector A",
+        "input_a",
+        true,
+    );
+    let current_b = create_test_tool_with_connector(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "shared-name",
+        "connector-b",
+        "current connector B",
+        "input_b",
+        false,
+    );
+    let stale_client_tool = create_test_tool_with_connector(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "shared-name",
+        "connector-a",
+        "stale client catalog",
+        "stale_client_input",
+        false,
+    );
+    let mut manager = create_test_connection_set(
+        CODEX_APPS_MCP_SERVER_NAME,
+        create_ready_async_managed_client(vec![stale_client_tool]).await,
+    );
+    manager.codex_apps_tools_override =
+        RwLock::new(Some(vec![current_a.clone(), current_b.clone()]));
+    let manager = Arc::new(manager);
+    let config = test_mcp_call_config(&manager);
+    let advertised_for = |connector_id: &str, namespace: &str, name: &str| {
+        let mut advertised = create_test_tool_with_connector(
+            CODEX_APPS_MCP_SERVER_NAME,
+            "shared-name",
+            connector_id,
+            "stale advertised metadata",
+            "stale_advertised_input",
+            false,
+        );
+        advertised.callable_namespace = namespace.to_string();
+        advertised.callable_name = name.to_string();
+        advertised
+    };
+
+    let advertised_a = advertised_for("connector-a", "model_namespace_a", "model_name_a");
+    let call_a = manager
+        .prepare_call_for_tool(Arc::clone(&config), &advertised_a)
+        .await
+        .expect("connector A is in the current Apps override");
+    assert_eq!(call_a.tool_info().tool.name.as_ref(), "shared-name");
+    assert_eq!(
+        call_a.tool_info().tool.description.as_deref(),
+        Some("current connector A")
+    );
+    assert_eq!(
+        call_a.tool_info().tool.input_schema.as_ref(),
+        current_a.tool.input_schema.as_ref()
+    );
+    assert_eq!(
+        call_a.tool_info().tool.annotations,
+        current_a.tool.annotations
+    );
+    assert_eq!(call_a.tool_info().connector_name, current_a.connector_name);
+    assert_eq!(
+        call_a.tool_info().connector_id.as_deref(),
+        Some("connector-a")
+    );
+    assert_eq!(call_a.tool_info().callable_namespace, "model_namespace_a");
+    assert_eq!(call_a.tool_info().callable_name, "model_name_a");
+
+    let advertised_b = advertised_for("connector-b", "model_namespace_b", "model_name_b");
+    let call_b = manager
+        .prepare_call_for_tool(Arc::clone(&config), &advertised_b)
+        .await
+        .expect("connector B is a distinct exact current identity");
+    assert_eq!(
+        call_b.tool_info().tool.description.as_deref(),
+        Some("current connector B")
+    );
+    assert_eq!(
+        call_b.tool_info().tool.input_schema.as_ref(),
+        current_b.tool.input_schema.as_ref()
+    );
+    assert_eq!(
+        call_b.tool_info().tool.annotations,
+        current_b.tool.annotations
+    );
+    assert_eq!(call_b.tool_info().callable_namespace, "model_namespace_b");
+    assert_eq!(call_b.tool_info().callable_name, "model_name_b");
+
+    let mut wrong_server = advertised_a.clone();
+    wrong_server.server_name = "another-server".to_string();
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &wrong_server)
+            .await
+            .is_none()
+    );
+    let mut wrong_raw_name = advertised_a.clone();
+    wrong_raw_name.tool.name = "different-raw-name".to_string().into();
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &wrong_raw_name)
+            .await
+            .is_none()
+    );
+    let mut wrong_connector = advertised_a.clone();
+    wrong_connector.connector_id = Some("connector-missing".to_string());
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &wrong_connector)
+            .await
+            .is_none()
+    );
+
+    let mut duplicate = current_a.clone();
+    duplicate.callable_namespace = "duplicate-advertised-alias".to_string();
+    duplicate.callable_name = "duplicate-advertised-name".to_string();
+    let mut revision = manager.tool_catalog_revision.write().await;
+    *manager.codex_apps_tools_override.write().await = Some(vec![current_a, current_b, duplicate]);
+    *revision += 1;
+    drop(revision);
+    let duplicate_result = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.prepare_call_for_tool(config, &advertised_a),
+    )
+    .await
+    .expect("duplicate identity lookup should finish after publishing the override");
+    assert!(
+        duplicate_result.is_none(),
+        "duplicate raw identities must not select one of two different aliases"
+    );
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_uses_current_policy_and_metadata_and_fails_closed_without_profile() {
+    let current_tool = create_test_tool_with_connector(
+        "docs",
+        "search",
+        "connector-current",
+        "current catalog description",
+        "current_input",
+        true,
+    );
+    let client = create_ready_async_managed_client(vec![current_tool.clone()]).await;
+    let mut manager = create_test_connection_set("docs", client);
+    manager.set_test_server_metadata(
+        "docs",
+        McpServerMetadata {
+            environment_id: "current-executor".to_string(),
+            pollutes_memory: false,
+            origin: Some(McpServerOrigin::StreamableHttp(
+                "https://current.example/mcp".to_string(),
+            )),
+            supports_parallel_tool_calls: true,
+            default_tools_approval_mode: Some(AppToolApproval::Prompt),
+            tool_approval_modes: HashMap::from([("search".to_string(), AppToolApproval::Approve)]),
+        },
+    );
+    let manager = Arc::new(manager);
+    let mut current_config = (*test_mcp_call_config(&manager)).clone();
+    current_config.approval_policy = Constrained::allow_any(AskForApproval::Never);
+    current_config.permission_profile = PermissionProfile::Disabled;
+    current_config
+        .server_permission_profiles
+        .insert("docs".to_string(), PermissionProfile::Disabled);
+    let current_config = Arc::new(current_config);
+
+    let mut advertised = create_test_tool("docs", "search");
+    advertised.connector_id = current_tool.connector_id.clone();
+    advertised.tool.description = Some("stale advertised description".into());
+    advertised.tool.input_schema = Arc::new(
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": { "stale_input": { "type": "number" } }
+        }))
+        .expect("stale advertised input schema"),
+    );
+    advertised.tool.annotations = Some(rmcp::model::ToolAnnotations::new().read_only(false));
+    advertised.server_origin = Some("https://stale.example".to_string());
+    advertised.supports_parallel_tool_calls = false;
+    advertised.callable_namespace = "advertised_namespace".to_string();
+    advertised.callable_name = "advertised_name".to_string();
+
+    let call = manager
+        .prepare_call_for_tool(Arc::clone(&current_config), &advertised)
+        .await
+        .expect("current ready catalog entry and permission profile are available");
+    assert_eq!(
+        call.tool_info().tool.description.as_deref(),
+        Some("current catalog description")
+    );
+    assert_eq!(
+        call.tool_info().tool.input_schema.as_ref(),
+        current_tool.tool.input_schema.as_ref()
+    );
+    assert_eq!(
+        call.tool_info().tool.annotations,
+        current_tool.tool.annotations
+    );
+    assert_eq!(call.tool_info().callable_namespace, "advertised_namespace");
+    assert_eq!(call.tool_info().callable_name, "advertised_name");
+    assert_eq!(
+        call.tool_info().server_origin.as_deref(),
+        Some("https://current.example/mcp")
+    );
+    assert!(call.tool_info().supports_parallel_tool_calls);
+    assert_eq!(call.server_environment_id(), "current-executor");
+    assert!(!call.server_pollutes_memory());
+    assert_eq!(call.tool_approval_mode(), AppToolApproval::Approve);
+    assert_eq!(call.config().approval_policy.value(), AskForApproval::Never);
+    assert_eq!(call.permission_profile(), &PermissionProfile::Disabled);
+
+    let mut missing_profile = (*current_config).clone();
+    missing_profile.server_permission_profiles.remove("docs");
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::new(missing_profile), &advertised)
+            .await
+            .is_none(),
+        "a current catalog entry without a published server permission profile is not callable"
+    );
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_rechecks_current_filter_and_model_visibility() {
+    let mut hidden_current = create_test_tool("docs", "hidden");
+    hidden_current.tool.meta = Some(
+        serde_json::from_value(serde_json::json!({
+            "ui": { "visibility": ["app"] }
+        }))
+        .expect("tool metadata"),
+    );
+    let client = create_ready_async_managed_client(vec![
+        create_test_tool("docs", "visible"),
+        create_test_tool("docs", "blocked"),
+        create_test_tool("docs", "allowlisted"),
+        hidden_current,
+        create_test_tool("docs", "not-allowlisted"),
+    ])
+    .await;
+    let mut manager = create_test_connection_set("docs", client);
+    manager
+        .servers
+        .get_mut("docs")
+        .expect("docs server exists")
+        .tool_filter = ToolFilter {
+        enabled: None,
+        disabled: HashSet::from(["blocked".to_string()]),
+    };
+    let manager = Arc::new(manager);
+    let config = test_mcp_call_config(&manager);
+
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &create_test_tool("docs", "visible"),)
+            .await
+            .is_some(),
+        "a current model-visible tool remains callable"
+    );
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &create_test_tool("docs", "blocked"),)
+            .await
+            .is_none(),
+        "the current raw-name deny filter overrides an advertised visible tool"
+    );
+    let mut advertised_hidden = create_test_tool("docs", "hidden");
+    advertised_hidden.tool.meta = None;
+    assert!(
+        manager
+            .prepare_call_for_tool(Arc::clone(&config), &advertised_hidden)
+            .await
+            .is_none(),
+        "the current UI visibility metadata overrides an advertised visible tool"
+    );
+
+    let allowlist_client = create_ready_async_managed_client(vec![
+        create_test_tool("docs", "allowlisted"),
+        create_test_tool("docs", "not-allowlisted"),
+    ])
+    .await;
+    let mut allowlist_manager = create_test_connection_set("docs", allowlist_client);
+    allowlist_manager
+        .servers
+        .get_mut("docs")
+        .expect("docs server exists")
+        .tool_filter = ToolFilter {
+        enabled: Some(HashSet::from(["allowlisted".to_string()])),
+        disabled: HashSet::new(),
+    };
+    let allowlist_manager = Arc::new(allowlist_manager);
+    let allowlist_config = test_mcp_call_config(&allowlist_manager);
+    assert!(
+        allowlist_manager
+            .prepare_call_for_tool(
+                Arc::clone(&allowlist_config),
+                &create_test_tool("docs", "not-allowlisted"),
+            )
+            .await
+            .is_none(),
+        "a current allowlist excludes a tool even when the caller advertises it"
+    );
+    assert!(
+        allowlist_manager
+            .prepare_call_for_tool(allowlist_config, &create_test_tool("docs", "allowlisted"))
+            .await
+            .is_some(),
+        "the current allowlist entry is a positive control"
+    );
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_rejects_stale_catalog_revision_before_preparation() {
+    let client = create_ready_async_managed_client(vec![create_test_tool("docs", "search")]).await;
+    let manager = Arc::new(create_test_connection_set("docs", client));
+    let call = manager
+        .prepare_call_for_tool(
+            test_mcp_call_config(&manager),
+            &create_test_tool("docs", "search"),
+        )
+        .await
+        .expect("current tool should prepare");
+    *manager.tool_catalog_revision.write().await += 1;
+    let preparation_calls = Arc::new(AtomicUsize::new(0));
+    let preparation_calls_for_callback = Arc::clone(&preparation_calls);
+
+    let error = call
+        .call_with_preparation(None, move || async move {
+            preparation_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+            Ok((None, None))
+        })
+        .await
+        .err()
+        .expect("a call from the old revision is rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("catalog changed after `docs/search` was prepared")
+    );
+    assert_eq!(preparation_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_holds_revision_read_lock_through_preparation() {
+    let client = create_ready_async_managed_client(vec![create_test_tool("docs", "search")]).await;
+    let manager = Arc::new(create_test_connection_set("docs", client));
+    let call = manager
+        .prepare_call_for_tool(
+            test_mcp_call_config(&manager),
+            &create_test_tool("docs", "search"),
+        )
+        .await
+        .expect("current tool should prepare");
+    let preparation_started = Arc::new(Notify::new());
+    let release_preparation = Arc::new(Notify::new());
+    let call_task = {
+        let preparation_started = Arc::clone(&preparation_started);
+        let release_preparation = Arc::clone(&release_preparation);
+        tokio::spawn(async move {
+            call.call_with_preparation(None, move || async move {
+                preparation_started.notify_one();
+                release_preparation.notified().await;
+                Err(anyhow!("stop before MCP dispatch"))
+            })
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), preparation_started.notified())
+        .await
+        .expect("preparation callback should begin");
+
+    let writer_started = Arc::new(Notify::new());
+    let writer = {
+        let manager = Arc::clone(&manager);
+        let writer_started = Arc::clone(&writer_started);
+        tokio::spawn(async move {
+            writer_started.notify_one();
+            *manager.tool_catalog_revision.write().await += 1;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), writer_started.notified())
+        .await
+        .expect("catalog writer should attempt to acquire the revision lock");
+    assert!(
+        manager.tool_catalog_revision.try_write().is_err(),
+        "the revision read guard must remain held while preparation is suspended"
+    );
+    let mut writer = Box::pin(writer);
+    assert!(
+        futures::poll!(&mut writer).is_pending(),
+        "catalog replacement must wait while call preparation holds its revision read guard"
+    );
+
+    release_preparation.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), call_task)
+            .await
+            .expect("call task completes after preparation is released")
+            .expect("call task joins")
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_secs(1), writer)
+        .await
+        .expect("writer completes after preparation returns")
+        .expect("writer task completes");
+}
+
+#[tokio::test]
+async fn prepare_call_for_tool_does_not_wait_for_unrelated_server_startup() {
+    let ready_client =
+        create_ready_async_managed_client(vec![create_test_tool("ready", "search")]).await;
+    let pending_client =
+        create_test_managed_client(vec![create_test_tool("pending", "other")]).await;
+    let (pending_client, mut unrelated_started, release_unrelated) =
+        create_gated_async_managed_client(pending_client);
+    let startup_client = pending_client.clone();
+    let mut manager = create_test_connection_set("ready", ready_client);
+    manager.insert_test_client("pending", pending_client);
+    let manager = Arc::new(manager);
+    let config = test_mcp_call_config(&manager);
+
+    let call = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.prepare_call_for_tool(config, &create_test_tool("ready", "search")),
+    )
+    .await
+    .expect("selected ready server preparation must finish independently")
+    .expect("selected tool is currently ready");
+    assert_eq!(call.server_name(), "ready");
+    assert!(matches!(
+        unrelated_started.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(
+        !manager.servers["pending"]
+            .connection
+            .client
+            .startup_complete
+            .load(Ordering::Acquire)
+    );
+
+    let startup_task = tokio::spawn(async move { startup_client.client().await });
+    tokio::time::timeout(Duration::from_secs(1), &mut unrelated_started)
+        .await
+        .expect("unrelated startup should reach its gate")
+        .expect("unrelated startup start signal");
+    assert!(
+        !startup_task.is_finished(),
+        "startup remains behind the gate"
+    );
+    assert!(
+        !manager.servers["pending"]
+            .connection
+            .client
+            .startup_complete
+            .load(Ordering::Acquire),
+        "the unrelated client has not been released"
+    );
+
+    let call = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.prepare_call_for_tool(
+            test_mcp_call_config(&manager),
+            &create_test_tool("ready", "search"),
+        ),
+    )
+    .await
+    .expect("ready tool preparation must complete while unrelated startup is gated")
+    .expect("ready tool remains available");
+    assert_eq!(call.server_name(), "ready");
+    assert!(!startup_task.is_finished());
+    assert!(
+        !manager.servers["pending"]
+            .connection
+            .client
+            .startup_complete
+            .load(Ordering::Acquire)
+    );
+
+    release_unrelated
+        .send(())
+        .expect("release unrelated startup after ready call completes");
+    let startup_result = tokio::time::timeout(Duration::from_secs(1), startup_task)
+        .await
+        .expect("unrelated startup completes after release")
+        .expect("unrelated startup task joins");
+    assert!(startup_result.is_ok());
+    assert!(
+        manager.servers["pending"]
+            .connection
+            .client
+            .startup_complete
+            .load(Ordering::Acquire)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn prepare_call_for_tool_uses_current_server_timeout() -> anyhow::Result<()> {
+    let tool = create_test_tool("slow-server", "slow");
+    let call_started = Arc::new(Notify::new());
+    let release_call = Arc::new(Notify::new());
+    let client = Arc::new(
+        RmcpClient::new_in_process_client(Arc::new(DelayedCallTestTransportFactory {
+            call_started: Arc::clone(&call_started),
+            release_call: Arc::clone(&release_call),
+        }))
+        .await?,
+    );
+    client
+        .initialize(
+            InitializeRequestParams::new(
+                ClientCapabilities::default(),
+                Implementation::new("codex-test", "0.0.0-test"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_06_18),
+            Some(Duration::from_secs(5)),
+            Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+        )
+        .await?;
+    let managed_client = ManagedClient {
+        client,
+        server_info: create_test_server_info("Slow test server"),
+        tools: vec![tool.clone()],
+        tool_timeout: Some(Duration::from_secs(10)),
+        server_instructions: None,
+        server_supports_sandbox_state_meta_capability: false,
+        codex_apps_tools_cache_context: None,
+    };
+    let async_client = AsyncManagedClient {
+        client: futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Ok(
+            managed_client,
+        ))
+        .boxed()
+        .shared(),
+        is_codex_apps_mcp_server: false,
+        cached_server_info: None,
+        codex_apps_tools_cache_context: None,
+        tool_catalog_cache_context: None,
+        startup_complete: Arc::new(AtomicBool::new(true)),
+        startup_reconnect: None,
+        cancel_token: CancellationToken::new(),
+    };
+    let mut manager = create_test_connection_set("slow-server", async_client);
+    manager
+        .servers
+        .get_mut("slow-server")
+        .expect("slow server exists")
+        .tool_timeout = Some(Duration::from_millis(50));
+    let manager = Arc::new(manager);
+    let call = manager
+        .prepare_call_for_tool(
+            test_mcp_call_config(&manager),
+            &create_test_tool("slow-server", "slow"),
+        )
+        .await
+        .expect("slow tool should prepare against current server view");
+
+    let call_task = tokio::spawn(async move { call.call(None, None, None).await });
+    tokio::time::timeout(Duration::from_secs(1), call_started.notified())
+        .await
+        .expect("the in-process server must receive the call before timeout is checked");
+    tokio::time::advance(Duration::from_millis(51)).await;
+    tokio::task::yield_now().await;
+    let result = tokio::time::timeout(Duration::from_secs(1), call_task)
+        .await
+        .expect("the current short server timeout should finish the call")
+        .expect("call task completes");
+    let error = result.expect_err("the delayed tool call should hit the current timeout");
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain.contains("timed out awaiting tools/call"),
+        "expected the configured tools/call timeout, got: {error_chain}"
+    );
+    release_call.notify_one();
+    let managed_client = manager.servers["slow-server"].connection.client().await?;
+    tokio::time::timeout(Duration::from_secs(1), managed_client.client.shutdown())
+        .await
+        .expect("the in-process MCP server shuts down");
+    Ok(())
 }
