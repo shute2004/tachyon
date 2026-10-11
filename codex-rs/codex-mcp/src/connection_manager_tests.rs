@@ -5660,10 +5660,15 @@ async fn prepare_call_for_tool_requires_one_exact_current_apps_identity() {
     let mut duplicate = current_a.clone();
     duplicate.callable_namespace = "duplicate-advertised-alias".to_string();
     duplicate.callable_name = "duplicate-advertised-name".to_string();
-    let mut revision = manager.tool_catalog_revision.write().await;
-    *manager.codex_apps_tools_override.write().await = Some(vec![current_a, current_b, duplicate]);
-    *revision += 1;
-    drop(revision);
+    {
+        let mut revision = manager.tool_catalog_revision.write().await;
+        let mut apps_tools_override = manager
+            .codex_apps_tools_override
+            .try_write()
+            .expect("test-local catalog override lock is uncontended");
+        *apps_tools_override = Some(vec![current_a, current_b, duplicate]);
+        *revision += 1;
+    }
     let duplicate_result = tokio::time::timeout(
         Duration::from_secs(1),
         manager.prepare_call_for_tool(config, &advertised_a),
@@ -5875,8 +5880,7 @@ async fn prepare_call_for_tool_rejects_stale_catalog_revision_before_preparation
             Ok((None, None))
         })
         .await
-        .err()
-        .expect("a call from the old revision is rejected");
+        .expect_err("a call from the old revision is rejected");
     assert!(
         error
             .to_string()
