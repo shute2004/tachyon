@@ -140,9 +140,9 @@ impl ModelRuntime {
     pub fn begin_turn_for_provider(&self, provider_id: impl Into<String>) -> ModelTurnRuntime {
         let provider_id = ModelProviderId::new(provider_id.into());
         let backend = match &self.backend {
-            ModelRuntimeBackend::Codex(adapter) => {
-                ModelTurnRuntimeBackend::Codex(adapter.begin_turn_for_provider(provider_id))
-            }
+            ModelRuntimeBackend::Codex(adapter) => ModelTurnRuntimeBackend::Codex(Box::new(
+                adapter.begin_turn_for_provider(provider_id),
+            )),
             ModelRuntimeBackend::Canonical(backend) => ModelTurnRuntimeBackend::Canonical {
                 backend: backend.begin_turn(provider_id.clone()),
                 requested_provider_id: provider_id,
@@ -198,7 +198,7 @@ pub struct ModelTurnRuntime {
 }
 
 enum ModelTurnRuntimeBackend {
-    Codex(CodexModelTurnRuntimeAdapter),
+    Codex(Box<CodexModelTurnRuntimeAdapter>),
     Canonical {
         backend: Box<dyn ModelTurnBackend>,
         requested_provider_id: ModelProviderId,

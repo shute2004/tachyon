@@ -166,11 +166,11 @@ impl McpServerConnectionIdentity {
                     http_headers,
                     env_http_headers,
                     http_headers_helper: _,
-                } if !http_headers.as_ref().is_some_and(|headers| {
+                } if !(http_headers.as_ref().is_some_and(|headers| {
                     headers.iter().any(|(name, value)| {
                         name.eq_ignore_ascii_case("authorization") && valid_http_header_value(value)
                     })
-                }) && !(server.credential_policy()
+                }) || (server.credential_policy()
                     == McpCredentialPolicy::HostFallbackAllowed
                     && env_http_headers.as_ref().is_some_and(|headers| {
                         headers.iter().any(|(name, env_var)| {
@@ -179,7 +179,7 @@ impl McpServerConnectionIdentity {
                                     !value.trim().is_empty() && valid_http_header_value(&value)
                                 })
                         })
-                    })) =>
+                    }))) =>
                 {
                     Some(url)
                 }

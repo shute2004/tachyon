@@ -209,7 +209,7 @@ pub(super) async fn handle_with_source(
     submission_id: String,
     input_source: InputSource,
 ) -> CodexResult<TurnInputSubmission> {
-    let _admission = session.input_queue.acquire_admission().await;
+    let _admission = session.input_queue.acquire_admission().await?;
     match mode {
         TurnInputMode::StartOrSteer => {
             start_or_steer(session, request, submission_id, input_source).await
@@ -244,7 +244,7 @@ pub(super) async fn handle_recovery(
     start_options: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    let _admission = session.input_queue.acquire_admission().await;
+    let _admission = session.input_queue.acquire_admission().await?;
     let request = TurnInputRequest::user_input(Vec::new())
         .with_thread_settings(thread_settings)
         .on_start(TurnStartOptions {
@@ -470,7 +470,7 @@ async fn start_if_idle(
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        vec![pending_turn_input(input, None)],
+                        vec![pending_turn_input(input, /*input_association*/ None)],
                     )
                     .await;
             }

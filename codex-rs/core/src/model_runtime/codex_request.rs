@@ -700,12 +700,20 @@ fn model_tools_from_codex(tools: &[ToolSpec]) -> Option<Vec<ModelToolSpec>> {
                 let mut children = Vec::with_capacity(namespace.tools.len());
                 for tool in &namespace.tools {
                     match tool {
-                        ResponsesApiNamespaceTool::Function(tool) => children.push(
-                            model_function_tool(None, tool, ModelToolPurpose::Invocation)?,
-                        ),
-                        ResponsesApiNamespaceTool::Custom(tool) => children.push(
-                            model_freeform_tool(None, tool, ModelToolPurpose::Invocation)?,
-                        ),
+                        ResponsesApiNamespaceTool::Function(tool) => {
+                            children.push(model_function_tool(
+                                /*namespace*/ None,
+                                tool,
+                                ModelToolPurpose::Invocation,
+                            )?)
+                        }
+                        ResponsesApiNamespaceTool::Custom(tool) => {
+                            children.push(model_freeform_tool(
+                                /*namespace*/ None,
+                                tool,
+                                ModelToolPurpose::Invocation,
+                            )?)
+                        }
                     }
                 }
                 model_tools.push(ModelToolSpec::Namespace {

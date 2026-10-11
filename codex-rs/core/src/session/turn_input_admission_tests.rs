@@ -54,7 +54,11 @@ async fn handle_realtime_and_recovery_wait_without_mutating_state_then_admit_in_
     let active_turn_id = turn_context.sub_id.clone();
     hold_active_regular_task(&session, turn_context).await;
     let original_settings = session.thread_settings_snapshot().await;
-    let admission = session.input_queue.acquire_admission().await;
+    let admission = session
+        .input_queue
+        .acquire_admission()
+        .await
+        .expect("session admission gate should be open");
 
     let mut normal = Box::pin(handle(
         &session,
@@ -138,7 +142,8 @@ async fn handle_realtime_and_recovery_wait_without_mutating_state_then_admit_in_
         session.input_queue.acquire_admission(),
     )
     .await
-    .expect("NotIdle rejection releases admission");
+    .expect("NotIdle rejection releases admission")
+    .expect("session admission gate should remain open");
     drop(available_after_rejection);
 
     timeout(
@@ -159,7 +164,11 @@ async fn cancelled_waiter_releases_its_slot_and_admission_is_session_local() {
     hold_active_regular_task(&second_session, second_context).await;
 
     let original_settings = first_session.thread_settings_snapshot().await;
-    let first_admission = first_session.input_queue.acquire_admission().await;
+    let first_admission = first_session
+        .input_queue
+        .acquire_admission()
+        .await
+        .expect("session admission gate should be open");
     let mut cancelled = Box::pin(handle(
         &first_session,
         user_request("cancelled waiter"),
@@ -264,7 +273,8 @@ async fn cancelled_waiter_releases_its_slot_and_admission_is_session_local() {
         first_session.input_queue.acquire_admission(),
     )
     .await
-    .expect("input error releases admission");
+    .expect("input error releases admission")
+    .expect("session admission gate should remain open");
     drop(available_after_error);
 
     timeout(

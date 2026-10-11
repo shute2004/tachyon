@@ -188,7 +188,7 @@ unsafe fn child_token_diagnostic(
     }
     let token_owner = unsafe { OwnedHandle::from_raw_handle(raw_token as _) };
     let token = token_owner.as_raw_handle() as HANDLE;
-    let query = |information_class| -> Result<Vec<u8>, String> {
+    let query = |information_class: TOKEN_INFORMATION_CLASS| -> Result<Vec<u8>, String> {
         let mut needed = 0;
         unsafe {
             GetTokenInformation(

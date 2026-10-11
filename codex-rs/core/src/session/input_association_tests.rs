@@ -234,16 +234,25 @@ async fn accepted_steer_reserves_after_rejections_and_records_only_original_prom
     let TurnInput::UserInput {
         content,
         client_id,
-        input_association: Some(association),
+        input_association,
     } = pending.into_iter().next().unwrap()
     else {
-        panic!("accepted input should carry its reservation");
+        panic!("accepted input should be queued");
     };
     assert_eq!(content, input);
     assert_eq!(client_id.as_deref(), Some("client-message"));
-    assert_eq!(association.identity.thread_id, session.thread_id);
-    assert_eq!(association.identity.sequence.get(), 1);
-    assert_eq!(association.source, source);
+    #[cfg(unix)]
+    {
+        let association =
+            input_association.expect("accepted input should carry its reservation on Unix");
+        assert_eq!(association.identity.thread_id, session.thread_id);
+        assert_eq!(association.identity.sequence.get(), 1);
+        assert_eq!(association.source, source);
+    }
+    #[cfg(not(unix))]
+    assert_eq!(input_association, None);
+
+    let expected_association = input_association;
 
     crate::hook_runtime::record_pending_input(
         &session,
@@ -251,7 +260,7 @@ async fn accepted_steer_reserves_after_rejections_and_records_only_original_prom
         TurnInput::UserInput {
             content: content.clone(),
             client_id,
-            input_association: Some(association),
+            input_association,
         },
         vec!["unassociated hook context".to_string()],
         PersistContext::Standard,
@@ -283,7 +292,10 @@ async fn accepted_steer_reserves_after_rejections_and_records_only_original_prom
         .iter()
         .filter_map(|envelope| envelope.metadata.as_ref()?.input_association)
         .collect::<Vec<_>>();
-    assert_eq!(associated, vec![association]);
+    assert_eq!(
+        associated,
+        expected_association.into_iter().collect::<Vec<_>>()
+    );
     assert_eq!(
         response_items
             .iter()
@@ -292,7 +304,7 @@ async fn accepted_steer_reserves_after_rejections_and_records_only_original_prom
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.input_association)
-                    == Some(association)
+                    == expected_association
                     && matches!(&envelope.item, ResponseItem::Message { role, content, .. }
                     if role == "user" && content.iter().any(|item| matches!(
                         item, ContentItem::InputText { text } if text == "accepted marker input"

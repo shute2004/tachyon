@@ -5,6 +5,8 @@ use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_history::InputAssociation;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
@@ -113,11 +115,11 @@ impl InputQueue {
     /// not mailbox/task lifecycle, interrupts, shutdown, or unrelated settings updates.
     /// Callers acquire it before active-turn and per-turn-state locks. It is not a durability,
     /// human-origin, or transcript-evidence guarantee.
-    pub(super) async fn acquire_admission(&self) -> SemaphorePermit<'_> {
+    pub(super) async fn acquire_admission(&self) -> CodexResult<SemaphorePermit<'_>> {
         self.turn_input_admission
             .acquire()
             .await
-            .expect("turn-input admission semaphore is never closed")
+            .map_err(|_| CodexErr::Fatal("turn-input admission gate is closed".to_string()))
     }
 
     pub(crate) async fn subscribe_activity(
@@ -408,6 +410,23 @@ mod tests {
     use codex_protocol::AgentPath;
     use codex_protocol::user_input::UserInput;
     use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn closed_turn_input_admission_returns_fatal_error() {
+        let input_queue = InputQueue::new();
+        input_queue.turn_input_admission.close();
+
+        let error = input_queue
+            .acquire_admission()
+            .await
+            .expect_err("closed gate must reject admission");
+
+        assert!(matches!(
+            error.details(),
+            codex_protocol::error::CodexErrorDetails::Fatal(message)
+                if message == "turn-input admission gate is closed"
+        ));
+    }
 
     #[test]
     fn response_item_serde_preserves_legacy_shape_and_rejects_metadata() {

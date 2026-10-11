@@ -85,7 +85,7 @@ pub(super) fn reserve(
                 version: JOURNAL_VERSION,
                 thread_id,
                 incarnation: InputStreamIncarnation::new(),
-                sequence: NonZeroU64::new(1).expect("one is non-zero"),
+                sequence: NonZeroU64::MIN,
             },
             InputIdentityContinuity::NewIncarnation,
         ),
