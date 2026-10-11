@@ -109,6 +109,7 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::ReasoningRawContentSectionStartedEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TurnDiffEvent;
@@ -1835,6 +1836,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::AgentReasoning(_)
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::AgentReasoningSectionBreak(_)
+        | EventMsg::ReasoningRawContentSectionStarted(_)
         | EventMsg::SessionConfigured(_)
         | EventMsg::EnvironmentConnected(_)
         | EventMsg::EnvironmentDisconnected(_)
@@ -2806,6 +2808,30 @@ async fn try_run_sampling_request(
                     summary_index: i64::from(section_index),
                 });
                 sess.send_event(&turn_context, event).await;
+            }
+            HarnessSamplingEvent::Other(ModelRuntimeEvent::Model {
+                event:
+                    ModelEvent::ReasoningSectionStarted {
+                        item_id,
+                        kind: ModelReasoningDeltaKind::Content,
+                        section_index,
+                    },
+                ..
+            }) => {
+                if !active_item_is_streaming_to_client {
+                    continue;
+                }
+                let event = ReasoningRawContentSectionStartedEvent {
+                    thread_id: sess.thread_id.to_string(),
+                    turn_id: turn_context.sub_id.clone(),
+                    item_id: item_id.0,
+                    content_index: i64::from(section_index),
+                };
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::ReasoningRawContentSectionStarted(event),
+                )
+                .await;
             }
             HarnessSamplingEvent::Other(ModelRuntimeEvent::Compatibility(
                 CodexModelRuntimeSideEvent::ReasoningSummaryPartAdded { summary_index },

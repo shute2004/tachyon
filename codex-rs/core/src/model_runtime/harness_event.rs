@@ -13,7 +13,6 @@ use crate::model_runtime::ir::ModelImageDetail;
 use crate::model_runtime::ir::ModelMessagePhase;
 use crate::model_runtime::ir::ModelOutputItem;
 use crate::model_runtime::ir::ModelOutputItemStart;
-use crate::model_runtime::ir::ModelReasoningDeltaKind;
 use crate::model_runtime::ir::ModelToolInput;
 use crate::model_runtime::ir::ModelToolInputKind;
 use crate::model_runtime::ir::ModelUsage;
@@ -99,17 +98,6 @@ pub(crate) fn normalize_sampling_event(
             token_usage: completion.usage.map(token_usage_from_model).transpose()?,
             end_turn: completion.end_turn,
         }),
-        ModelRuntimeEvent::Model {
-            event:
-                ModelEvent::ReasoningSectionStarted {
-                    kind: ModelReasoningDeltaKind::Content,
-                    ..
-                },
-            codex: None,
-        } => Err(
-            "reasoning content section starts are not supported by the current sampling handler"
-                .to_string(),
-        ),
         other => Ok(HarnessSamplingEvent::Other(other)),
     }
 }

@@ -107,8 +107,9 @@ Both manual and automatic model compaction gate Codex remote dispatch on the sel
 runtime, not provider identity alone. Canonical backends remain local even with OpenAI
 remote V2 capability; the earlier TokenBudget path and Codex remote V1/V2 selection are unchanged.
 
-Remote compaction and regular-sampling reasoning-content section starts are not implemented
-by this slice and remain explicitly unsupported or on their existing Codex paths.
+Remote compaction remains unimplemented by this slice. Regular sampling now preserves canonical
+reasoning-content section starts as transient host events; local compaction continues to ignore
+noncompletion stream structure, including these section starts.
 Realtime and delegated WebSocket
 capability checks still retain the legacy client. The complete agent loop is not yet a
 standalone provider-neutral crate.

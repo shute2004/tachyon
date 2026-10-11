@@ -1412,6 +1412,9 @@ pub enum EventMsg {
     /// Signaled when the model begins a new reasoning summary section (e.g., a new titled block).
     AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent),
 
+    /// Signaled when the model begins a new raw reasoning content section; carries no text delta.
+    ReasoningRawContentSectionStarted(ReasoningRawContentSectionStartedEvent),
+
     /// Ack the client's configure message.
     SessionConfigured(SessionConfiguredEvent),
 
@@ -1957,6 +1960,14 @@ pub struct ReasoningRawContentDeltaEvent {
     pub delta: String,
     // load with default value so it's backward compatible with the old format.
     #[serde(default)]
+    pub content_index: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct ReasoningRawContentSectionStartedEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
     pub content_index: i64,
 }
 

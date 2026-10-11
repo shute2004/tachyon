@@ -363,6 +363,7 @@ async fn run_turn(thread: &CodexThread, thread_id: &str, prompt: String) -> anyh
             | EventMsg::PlanDelta(_)
             | EventMsg::ReasoningContentDelta(_)
             | EventMsg::ReasoningRawContentDelta(_)
+            | EventMsg::ReasoningRawContentSectionStarted(_)
             | EventMsg::AgentReasoningSectionBreak(_)
             | EventMsg::ItemStarted(_)
             | EventMsg::ItemCompleted(_)

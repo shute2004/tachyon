@@ -458,15 +458,26 @@ fn codex_item_and_completion_context_pass_through_without_losing_decorations() {
 }
 
 #[test]
-fn generic_reasoning_content_section_start_fails_explicitly() {
-    let error = normalize_sampling_event(canonical_event(ModelEvent::ReasoningSectionStarted {
-        item_id: ModelItemId("rs_content".to_string()),
-        kind: ModelReasoningDeltaKind::Content,
-        section_index: 0,
-    }))
-    .unwrap_err();
+fn generic_reasoning_content_section_start_is_preserved_without_sidecar() {
+    let normalized =
+        normalize_sampling_event(canonical_event(ModelEvent::ReasoningSectionStarted {
+            item_id: ModelItemId("rs_content".to_string()),
+            kind: ModelReasoningDeltaKind::Content,
+            section_index: 7,
+        }))
+        .unwrap();
 
-    assert!(error.contains("reasoning content section starts are not supported"));
+    assert!(matches!(
+        normalized,
+        HarnessSamplingEvent::Other(ModelRuntimeEvent::Model {
+            event: ModelEvent::ReasoningSectionStarted {
+                item_id: ModelItemId(item_id),
+                kind: ModelReasoningDeltaKind::Content,
+                section_index: 7,
+            },
+            codex: None,
+        }) if item_id == "rs_content"
+    ));
 }
 
 #[test]

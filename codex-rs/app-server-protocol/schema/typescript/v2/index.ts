@@ -401,6 +401,7 @@ export type { RateLimitSnapshot } from "./RateLimitSnapshot";
 export type { RateLimitWindow } from "./RateLimitWindow";
 export type { RawResponseCompletedNotification } from "./RawResponseCompletedNotification";
 export type { RawResponseItemCompletedNotification } from "./RawResponseItemCompletedNotification";
+export type { ReasoningContentPartAddedNotification } from "./ReasoningContentPartAddedNotification";
 export type { ReasoningEffortOption } from "./ReasoningEffortOption";
 export type { ReasoningSummaryPartAddedNotification } from "./ReasoningSummaryPartAddedNotification";
 export type { ReasoningSummaryTextDeltaNotification } from "./ReasoningSummaryTextDeltaNotification";

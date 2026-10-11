@@ -1779,6 +1779,7 @@ There are additional item-specific events:
 
 - `item/reasoning/summaryTextDelta` — streams readable reasoning summaries; `summaryIndex` increments when a new summary section opens.
 - `item/reasoning/summaryPartAdded` — marks the boundary between reasoning summary sections for an `itemId`; subsequent `summaryTextDelta` entries share the same `summaryIndex`.
+- `item/reasoning/contentPartAdded` — experimental; marks the start of a raw reasoning content part with `{threadId, turnId, itemId, contentIndex}` and carries no text. Subsequent `item/reasoning/textDelta` entries use that `contentIndex`.
 - `item/reasoning/textDelta` — streams raw reasoning text (only applicable for e.g. open source models); use `contentIndex` to group deltas that belong together before showing them in the UI.
 
 #### commandExecution

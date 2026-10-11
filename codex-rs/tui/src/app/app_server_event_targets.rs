@@ -128,6 +128,9 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ReasoningSummaryPartAdded(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ReasoningContentPartAdded(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ReasoningTextDelta(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -353,3 +356,7 @@ mod tests {
         assert_eq!(target, ServerNotificationThreadTarget::Thread(thread_id));
     }
 }
+
+#[cfg(test)]
+#[path = "app_server_event_targets_tests.rs"]
+mod reasoning_content_part_added_tests;

@@ -45,6 +45,7 @@ use tachyon_model::ModelItemId;
 use tachyon_model::ModelMessagePhase;
 use tachyon_model::ModelOutputItem;
 use tachyon_model::ModelOutputItemStart;
+use tachyon_model::ModelReasoningDeltaKind;
 use tachyon_model::ModelRequest;
 use tachyon_model::ModelToolCall;
 use tachyon_model::ModelToolCallId;
@@ -606,6 +607,169 @@ async fn injected_backend_runs_tool_followup_and_fresh_next_turn() {
             ContentItem::OutputText { text } if text == "second turn answer"
         ))
     )));
+
+    started
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown test thread");
+}
+
+#[tokio::test]
+async fn injected_backend_preserves_reasoning_content_section_boundaries() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let mut config = canonical_backend_test_config(codex_home.path()).await;
+    config
+        .features
+        .disable(Feature::ConcurrentReasoningSummaries);
+    let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
+    let reasoning_id = ModelItemId("reasoning-content".to_string());
+    let final_id = ModelItemId("final-answer".to_string());
+    backend.queue_stream(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::OutputItemStarted(
+            ModelOutputItemStart::Reasoning {
+                id: reasoning_id.clone(),
+            },
+        )),
+        Ok(ModelEvent::ReasoningSectionStarted {
+            item_id: reasoning_id.clone(),
+            kind: ModelReasoningDeltaKind::Summary,
+            section_index: 2,
+        }),
+        Ok(ModelEvent::ReasoningDelta {
+            item_id: reasoning_id.clone(),
+            kind: ModelReasoningDeltaKind::Summary,
+            delta: "summary text".to_string(),
+            section_index: Some(2),
+        }),
+        Ok(ModelEvent::ReasoningSectionStarted {
+            item_id: reasoning_id.clone(),
+            kind: ModelReasoningDeltaKind::Content,
+            section_index: 7,
+        }),
+        Ok(ModelEvent::ReasoningDelta {
+            item_id: reasoning_id.clone(),
+            kind: ModelReasoningDeltaKind::Content,
+            delta: "raw detail".to_string(),
+            section_index: Some(7),
+        }),
+        Ok(ModelEvent::OutputItemCompleted(
+            ModelOutputItem::Reasoning {
+                id: reasoning_id,
+                summary: vec!["summary text".to_string()],
+                content: vec!["raw detail".to_string()],
+            },
+        )),
+        Ok(ModelEvent::OutputItemStarted(
+            ModelOutputItemStart::Message {
+                id: final_id.clone(),
+                phase: Some(ModelMessagePhase::Final),
+            },
+        )),
+        Ok(ModelEvent::OutputItemCompleted(ModelOutputItem::Message {
+            id: final_id,
+            phase: Some(ModelMessagePhase::Final),
+            content: vec![ModelContent::Text("normal completion".to_string())],
+        })),
+        Ok(completion(
+            /*input_tokens*/ 5,
+            /*total_tokens*/ 7,
+            Some(true),
+        )),
+    ]);
+
+    let options = StartThreadOptions::new(config.clone())
+        .with_model_runtime(ModelRuntime::from_backend(backend.clone()));
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+    );
+    let started = manager.start_thread(options).await.expect("start thread");
+
+    submit_user_turn(&started.thread, "preserve raw reasoning sections").await;
+    let events = wait_for_turn_end(&started.thread).await;
+    assert_successful_turn(&events, "canonical reasoning section turn");
+
+    let summary_section_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EventMsg::AgentReasoningSectionBreak(section)
+                    if section.item_id == "reasoning-content" && section.summary_index == 2
+            )
+        })
+        .expect("summary section boundary should remain distinct");
+    let summary_delta_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EventMsg::ReasoningContentDelta(delta)
+                    if delta.item_id == "reasoning-content"
+                        && delta.delta == "summary text"
+                        && delta.summary_index == 2
+            )
+        })
+        .expect("summary delta should be emitted");
+    let content_start_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EventMsg::ReasoningRawContentSectionStarted(section)
+                    if section.item_id == "reasoning-content" && section.content_index == 7
+            )
+        })
+        .expect("raw content section boundary should be emitted");
+    let raw_delta_position = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EventMsg::ReasoningRawContentDelta(delta)
+                    if delta.item_id == "reasoning-content"
+                        && delta.delta == "raw detail"
+                        && delta.content_index == 7
+            )
+        })
+        .expect("raw content delta should be emitted");
+    let turn_complete_position = events
+        .iter()
+        .position(|event| matches!(event, EventMsg::TurnComplete(_)))
+        .expect("turn should complete normally");
+    assert!(summary_section_position < summary_delta_position);
+    assert!(summary_delta_position < content_start_position);
+    assert!(content_start_position < raw_delta_position);
+    assert!(raw_delta_position < turn_complete_position);
+    let content_start = events
+        .iter()
+        .find_map(|event| match event {
+            EventMsg::ReasoningRawContentSectionStarted(section) => Some(section),
+            _ => None,
+        })
+        .expect("raw content section event should be present");
+    let raw_delta = events
+        .iter()
+        .find_map(|event| match event {
+            EventMsg::ReasoningRawContentDelta(delta) => Some(delta),
+            _ => None,
+        })
+        .expect("raw content delta event should be present");
+    assert!(!content_start.thread_id.is_empty());
+    assert!(!content_start.turn_id.is_empty());
+    assert_eq!(content_start.item_id, "reasoning-content");
+    assert_eq!(content_start.content_index, 7);
+    assert_eq!(raw_delta.thread_id, content_start.thread_id);
+    assert_eq!(raw_delta.turn_id, content_start.turn_id);
+    assert_eq!(raw_delta.item_id, content_start.item_id);
+    assert_eq!(raw_delta.content_index, content_start.content_index);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        EventMsg::Error(_) | EventMsg::RawResponseCompleted(_)
+    )));
+    assert!(find_model_function(&backend.requests()[0].request.tools, "update_plan").is_some());
 
     started
         .thread

@@ -88,6 +88,11 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ReasoningSummaryPartAdded(_) => self.on_reasoning_section_break(),
+            ServerNotification::ReasoningContentPartAdded(_) => {
+                if self.config.show_raw_agent_reasoning {
+                    self.on_reasoning_section_break();
+                }
+            }
             ServerNotification::TerminalInteraction(notification) => {
                 self.on_terminal_interaction(notification.process_id, notification.stdin)
             }

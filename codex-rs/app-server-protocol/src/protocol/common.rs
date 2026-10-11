@@ -1912,6 +1912,9 @@ server_notification_definitions! {
     FsChanged => "fs/changed" (v2::FsChangedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),
+    /// EXPERIMENTAL - Marks the start of a raw reasoning content part.
+    #[experimental("item/reasoning/contentPartAdded")]
+    ReasoningContentPartAdded => "item/reasoning/contentPartAdded" (v2::ReasoningContentPartAddedNotification),
     ReasoningTextDelta => "item/reasoning/textDelta" (v2::ReasoningTextDeltaNotification),
     /// Deprecated: Use `ContextCompaction` item type instead.
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),

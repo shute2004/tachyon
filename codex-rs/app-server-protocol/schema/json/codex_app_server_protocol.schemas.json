@@ -5516,6 +5516,27 @@
           "type": "object"
         },
         {
+          "description": "EXPERIMENTAL - Marks the start of a raw reasoning content part.",
+          "properties": {
+            "method": {
+              "enum": [
+                "item/reasoning/contentPartAdded"
+              ],
+              "title": "Item/reasoning/contentPartAddedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ReasoningContentPartAddedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Item/reasoning/contentPartAddedNotification",
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "enum": [
@@ -17490,6 +17511,33 @@
           "v1",
           "v2"
         ],
+        "type": "object"
+      },
+      "ReasoningContentPartAddedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "EXPERIMENTAL - Marks the start of a raw reasoning content part without carrying text.",
+        "properties": {
+          "contentIndex": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "itemId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "contentIndex",
+          "itemId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "ReasoningContentPartAddedNotification",
         "type": "object"
       },
       "ReasoningEffort": {
