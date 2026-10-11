@@ -240,62 +240,6 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codex_protocol::models::LocalShellAction;
-    use codex_protocol::models::LocalShellExecAction;
-    use codex_protocol::models::LocalShellStatus;
-
-    #[test]
-    fn function_output_removal_prefers_function_call_over_local_shell_call() {
-        let call_id = "shared-call";
-        let mut items = vec![
-            ResponseItemEnvelope::new(ResponseItem::LocalShellCall {
-                id: None,
-                call_id: Some(call_id.to_string()),
-                status: LocalShellStatus::Completed,
-                action: LocalShellAction::Exec(LocalShellExecAction {
-                    command: vec!["echo".to_string(), "local".to_string()],
-                    timeout_ms: None,
-                    working_directory: None,
-                    env: None,
-                    user: None,
-                }),
-                internal_chat_message_metadata_passthrough: None,
-            }),
-            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
-                id: None,
-                name: "do_it".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: call_id.to_string(),
-                encrypted_function_args: None,
-                internal_chat_message_metadata_passthrough: None,
-            }),
-        ];
-        let output = ResponseItem::FunctionCallOutput {
-            id: None,
-            call_id: Some(call_id.to_string()),
-            name: None,
-            namespace: None,
-            output: FunctionCallOutputPayload::from_text("ok".to_string()),
-            internal_chat_message_metadata_passthrough: None,
-        };
-
-        remove_corresponding_for(&mut items, &output);
-
-        assert_eq!(items.len(), 1);
-        assert!(matches!(
-            &items[0].item,
-            ResponseItem::LocalShellCall {
-                call_id: Some(remaining_call_id),
-                ..
-            } if remaining_call_id.as_str() == call_id
-        ));
-    }
-}
-
 /// Strip image content from messages and tool outputs when the model does not support images.
 /// When `input_modalities` contains `InputModality::Image`, no stripping is performed.
 pub(crate) fn strip_images_when_unsupported(
@@ -387,5 +331,61 @@ pub(crate) fn strip_audio_when_unsupported(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::models::LocalShellAction;
+    use codex_protocol::models::LocalShellExecAction;
+    use codex_protocol::models::LocalShellStatus;
+
+    #[test]
+    fn function_output_removal_prefers_function_call_over_local_shell_call() {
+        let call_id = "shared-call";
+        let mut items = vec![
+            ResponseItemEnvelope::new(ResponseItem::LocalShellCall {
+                id: None,
+                call_id: Some(call_id.to_string()),
+                status: LocalShellStatus::Completed,
+                action: LocalShellAction::Exec(LocalShellExecAction {
+                    command: vec!["echo".to_string(), "local".to_string()],
+                    timeout_ms: None,
+                    working_directory: None,
+                    env: None,
+                    user: None,
+                }),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+                id: None,
+                name: "do_it".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: call_id.to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        ];
+        let output = ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        remove_corresponding_for(&mut items, &output);
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0].item,
+            ResponseItem::LocalShellCall {
+                call_id: Some(remaining_call_id),
+                ..
+            } if remaining_call_id.as_str() == call_id
+        ));
     }
 }
