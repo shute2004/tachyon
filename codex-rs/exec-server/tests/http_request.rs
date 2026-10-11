@@ -143,10 +143,13 @@ async fn exec_server_http_request_buffers_response_body() -> anyhow::Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_server_http_request_rejects_protected_environment_headers() -> anyhow::Result<()> {
     let mut server = exec_server_with_env(
-        [(
-            "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
-            "executor-internal-token",
-        )],
+        [
+            (
+                "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+                "executor-internal-token",
+            ),
+            ("CODEX_GUARDIAN_DECISIONS_API_KEY", "guardian-secret"),
+        ],
         &[],
     )
     .await?;
@@ -162,6 +165,8 @@ async fn exec_server_http_request_rejects_protected_environment_headers() -> any
         "AWS_SECRET_ACCESS_KEY",
         "AZURE_FEDERATED_TOKEN_FILE",
         "OPENAI_IDENTITY_TOKEN_FILE",
+        "CODEX_GUARDIAN_DECISIONS_API_KEY",
+        "codex_guardian_decisions_api_key",
     ]
     .into_iter()
     .enumerate()
