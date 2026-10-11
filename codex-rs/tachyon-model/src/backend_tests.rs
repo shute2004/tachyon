@@ -166,6 +166,7 @@ fn factory_creates_provider_bound_turns_and_preserves_canonical_streams() {
 
     assert_eq!(first_turn.route().provider_id(), &provider_a);
     assert_eq!(second_turn.route().provider_id(), &provider_b);
+    assert_eq!(first_turn.try_recover_after_stream_error(), None);
 
     let first_request = user_request("What is 2 + 2?");
     let follow_up_request = user_request("Explain that answer briefly.");

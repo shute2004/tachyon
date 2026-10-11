@@ -77,6 +77,18 @@ pub trait ModelTurnBackend: Send + Sync {
     /// The fully identified route used by this turn.
     fn route(&self) -> &ModelRoute;
 
+    /// Optionally recover this same turn handle after a retryable stream error.
+    ///
+    /// Returning `Some(warning)` means the backend made a backend-private, non-blocking request-path
+    /// change and the same handle is ready for one more retry. Concrete endpoint, transport,
+    /// authentication, and provider wire details remain private to the backend and must not be
+    /// surfaced through this contract. Implementations must keep recovery finite for each eligible
+    /// failure mode and return `None` after their recovery attempts are exhausted. Recovery must not
+    /// change the selected model or configured provider identity.
+    fn try_recover_after_stream_error(&mut self) -> Option<String> {
+        None
+    }
+
     /// Execute one canonical request with an explicitly selected model identity.
     ///
     /// The selected `model_id` is distinct from the provider identity in [`Self::route`]. The

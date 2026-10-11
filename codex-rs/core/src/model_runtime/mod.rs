@@ -426,7 +426,15 @@ impl ModelTurnRuntime {
             ModelTurnRuntimeBackend::Codex(adapter) => {
                 adapter.try_recover_after_stream_error(session_telemetry, model_info)
             }
-            ModelTurnRuntimeBackend::Canonical { .. } => None,
+            ModelTurnRuntimeBackend::Canonical {
+                backend,
+                requested_provider_id,
+            } => {
+                if backend.route().provider_id() != requested_provider_id {
+                    return None;
+                }
+                backend.try_recover_after_stream_error()
+            }
         }
     }
 }

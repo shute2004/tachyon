@@ -1489,3 +1489,6 @@ fn backend_errors_map_to_existing_retry_and_request_classes() {
         CodexErrorDetails::TurnAborted
     ));
 }
+
+#[path = "canonical_recovery_tests.rs"]
+mod recovery_tests;
