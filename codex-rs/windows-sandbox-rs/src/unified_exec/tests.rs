@@ -994,6 +994,41 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         )
         .await
         .expect("spawn legacy delete session");
+        let parent_acl_after_setup_before_delete =
+            match timeout(Duration::from_secs(2), async {
+                let (
+                    workspace_acl,
+                    workspace_file_acl,
+                    protected_git_dir_acl,
+                    outside_root_acl,
+                    outside_file_acl,
+                ) = tokio::join!(
+                    icacls_snapshot("after setup before delete workspace", &workspace),
+                    icacls_snapshot("after setup before delete workspace_file", &workspace_file),
+                    icacls_snapshot(
+                        "after setup before delete protected_git_dir",
+                        &protected_git_dir,
+                    ),
+                    icacls_snapshot("after setup before delete outside_root", &outside_root),
+                    icacls_snapshot("after setup before delete outside_file", &outside_file),
+                );
+                [
+                    workspace_acl,
+                    workspace_file_acl,
+                    protected_git_dir_acl,
+                    outside_root_acl,
+                    outside_file_acl,
+                ]
+                .join("\n\n")
+            })
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    "after setup before delete icacls snapshot collection timed out after 2s"
+                        .to_string()
+                }
+            };
         let stdin_release = spawned
             .session
             .writer_sender()
@@ -1033,7 +1068,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 protected_git_dir.is_dir(),
             ),
             (0, false, false, false, Some("outside".to_string()), true),
-            "stdout={stdout:?}\nparent_acl_before:\n{parent_acl_before}\nparent_acl_after:\n{parent_acl_after}\ncap_sid:\n{cap_sid_snapshot}\n{}",
+            "stdout={stdout:?}\nparent_acl_before:\n{parent_acl_before}\nparent_acl_after_setup_before_delete:\n{parent_acl_after_setup_before_delete}\nparent_acl_after:\n{parent_acl_after}\ncap_sid:\n{cap_sid_snapshot}\n{}",
             sandbox_log(codex_home.path())
         );
     });
