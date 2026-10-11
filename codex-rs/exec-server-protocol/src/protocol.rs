@@ -55,19 +55,26 @@ pub const HTTP_REQUEST_BODY_DELTA_METHOD: &str = "http/request/bodyDelta";
 /// Maximum decoded response-body bytes carried by one streamed HTTP notification.
 pub const MAX_HTTP_BODY_DELTA_BYTES: usize = 1024 * 1024;
 
+/// Shared immutable bytes encoded as base64 on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ByteChunk(#[serde(with = "base64_bytes")] pub Vec<u8>);
+pub struct ByteChunk(#[serde(with = "base64_bytes")] pub Arc<Vec<u8>>);
 
 impl ByteChunk {
     pub fn into_inner(self) -> Vec<u8> {
-        self.0
+        Arc::unwrap_or_clone(self.0)
     }
 }
 
 impl From<Vec<u8>> for ByteChunk {
     fn from(value: Vec<u8>) -> Self {
-        Self(value)
+        Self(Arc::new(value))
+    }
+}
+
+impl AsRef<[u8]> for ByteChunk {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
     }
 }
 
@@ -848,6 +855,7 @@ mod base64_bytes {
     use serde::Deserialize;
     use serde::Deserializer;
     use serde::Serializer;
+    use std::sync::Arc;
 
     pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -856,13 +864,14 @@ mod base64_bytes {
         serializer.serialize_str(&BASE64_STANDARD.encode(bytes))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Vec<u8>>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
         BASE64_STANDARD
             .decode(encoded)
+            .map(Arc::new)
             .map_err(serde::de::Error::custom)
     }
 }
@@ -897,6 +906,53 @@ mod tests {
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn byte_chunk_preserves_base64_wire_format() {
+        assert_eq!(
+            serde_json::to_string(&super::ByteChunk::from(vec![0, 255, 10]))
+                .expect("serialize nonempty byte chunk"),
+            r#""AP8K""#
+        );
+        assert_eq!(
+            serde_json::to_string(&super::ByteChunk::from(Vec::new()))
+                .expect("serialize empty byte chunk"),
+            r#""""#
+        );
+    }
+
+    #[test]
+    fn byte_chunk_deserializes_base64_and_rejects_invalid_input() {
+        let chunk = serde_json::from_str::<super::ByteChunk>(r#""AP8K""#)
+            .expect("deserialize base64 byte chunk");
+        assert_eq!(chunk.as_ref(), &[0, 255, 10]);
+        assert!(serde_json::from_str::<super::ByteChunk>(r#""not base64!""#).is_err());
+    }
+
+    #[test]
+    fn byte_chunk_clone_shares_storage_and_unique_into_inner_reuses_allocation() {
+        let bytes = Vec::with_capacity(32);
+        let allocation = bytes.as_ptr();
+        let chunk = super::ByteChunk::from(bytes);
+        let clone = chunk.clone();
+
+        assert!(Arc::ptr_eq(&chunk.0, &clone.0));
+        drop(clone);
+        let owned = chunk.into_inner();
+        assert_eq!(owned.as_ptr(), allocation);
+    }
+
+    #[test]
+    fn shared_byte_chunk_into_inner_does_not_mutate_other_owner() {
+        let chunk = super::ByteChunk::from(vec![0, 255, 10]);
+        let other_owner = chunk.clone();
+
+        let mut owned = chunk.into_inner();
+        owned[0] = 1;
+        assert_eq!(owned, vec![1, 255, 10]);
+        assert_eq!(other_owner.as_ref(), &[0, 255, 10]);
+    }
 
     #[test]
     fn exec_params_keeps_proxy_launch_separate_from_sandbox_facts() {
