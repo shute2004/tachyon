@@ -17,6 +17,7 @@ pub const NON_INHERITABLE_ENV_VARS: &[&str] = &[
     OPENAI_FEDERATION_RULE_ID_ENV_VAR,
     OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR,
     OPENAI_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR,
+    "CODEX_GUARDIAN_DECISIONS_API_KEY",
 ];
 
 pub fn is_non_inheritable_env_var(name: &str) -> bool {
