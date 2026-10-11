@@ -301,11 +301,13 @@ unsafe fn child_token_diagnostic(
         }
         Ok(unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<u32>()) } != 0)
     };
-    let is_restricted = token_flag(TokenIsRestricted)?;
-    let has_restrictions = token_flag(TokenHasRestrictions)?;
+    // Supplementary flag queries must not erase the restricted-SID evidence
+    // already collected above when a platform returns an unexpected flag size.
+    let is_restricted = token_flag(TokenIsRestricted);
+    let has_restrictions = token_flag(TokenHasRestrictions);
 
     Ok(format!(
-        "is_restricted={is_restricted} has_restrictions={has_restrictions} restricted_sid_count={} restricted_sid_attributes={attributes:?} capability_membership={cap_membership:?} logon_sid_attributes={logon_attributes:?} everyone_sid_attributes={everyone_attributes:?} token_user_attributes=0x{:08x} token_user_in_restricted_sids={user_restricted_attributes:?}",
+        "is_restricted={is_restricted:?} has_restrictions={has_restrictions:?} restricted_sid_count={} restricted_sid_attributes={attributes:?} capability_membership={cap_membership:?} logon_sid_attributes={logon_attributes:?} everyone_sid_attributes={everyone_attributes:?} token_user_attributes=0x{:08x} token_user_in_restricted_sids={user_restricted_attributes:?}",
         entries.len(),
         user.User.Attributes
     ))
