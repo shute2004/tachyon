@@ -14,6 +14,7 @@ use tachyon_model::backend::ModelEventStream;
 use tachyon_model::backend::ModelTurnBackend;
 use tachyon_model::route::ModelProviderId;
 use tachyon_model::route::ModelRoute;
+use test_case::test_case;
 
 use super::FakeBackend;
 use crate::model_runtime::ModelRuntime;
@@ -197,20 +198,34 @@ async fn start_thread(
     (manager, started)
 }
 
+#[test_case(0; "zero retry budget")]
+#[test_case(1; "one ordinary retry before recovery")]
 #[tokio::test]
-async fn canonical_recovery_retries_same_handle_and_resets_for_next_turn() {
+async fn canonical_recovery_retries_same_handle_and_resets_for_next_turn(max_retries: u64) {
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
-    let config = zero_retry_config(codex_home.path()).await;
+    let mut config = super::canonical_backend_test_config(codex_home.path()).await;
+    config.model_provider.stream_max_retries = Some(max_retries);
     let backend = Arc::new(RecoveringBackend::recover_once_per_turn(
         "canonical backend recovered request path",
     ));
-    backend.queue_stream(retryable_error("first recoverable sampling failure"));
+    let success_request_index = max_retries as usize + 1;
+    let first_recovery_error = format!("first recoverable sampling failure {max_retries}");
+    for failure_index in 0..=max_retries {
+        let error = format!("first recoverable sampling failure {failure_index}");
+        backend.queue_stream(retryable_error(&error));
+    }
     backend.queue_stream(successful_answer_events(
-        /*turn_index*/ 0, /*request_index*/ 1,
+        /*turn_index*/ 0,
+        /*request_index*/ success_request_index,
     ));
-    backend.queue_stream(retryable_error("second recoverable sampling failure"));
+    let second_recovery_error = format!("second recoverable sampling failure {max_retries}");
+    for failure_index in 0..=max_retries {
+        let error = format!("second recoverable sampling failure {failure_index}");
+        backend.queue_stream(retryable_error(&error));
+    }
     backend.queue_stream(successful_answer_events(
-        /*turn_index*/ 1, /*request_index*/ 1,
+        /*turn_index*/ 1,
+        /*request_index*/ success_request_index,
     ));
     let (manager, started) = start_thread(config, backend.clone()).await;
 
@@ -220,7 +235,7 @@ async fn canonical_recovery_retries_same_handle_and_resets_for_next_turn() {
     assert_recovery_warning(
         &first_events,
         "canonical backend recovered request path",
-        "first recoverable sampling failure",
+        &first_recovery_error,
     );
 
     super::submit_user_turn(&started.thread, "recover second turn").await;
@@ -229,21 +244,28 @@ async fn canonical_recovery_retries_same_handle_and_resets_for_next_turn() {
     assert_recovery_warning(
         &second_events,
         "canonical backend recovered request path",
-        "second recoverable sampling failure",
+        &second_recovery_error,
     );
 
     let requests = backend.requests();
+    let requests_per_turn = max_retries as usize + 2;
     assert_eq!(backend.recovery_calls(), 2);
     assert_eq!(backend.turn_count(), 2);
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[0].turn_index, 0);
-    assert_eq!(requests[1].turn_index, 0);
-    assert_eq!(requests[2].turn_index, 1);
-    assert_eq!(requests[3].turn_index, 1);
-    assert_eq!(requests[0].model_id, requests[1].model_id);
-    assert_eq!(requests[2].model_id, requests[3].model_id);
-    assert_eq!(requests[0].request, requests[1].request);
-    assert_eq!(requests[2].request, requests[3].request);
+    assert_eq!(requests.len(), 2 * requests_per_turn);
+    for (turn_index, turn_requests) in requests.chunks(requests_per_turn).enumerate() {
+        assert_eq!(turn_requests.len(), requests_per_turn);
+        assert!(
+            turn_requests
+                .iter()
+                .all(|request| request.turn_index == turn_index),
+            "all attempts for turn {turn_index} should use the same backend handle"
+        );
+        let first_request = &turn_requests[0];
+        for request in turn_requests.iter().skip(1) {
+            assert_eq!(request.model_id, first_request.model_id);
+            assert_eq!(request.request, first_request.request);
+        }
+    }
 
     manager
         .shutdown_all_threads_bounded(Duration::from_secs(10))
