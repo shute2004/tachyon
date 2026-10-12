@@ -111,7 +111,10 @@ pub(crate) async fn build_compaction_initial_context(
                 )
                 .await;
             (
-                items.into_iter().map(ResponseItemEnvelope::new).collect(),
+                items
+                    .into_iter()
+                    .map(crate::context_manager::updates::context_injection_envelope)
+                    .collect(),
                 Some(Arc::clone(world_state)),
             )
         }

@@ -99,6 +99,7 @@ fn metadata_bearing_envelope_is_preserved_during_projection() {
             client_authored: true,
             fallback_token_limit_override: Some(4096),
             input_association: Some(input_association),
+            ..Default::default()
         },
     );
     let item = RolloutItem::ResponseItem(envelope.clone());

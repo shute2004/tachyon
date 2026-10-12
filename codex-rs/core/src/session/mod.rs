@@ -3257,6 +3257,24 @@ impl Session {
             .await;
     }
 
+    /// Records items emitted by full-context, WorldState-diff, or turn-context-diff producers.
+    ///
+    /// Do not use this for arbitrary conversation inputs: the item-shape check does not establish
+    /// that an item belongs to a complete, rebuildable context bundle.
+    async fn record_context_injection_items(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+    ) {
+        let envelopes = items
+            .iter()
+            .cloned()
+            .map(crate::context_manager::updates::context_injection_envelope)
+            .collect();
+        self.record_annotated_conversation_items(turn_context, envelopes)
+            .await;
+    }
+
     pub(crate) async fn record_step_world_state_if_changed(
         &self,
         previous_world_state: &Arc<WorldState>,
@@ -3275,7 +3293,8 @@ impl Session {
             world_state.render_diff(&previous_snapshot),
         );
         if !items.is_empty() {
-            self.record_conversation_items(turn_context, &items).await;
+            self.record_context_injection_items(turn_context, &items)
+                .await;
         }
 
         // ContextManager remembers this for later turns; run_turn owns the live value.
@@ -3978,7 +3997,7 @@ impl Session {
             .build_initial_context_with_world_state(turn_context, world_state.as_ref())
             .await
             .into_iter()
-            .map(ResponseItemEnvelope::new)
+            .map(crate::context_manager::updates::context_injection_envelope)
             .chain(retained_client_developer_messages)
             .collect();
         let turn_context_item = turn_context.to_turn_context_item();
@@ -4068,7 +4087,7 @@ impl Session {
             return Ok(world_state);
         }
         if !context_items.is_empty() {
-            self.record_conversation_items(turn_context, &context_items)
+            self.record_context_injection_items(turn_context, &context_items)
                 .await;
         }
         // Persist state only after any model-visible context generated from it.

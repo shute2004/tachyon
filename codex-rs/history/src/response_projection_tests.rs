@@ -19,6 +19,7 @@ fn source(item: ResponseItem) -> ResponseItemEnvelope {
             client_authored: true,
             fallback_token_limit_override: Some(4096),
             input_association: None,
+            ..Default::default()
         },
     )
 }

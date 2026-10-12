@@ -78,6 +78,7 @@ fn legacy_absent_association_keeps_response_and_metadata_shape_unchanged() -> Re
             client_authored: true,
             fallback_token_limit_override: Some(4096),
             input_association: None,
+            ..Default::default()
         }),
     });
     assert_eq!(serde_json::to_string(&item)?, legacy_with_metadata);
@@ -91,6 +92,7 @@ fn legacy_absent_association_keeps_response_and_metadata_shape_unchanged() -> Re
             client_authored: true,
             fallback_token_limit_override: Some(4096),
             input_association: None,
+            ..Default::default()
         })
     );
     assert_eq!(serde_json::to_string(&restored)?, legacy_with_metadata);

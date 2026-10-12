@@ -62,13 +62,23 @@ pub use response_projection::project_response_item;
 ///
 /// `client_authored` is host-specific and therefore deliberately remains under the
 /// Codex-branded compatibility name instead of being promoted into a generic history contract.
-/// The fallback token budget is reusable harness behavior, but remains here until a later slice
-/// splits generic metadata from compatibility metadata without changing persisted bytes.
+/// These fields remain here until later slices split generic metadata from compatibility metadata
+/// without changing persisted bytes.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
+
+    /// Whether the owning harness explicitly marks this entire message as part of a complete
+    /// current-context bundle rebuilt by its full-context producer at compaction or window reset.
+    /// The rebuilt bundle may include plugin, extension, and MCP state. This is lifecycle metadata,
+    /// not evidence of trust, authority, or admission. Do not infer it from role, text, content
+    /// kind, or input source; arbitrary public extension role-diff fragments remain unmarked.
+    /// Missing legacy values deserialize as false and are unmarked. It does not override
+    /// client-authored or input-association metadata.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reinjectable_context: bool,
 
     /// Overrides history's fallback truncation budget, including on resume.
     /// Measured in tokens, with any tool-specific allowance already included.
@@ -81,6 +91,10 @@ pub struct CodexHarnessMetadata {
     /// forgeable data, not proof of admission, persistence, or transcript completeness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_association: Option<InputAssociation>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Transitional compatibility alias for Responses-shaped history callers.

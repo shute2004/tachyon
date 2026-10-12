@@ -78,6 +78,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
                 client_authored: true,
                 fallback_token_limit_override: Some(20_000),
                 input_association: None,
+                ..Default::default()
             }),
         }),
     };
@@ -105,8 +106,111 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             client_authored: true,
             fallback_token_limit_override: Some(20_000),
             input_association: None,
+            ..Default::default()
         })
     );
+    Ok(())
+}
+
+#[test]
+fn reinjectable_context_defaults_false_and_legacy_metadata_keeps_its_bytes() -> Result<()> {
+    let default = CodexHarnessMetadata::default();
+    assert!(!default.reinjectable_context);
+    assert_eq!(
+        serde_json::to_string(&default)?,
+        r#"{"client_authored":false}"#
+    );
+
+    let legacy = r#"{"client_authored":true,"fallback_token_limit_override":4096}"#;
+    let metadata: CodexHarnessMetadata = serde_json::from_str(legacy)?;
+    assert!(!metadata.reinjectable_context);
+    assert_eq!(serde_json::to_string(&metadata)?, legacy);
+    Ok(())
+}
+
+#[test]
+fn reinjectable_context_roundtrips_beside_unchanged_response_item() -> Result<()> {
+    let response_item = response_message("developer");
+    let envelope = ResponseItemEnvelope {
+        item: response_item.clone(),
+        metadata: Some(CodexHarnessMetadata {
+            reinjectable_context: true,
+            ..Default::default()
+        }),
+    };
+    let item = RolloutItem::ResponseItem(envelope.clone());
+    let serialized = serde_json::to_value(item)?;
+
+    assert_eq!(serialized["payload"], serde_json::to_value(&response_item)?);
+    assert_eq!(
+        serialized["metadata"],
+        json!({"client_authored": false, "reinjectable_context": true})
+    );
+    let restored: RolloutItem = serde_json::from_value(serialized)?;
+    let RolloutItem::ResponseItem(restored_envelope) = restored else {
+        panic!("expected response item");
+    };
+    assert_eq!(restored_envelope, envelope);
+    Ok(())
+}
+
+#[test]
+fn reinjectable_context_survives_compacted_history_and_canonical_projection() -> Result<()> {
+    let input_association: InputAssociation = serde_json::from_value(json!({
+        "identity": {
+            "thread_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "incarnation": "fedcba98-7654-3210-fedc-ba9876543210",
+            "sequence": 7,
+        },
+        "source": "synthetic",
+    }))?;
+    let client_authored = ResponseItemEnvelope {
+        item: response_message("developer"),
+        metadata: Some(CodexHarnessMetadata {
+            client_authored: true,
+            reinjectable_context: true,
+            fallback_token_limit_override: Some(4096),
+            ..Default::default()
+        }),
+    };
+    let associated_input = ResponseItemEnvelope {
+        item: response_message("user"),
+        metadata: Some(CodexHarnessMetadata {
+            reinjectable_context: true,
+            input_association: Some(input_association),
+            ..Default::default()
+        }),
+    };
+    let compacted = CompactedItem {
+        message: "summary".to_string(),
+        replacement_history: Some(vec![client_authored.clone(), associated_input.clone()]),
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    };
+    let restored: CompactedItem = serde_json::from_value(serde_json::to_value(compacted)?)?;
+    let restored_history = restored.replacement_history.expect("replacement history");
+    assert_eq!(
+        restored_history,
+        vec![client_authored.clone(), associated_input.clone()]
+    );
+
+    for envelope in restored_history {
+        match project_response_item(envelope.clone()) {
+            HistoryItemProjection::Canonical { compatibility, .. } => {
+                assert_eq!(compatibility, envelope);
+            }
+            HistoryItemProjection::Fallback { .. } => panic!("expected canonical projection"),
+        }
+    }
+    let client_metadata = client_authored.metadata.expect("client metadata");
+    assert!(client_metadata.reinjectable_context);
+    assert!(client_metadata.client_authored);
+    let input_metadata = associated_input.metadata.expect("input metadata");
+    assert!(input_metadata.reinjectable_context);
+    assert!(input_metadata.input_association.is_some());
     Ok(())
 }
 
