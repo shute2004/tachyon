@@ -41,6 +41,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnStartedEvent;
+use tachyon_model::ModelInputItem;
 use tachyon_model::ModelRequest;
 use tachyon_model::backend::ModelCompactionItem;
 use tachyon_model::backend::ModelCompactionResult;
