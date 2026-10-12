@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
 use codex_file_system::FILE_READ_CHUNK_SIZE;
 use tokio::sync::Mutex;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 const MAX_OPEN_FILE_READS: usize = 128;
 
@@ -14,18 +17,51 @@ pub(crate) struct FileReadBlock {
     pub(crate) eof: bool,
 }
 
-#[derive(Clone, Default)]
+struct FileReadHandle {
+    file: Arc<File>,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
 pub(crate) struct FileReadHandleManager {
-    handles: Arc<Mutex<HashMap<String, Arc<File>>>>,
+    handles: Arc<Mutex<HashMap<String, FileReadHandle>>>,
+    open_slots: Arc<Semaphore>,
+}
+
+impl Default for FileReadHandleManager {
+    fn default() -> Self {
+        Self {
+            handles: Arc::new(Mutex::new(HashMap::new())),
+            open_slots: Arc::new(Semaphore::new(MAX_OPEN_FILE_READS)),
+        }
+    }
 }
 
 impl FileReadHandleManager {
-    pub(crate) async fn open(
-        &self,
-        handle_id: String,
-        file: tokio::fs::File,
-    ) -> io::Result<String> {
-        let file = Arc::new(file.into_std().await);
+    pub(crate) async fn open<F>(&self, handle_id: String, open_file: F) -> io::Result<String>
+    where
+        F: Future<Output = io::Result<tokio::fs::File>> + Send,
+    {
+        {
+            let handles = self.handles.lock().await;
+            if handles.contains_key(&handle_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("file read handle `{handle_id}` already exists"),
+                ));
+            }
+        }
+
+        let permit = Arc::clone(&self.open_slots)
+            .try_acquire_owned()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("at most {MAX_OPEN_FILE_READS} file reads may be open per connection"),
+                )
+            })?;
+        let file = Arc::new(open_file.await?.into_std().await);
+
         let mut handles = self.handles.lock().await;
         if handles.contains_key(&handle_id) {
             return Err(io::Error::new(
@@ -33,13 +69,13 @@ impl FileReadHandleManager {
                 format!("file read handle `{handle_id}` already exists"),
             ));
         }
-        if handles.len() >= MAX_OPEN_FILE_READS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("at most {MAX_OPEN_FILE_READS} file reads may be open per connection"),
-            ));
-        }
-        handles.insert(handle_id.clone(), file);
+        handles.insert(
+            handle_id.clone(),
+            FileReadHandle {
+                file,
+                _permit: permit,
+            },
+        );
         Ok(handle_id)
     }
 
@@ -54,7 +90,7 @@ impl FileReadHandleManager {
             let handles = self.handles.lock().await;
             handles
                 .get(handle_id)
-                .cloned()
+                .map(|handle| Arc::clone(&handle.file))
                 .ok_or_else(|| unknown_handle_error(handle_id))?
         };
         let result =
@@ -126,3 +162,7 @@ fn unknown_handle_error(handle_id: &str) -> io::Error {
         format!("unknown file read handle `{handle_id}`"),
     )
 }
+
+#[cfg(test)]
+#[path = "file_read_tests.rs"]
+mod tests;
