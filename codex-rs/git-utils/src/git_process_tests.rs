@@ -21,6 +21,8 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
     let release_child_file = temp_dir.path().join("release-child");
     let child_survived_file = temp_dir.path().join("child-survived");
     let release_wrapper_file = temp_dir.path().join("release-wrapper");
+    #[cfg(windows)]
+    let startup_stage_file = temp_dir.path().join("wrapper-startup-stage");
     #[cfg(unix)]
     let mut command = {
         let mut command = Command::new("/bin/sh");
@@ -40,7 +42,18 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
         let mut command = Command::new("powershell.exe");
         let child_command = "Set-Content -LiteralPath $env:CHILD_READY_FILE -Value ready; while (-not (Test-Path $env:RELEASE_CHILD_FILE)) { Start-Sleep -Milliseconds 25 }; Start-Sleep -Seconds 1; Set-Content -LiteralPath $env:CHILD_SURVIVED_FILE -Value survived; Start-Sleep -Seconds 60";
         let start_child_command = format!(
-            "$encodedChildCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('{child_command}')); $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList ('-NoProfile -NonInteractive -EncodedCommand ' + $encodedChildCommand) -PassThru -NoNewWindow;"
+            concat!(
+                "$stagePath = $env:WRAPPER_STARTUP_STAGE_FILE; ",
+                "[System.IO.File]::WriteAllText($stagePath, 'command-entry'); ",
+                "$encodedChildCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('{child_command}')); ",
+                "[System.IO.File]::AppendAllText($stagePath, '|before-start-process'); ",
+                "try {{ $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList ('-NoProfile -NonInteractive -EncodedCommand ' + $encodedChildCommand) -PassThru -NoNewWindow -ErrorAction Stop; ",
+                "[System.IO.File]::AppendAllText($stagePath, '|after-start-process') }} ",
+                "catch {{ $message = ([string]$_.Exception.Message) -replace '[\\r\\n]+', ' '; ",
+                "if ($message.Length -gt 512) {{ $message = $message.Substring(0, 512) }}; ",
+                "[System.IO.File]::AppendAllText($stagePath, '|launch-error:' + $message); throw }}"
+            ),
+            child_command = child_command
         );
         let wrapper_command = match wrapper_lifetime {
             GitWrapperLifetime::WaitForChild => format!(
@@ -61,6 +74,8 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
         .env("RELEASE_CHILD_FILE", &release_child_file)
         .env("CHILD_SURVIVED_FILE", &child_survived_file)
         .env("RELEASE_WRAPPER_FILE", &release_wrapper_file);
+    #[cfg(windows)]
+    command.env("WRAPPER_STARTUP_STAGE_FILE", &startup_stage_file);
 
     let (mut wrapper, process_tree) = spawn_git_command(&mut command).expect("spawn Git wrapper");
     let child_pid = match tokio::time::timeout(Duration::from_secs(30), async {
@@ -80,6 +95,16 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
         Err(readiness_timeout) => {
             let child_pid_file_exists = child_pid_file.exists();
             let child_ready_file_exists = child_ready_file.exists();
+            let pre_teardown_wrapper_state = match wrapper.try_wait() {
+                Ok(Some(status)) => format!("exited with {status}"),
+                Ok(None) => "still running".to_string(),
+                Err(error) => format!("unavailable: {error}"),
+            };
+            #[cfg(windows)]
+            let pre_teardown_startup_stage = std::fs::read_to_string(&startup_stage_file)
+                .unwrap_or_else(|error| format!("unavailable: {error}"));
+            #[cfg(not(windows))]
+            let pre_teardown_startup_stage = "not applicable";
             drop(process_tree);
             let wrapper_diagnostics = match tokio::time::timeout(
                 Duration::from_secs(3),
@@ -99,7 +124,7 @@ async fn assert_timed_out_git_wrapper_does_not_leave_child_process_running(
                 }
             };
             panic!(
-                "wait for Git wrapper child readiness: {readiness_timeout:?}\nchild PID file exists: {child_pid_file_exists}\nchild ready file exists: {child_ready_file_exists}\n{wrapper_diagnostics}"
+                "wait for Git wrapper child readiness: {readiness_timeout:?}\npre-teardown wrapper state: {pre_teardown_wrapper_state}\npre-teardown Windows startup stage: {pre_teardown_startup_stage}\nchild PID file exists: {child_pid_file_exists}\nchild ready file exists: {child_ready_file_exists}\npost-teardown wrapper diagnostics:\n{wrapper_diagnostics}"
             );
         }
     };
