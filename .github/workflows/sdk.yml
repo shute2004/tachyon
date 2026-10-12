@@ -123,9 +123,11 @@ jobs:
           set -euo pipefail
           codex_target="//codex-rs/cli:codex"
           code_mode_host_target="//codex-rs/code-mode-host:codex-code-mode-host"
+          # The ~7 GiB unique SDK output payload exceeds the prior 4 GiB target, so
+          # use 8 GiB; this idle-GC target is not a hard per-run quota.
           bazel_action_cache_args=(
             "--disk_cache=${SDK_BAZEL_DISK_CACHE}"
-            "--experimental_disk_cache_gc_max_size=4G"
+            "--experimental_disk_cache_gc_max_size=8G"
             "--experimental_disk_cache_gc_idle_delay=1s"
           )
 
@@ -218,14 +220,14 @@ jobs:
 
           action_cache_size_output="$(du -sb -- "${action_cache_path}")"
           action_cache_size_bytes="${action_cache_size_output%%[[:space:]]*}"
-          action_cache_max_size_bytes=$((4 * 1024 * 1024 * 1024))
+          action_cache_max_size_bytes=$((8 * 1024 * 1024 * 1024))
           if (( action_cache_size_bytes > action_cache_max_size_bytes )); then
-            echo "Skipping SDK Bazel action cache upload: ${action_cache_size_bytes} bytes exceeds the 4 GiB upload budget." >> "${GITHUB_STEP_SUMMARY}"
+            echo "Skipping SDK Bazel action cache upload: ${action_cache_size_bytes} bytes exceeds the 8 GiB upload budget." >> "${GITHUB_STEP_SUMMARY}"
             echo "save=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          echo "SDK Bazel action cache is ${action_cache_size_bytes} bytes; eligible for upload (4 GiB budget)." >> "${GITHUB_STEP_SUMMARY}"
+          echo "SDK Bazel action cache is ${action_cache_size_bytes} bytes; eligible for upload (8 GiB budget)." >> "${GITHUB_STEP_SUMMARY}"
           echo "save=true" >> "${GITHUB_OUTPUT}"
 
       - name: Save SDK Bazel action cache
