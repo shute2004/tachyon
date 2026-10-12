@@ -250,6 +250,16 @@ impl CodexThread {
         self.io.submit(op).await
     }
 
+    /// Returns the selected next-step model for the named active turn.
+    pub async fn current_turn_model(&self, expected_turn_id: &str) -> Option<String> {
+        let active_turn = self.session.active_turn.lock().await;
+        let task = active_turn.as_ref()?.task.as_ref()?;
+        if task.turn_context.sub_id != expected_turn_id || task.cancellation_token.is_cancelled() {
+            return None;
+        }
+        Some(task.turn_context.current_model_slug())
+    }
+
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
     pub fn session_telemetry(&self) -> SessionTelemetry {
         self.session.services.session_telemetry.clone()

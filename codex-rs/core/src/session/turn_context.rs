@@ -303,6 +303,10 @@ impl TurnContext {
         &self.initial_settings.model_info
     }
 
+    pub(crate) fn current_model_slug(&self) -> String {
+        self.current_settings.load().model_info.slug.clone()
+    }
+
     /// Legacy: returns the frozen initial-turn reasoning-effort selection.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffortConfig> {
