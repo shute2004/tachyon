@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use codex_history::HistoryProjectionFallback;
+use codex_history::project_response_item_semantics;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
@@ -34,7 +36,6 @@ use crate::model_runtime::ir::ModelFreeformInputFormat;
 use crate::model_runtime::ir::ModelImageDetail;
 use crate::model_runtime::ir::ModelInputItem;
 use crate::model_runtime::ir::ModelMediaSource;
-use crate::model_runtime::ir::ModelMessage;
 use crate::model_runtime::ir::ModelMessagePhase;
 use crate::model_runtime::ir::ModelMessageRole;
 use crate::model_runtime::ir::ModelOutputConfig;
@@ -167,23 +168,36 @@ pub(super) fn prompt_from_model_request(
 }
 
 fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem> {
-    match item {
-        ResponseItem::Message {
-            role,
-            content,
-            phase,
-            ..
-        } => Some(ModelInputItem::Message(ModelMessage {
-            role: model_message_role(role)?,
-            phase: phase.as_ref().map(model_message_phase),
-            content: content
-                .iter()
-                .map(|content| model_content_from_response(content, role))
-                .collect::<Option<Vec<_>>>()?,
-        })),
-        ResponseItem::Reasoning {
-            summary, content, ..
-        } => Some(ModelInputItem::Reasoning(ModelReasoning {
+    if let ResponseItem::Message { role, content, .. } = item
+        && content.iter().any(|content| match content {
+            ContentItem::InputText { .. } => role == "assistant",
+            ContentItem::OutputText { .. } => role != "assistant",
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+    {
+        // The shared history vocabulary intentionally erases the wire-level input/output text
+        // variant. C2 must still reject role/content mismatches before using that projection.
+        return None;
+    }
+
+    match project_response_item_semantics(item) {
+        Ok(item) => Some(item),
+        Err(reason) => model_input_item_from_codex_fallback(item, reason),
+    }
+}
+
+/// Retain the small set of C2-accepted Responses shapes the shared history projection rejects.
+fn model_input_item_from_codex_fallback(
+    item: &ResponseItem,
+    reason: HistoryProjectionFallback,
+) -> Option<ModelInputItem> {
+    match (item, reason) {
+        (
+            ResponseItem::Reasoning {
+                summary, content, ..
+            },
+            HistoryProjectionFallback::EncryptedReasoning,
+        ) => Some(ModelInputItem::Reasoning(ModelReasoning {
             summary: summary
                 .iter()
                 .map(|summary| match summary {
@@ -199,36 +213,46 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
                 })
                 .collect(),
         })),
-        ResponseItem::FunctionCall {
-            name,
-            namespace,
-            arguments,
-            call_id,
-            ..
-        } => Some(ModelInputItem::ToolCall(ModelToolCall {
+        (
+            ResponseItem::FunctionCall {
+                name,
+                namespace,
+                arguments,
+                call_id,
+                ..
+            },
+            HistoryProjectionFallback::EncryptedFunctionArguments
+            | HistoryProjectionFallback::MissingFunctionCallId,
+        ) => Some(ModelInputItem::ToolCall(ModelToolCall {
             call_id: ModelToolCallId(call_id.clone()),
             namespace: namespace.clone(),
             name: name.clone(),
             input: ModelToolInput::Json(serde_json::from_str(arguments).ok()?),
         })),
-        ResponseItem::CustomToolCall {
-            call_id,
-            name,
-            namespace,
-            input,
-            ..
-        } => Some(ModelInputItem::ToolCall(ModelToolCall {
+        (
+            ResponseItem::CustomToolCall {
+                call_id,
+                name,
+                namespace,
+                input,
+                ..
+            },
+            HistoryProjectionFallback::MissingCustomToolCallId,
+        ) => Some(ModelInputItem::ToolCall(ModelToolCall {
             call_id: ModelToolCallId(call_id.clone()),
             namespace: namespace.clone(),
             name: name.clone(),
             input: ModelToolInput::Text(input.clone()),
         })),
-        ResponseItem::ToolSearchCall {
-            call_id: Some(call_id),
-            execution,
-            arguments,
-            ..
-        } if execution == TOOL_SEARCH_CLIENT_EXECUTION => {
+        (
+            ResponseItem::ToolSearchCall {
+                call_id: Some(call_id),
+                execution,
+                arguments,
+                ..
+            },
+            HistoryProjectionFallback::MissingClientToolSearchCallId,
+        ) if execution == TOOL_SEARCH_CLIENT_EXECUTION => {
             Some(ModelInputItem::ToolCall(ModelToolCall {
                 call_id: ModelToolCallId(call_id.clone()),
                 namespace: None,
@@ -236,25 +260,34 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
                 input: ModelToolInput::Json(arguments.clone()),
             }))
         }
-        ResponseItem::FunctionCallOutput {
-            call_id: Some(call_id),
-            output,
-            ..
-        }
-        | ResponseItem::CustomToolCallOutput {
-            call_id, output, ..
-        } => Some(ModelInputItem::ToolResult(ModelToolResult {
+        (
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                output,
+                ..
+            },
+            HistoryProjectionFallback::MissingFunctionCallOutputCallId,
+        )
+        | (
+            ResponseItem::CustomToolCallOutput {
+                call_id, output, ..
+            },
+            HistoryProjectionFallback::MissingCustomToolCallOutputCallId,
+        ) => Some(ModelInputItem::ToolResult(ModelToolResult {
             call_id: ModelToolCallId(call_id.clone()),
             content: model_tool_result_content(output)?,
             is_error: output.success.map(|success| !success),
         })),
-        ResponseItem::ToolSearchOutput {
-            call_id: Some(call_id),
-            status,
-            execution,
-            tools,
-            ..
-        } if status == TOOL_SEARCH_COMPLETED_STATUS
+        (
+            ResponseItem::ToolSearchOutput {
+                call_id: Some(call_id),
+                status,
+                execution,
+                tools,
+                ..
+            },
+            HistoryProjectionFallback::UnsupportedToolSearchOutput,
+        ) if status == TOOL_SEARCH_COMPLETED_STATUS
             && execution == TOOL_SEARCH_CLIENT_EXECUTION =>
         {
             Some(ModelInputItem::ToolResult(ModelToolResult {
@@ -265,20 +298,8 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
                 is_error: Some(false),
             }))
         }
-        // Local shell, built-in provider tools, compaction, agent messaging, provider-owned tool
-        // search, and provider-generated compatibility items stay on the explicit legacy path.
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => None,
+        // Other unsupported or invalid shapes already stayed on C2's legacy Prompt path.
+        _ => None,
     }
 }
 
@@ -744,16 +765,6 @@ fn response_item_from_model_input(
     }
 }
 
-fn model_message_role(role: &str) -> Option<ModelMessageRole> {
-    match role {
-        "system" => Some(ModelMessageRole::System),
-        "developer" => Some(ModelMessageRole::Developer),
-        "user" => Some(ModelMessageRole::User),
-        "assistant" => Some(ModelMessageRole::Assistant),
-        _ => None,
-    }
-}
-
 fn response_message_role(role: ModelMessageRole) -> String {
     match role {
         ModelMessageRole::System => "system",
@@ -764,36 +775,10 @@ fn response_message_role(role: ModelMessageRole) -> String {
     .to_string()
 }
 
-fn model_message_phase(phase: &MessagePhase) -> ModelMessagePhase {
-    match phase {
-        MessagePhase::Commentary => ModelMessagePhase::Commentary,
-        MessagePhase::FinalAnswer => ModelMessagePhase::Final,
-    }
-}
-
 fn response_message_phase(phase: ModelMessagePhase) -> MessagePhase {
     match phase {
         ModelMessagePhase::Commentary => MessagePhase::Commentary,
         ModelMessagePhase::Final => MessagePhase::FinalAnswer,
-    }
-}
-
-fn model_content_from_response(content: &ContentItem, role: &str) -> Option<ModelContent> {
-    match content {
-        ContentItem::InputText { text } if role != "assistant" => {
-            Some(ModelContent::Text(text.clone()))
-        }
-        ContentItem::OutputText { text } if role == "assistant" => {
-            Some(ModelContent::Text(text.clone()))
-        }
-        ContentItem::InputImage { image_url, detail } => Some(ModelContent::Image {
-            source: ModelMediaSource::Uri(image_url.clone()),
-            detail: detail.map(model_image_detail),
-        }),
-        ContentItem::InputAudio { audio_url } => Some(ModelContent::Audio {
-            source: ModelMediaSource::Uri(audio_url.clone()),
-        }),
-        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => None,
     }
 }
 

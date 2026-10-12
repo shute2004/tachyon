@@ -79,8 +79,7 @@ pub enum HistoryProjectionFallback {
 /// Project one Responses-shaped history envelope into a canonical item when its meaning is
 /// representable without losing semantics.
 pub fn project_response_item(source: ResponseItemEnvelope) -> HistoryItemProjection {
-    let projection = project_item(&source.item);
-    match projection {
+    match project_response_item_semantics(&source.item) {
         Ok(item) => HistoryItemProjection::Canonical {
             item,
             compatibility: source,
@@ -92,7 +91,11 @@ pub fn project_response_item(source: ResponseItemEnvelope) -> HistoryItemProject
     }
 }
 
-fn project_item(item: &ResponseItem) -> Result<HistoryItem, HistoryProjectionFallback> {
+/// Borrow a Responses item and project its shared model/history semantics without cloning the
+/// surrounding compatibility envelope.
+pub fn project_response_item_semantics(
+    item: &ResponseItem,
+) -> Result<HistoryItem, HistoryProjectionFallback> {
     match item {
         ResponseItem::Message {
             role,

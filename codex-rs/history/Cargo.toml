@@ -17,6 +17,7 @@ codex-protocol = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tachyon-model = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

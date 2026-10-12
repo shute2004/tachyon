@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::model_runtime::ir::ModelMessage;
 use crate::model_runtime::response_item_from_new_model_input;
 use crate::model_runtime::response_item_from_new_model_tool_result;
 use codex_protocol::ResponseItemId;
@@ -135,6 +136,69 @@ fn fresh_message_conversion_preserves_roles_phases_and_has_no_identity_metadata(
                 role == ModelMessageRole::Assistant
             );
         }
+    }
+}
+
+#[test]
+fn shared_history_input_projection_preserves_c2_text_variant_role_checks() {
+    for (role, content) in [
+        (
+            "assistant",
+            ContentItem::InputText {
+                text: "input variant".to_string(),
+            },
+        ),
+        (
+            "user",
+            ContentItem::OutputText {
+                text: "user output variant".to_string(),
+            },
+        ),
+        (
+            "developer",
+            ContentItem::OutputText {
+                text: "developer output variant".to_string(),
+            },
+        ),
+    ] {
+        let item = ResponseItem::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![content],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        assert_eq!(model_input_item_from_response(&item), None);
+        assert_eq!(
+            try_model_request_from_prompt(&prompt_with(vec![item], Vec::new())),
+            None
+        );
+    }
+
+    for (role, content) in [
+        (
+            "user",
+            ContentItem::InputText {
+                text: "valid input text".to_string(),
+            },
+        ),
+        (
+            "assistant",
+            ContentItem::OutputText {
+                text: "valid output text".to_string(),
+            },
+        ),
+    ] {
+        let item = ResponseItem::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![content],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let shared = codex_history::project_response_item_semantics(&item)
+            .expect("valid C2 text semantics also project through history");
+        assert_eq!(model_input_item_from_response(&item), Some(shared));
     }
 }
 

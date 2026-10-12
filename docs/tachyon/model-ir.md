@@ -52,6 +52,21 @@ not on Core, provider protocols, authentication, or UI crates. Core's
 `codex-rs/core/src/model_runtime/ir.rs` re-exports those same types for existing callers;
 there is no second IR definition or conversion between the two import paths.
 
+`codex-history` now depends on `tachyon-model` and keeps its existing `History*` item names as
+aliases to the canonical request-side item types. Core's C2 request ingress uses a borrowed
+Responses-item projection for shared semantics instead of maintaining a second general conversion.
+Its narrow compatibility fallback remains for C2-accepted encrypted reasoning/function arguments,
+empty correlation IDs, and completed client tool-search outputs; it also keeps the existing
+`InputText`/`OutputText`-by-role validation before projection. The owned history projection still
+returns the original Responses envelope unchanged beside any semantic projection, preserving IDs,
+metadata, and private continuation fields.
+
+This alias retains the existing `Json` variant and adds the canonical `DiscoveredTools` variant to
+`HistoryToolResultContent`; downstream exhaustive Rust matches over that enum must account for
+the added variant. The change does not alter rollout serialization or make live/persisted history fully
+provider-neutral: `ResponseItem` envelopes remain the compatibility and persistence representation
+for now.
+
 The existing provider, protocol, transport, and route identities likewise belong to
 `tachyon-model::route`; Core retains `model_runtime::route` as a compatibility re-export.
 Endpoint resolution, authentication, and concrete transport execution remain adapter-owned.

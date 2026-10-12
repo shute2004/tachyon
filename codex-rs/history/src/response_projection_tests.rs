@@ -1,8 +1,10 @@
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -316,6 +318,80 @@ fn reasoning_preserves_summary_and_plaintext_order_but_not_encrypted_content() {
         },
         HistoryProjectionFallback::EncryptedReasoning,
     );
+}
+
+#[test]
+fn borrowed_semantics_projection_uses_shared_item_type_and_owned_projection_preserves_source() {
+    let message_source = source(ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "history-projection")),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "shared semantics".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-source".to_string()),
+            ..Default::default()
+        }),
+    });
+    let projected: tachyon_model::ModelInputItem =
+        project_response_item_semantics(&message_source.item).expect("message is representable");
+    assert_eq!(
+        projected,
+        HistoryItem::Message(HistoryMessage {
+            role: HistoryMessageRole::User,
+            phase: None,
+            content: vec![HistoryMessageContent::Text("shared semantics".to_string())],
+        })
+    );
+    match project_response_item(message_source.clone()) {
+        HistoryItemProjection::Canonical { compatibility, .. } => {
+            assert_eq!(compatibility, message_source);
+            assert!(matches!(
+                &compatibility.item,
+                ResponseItem::Message {
+                    id: Some(_),
+                    internal_chat_message_metadata_passthrough: Some(_),
+                    ..
+                }
+            ));
+        }
+        HistoryItemProjection::Fallback { .. } => panic!("expected canonical message"),
+    }
+
+    let private_source = source(ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "history-projection")),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("provider-private-continuation".to_string()),
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-private".to_string()),
+            ..Default::default()
+        }),
+    });
+    assert_eq!(
+        project_response_item_semantics(&private_source.item),
+        Err(HistoryProjectionFallback::EncryptedReasoning)
+    );
+    match project_response_item(private_source.clone()) {
+        HistoryItemProjection::Fallback {
+            compatibility,
+            reason,
+        } => {
+            assert_eq!(reason, HistoryProjectionFallback::EncryptedReasoning);
+            assert_eq!(compatibility, private_source);
+            assert!(matches!(
+                &compatibility.item,
+                ResponseItem::Reasoning {
+                    id: Some(_),
+                    encrypted_content: Some(value),
+                    internal_chat_message_metadata_passthrough: Some(_),
+                    ..
+                } if value == "provider-private-continuation"
+            ));
+        }
+        HistoryItemProjection::Canonical { .. } => panic!("encrypted continuation must fall back"),
+    }
 }
 
 #[test]

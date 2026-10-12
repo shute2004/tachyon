@@ -57,6 +57,7 @@ pub use item::HistoryToolResultContent;
 pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
+pub use response_projection::project_response_item_semantics;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
@@ -77,7 +78,7 @@ pub struct CodexHarnessMetadata {
     /// kind, or input source; arbitrary public extension role-diff fragments remain unmarked.
     /// Missing legacy values deserialize as false and are unmarked. It does not override
     /// client-authored or input-association metadata.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reinjectable_context: bool,
 
     /// Overrides history's fallback truncation budget, including on resume.
@@ -91,10 +92,6 @@ pub struct CodexHarnessMetadata {
     /// forgeable data, not proof of admission, persistence, or transcript completeness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_association: Option<InputAssociation>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// Transitional compatibility alias for Responses-shaped history callers.
