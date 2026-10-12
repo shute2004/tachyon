@@ -14,6 +14,9 @@ use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_history::CodexHarnessMetadata;
+use codex_history::HistoryAppendKind;
+pub(crate) use codex_history::HistoryReplacement;
+use codex_history::HistoryTimeline;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
@@ -44,13 +47,8 @@ use std::sync::LazyLock;
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
-    /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
-    /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
-    items: Arc<Vec<ResponseItemEnvelope>>,
-    /// Bumped whenever history is rewritten, such as compaction or rollback.
-    history_version: u64,
-    /// Monotonic user-input/reset revision, independent of compaction's history generation.
-    user_message_revision: u64,
+    /// Primary chronological history storage and its copy-on-write revision snapshots.
+    history: HistoryTimeline<ResponseItemEnvelope>,
     token_info: Option<TokenUsageInfo>,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
@@ -68,28 +66,22 @@ pub(crate) struct ContextManager {
 }
 
 struct SharedConversationHistory {
-    items: Arc<Vec<ResponseItemEnvelope>>,
-    history_version: u64,
-    user_message_revision: u64,
-}
-
-pub(crate) enum HistoryReplacement {
-    Compaction,
-    Reset,
+    history: HistoryTimeline<ResponseItemEnvelope>,
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
     fn history_version(&self) -> u64 {
-        self.history_version
+        self.history.history_version()
     }
 
     fn user_message_revision(&self) -> u64 {
-        self.user_message_revision
+        self.history.user_message_revision()
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(
-            self.items
+            self.history
+                .items()
                 .iter()
                 .map(|envelope| &envelope.item)
                 .filter(|item| {
@@ -106,9 +98,7 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
 impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
-            items: Arc::new(Vec::new()),
-            history_version: 0,
-            user_message_revision: 0,
+            history: HistoryTimeline::default(),
             token_info: TokenUsageInfo::new_or_append(
                 &None, &None, /*model_context_window*/ None,
             ),
@@ -119,9 +109,7 @@ impl ContextManager {
 
     pub(crate) fn conversation_history_snapshot(&self) -> Arc<dyn ConversationHistorySnapshot> {
         Arc::new(SharedConversationHistory {
-            items: Arc::clone(&self.items),
-            history_version: self.history_version,
-            user_message_revision: self.user_message_revision,
+            history: self.history.clone(),
         })
     }
 
@@ -221,10 +209,12 @@ impl ContextManager {
                     .unwrap_or(policy * 1.2);
                 truncate_function_output_payload(output, policy, estimate_audio_token_count);
             }
-            Arc::make_mut(&mut self.items).push(processed);
-            if crate::context::is_user_authorization_message(item) {
-                self.user_message_revision = self.user_message_revision.saturating_add(1);
-            }
+            let kind = if crate::context::is_user_authorization_message(item) {
+                HistoryAppendKind::UserInput
+            } else {
+                HistoryAppendKind::Ordinary
+            };
+            self.history.record(processed, kind);
         }
     }
 
@@ -244,19 +234,19 @@ impl ContextManager {
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
-        Arc::unwrap_or_clone(self.items)
+        self.history.into_items()
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
     pub(crate) fn raw_items(
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
-        self.items.iter().map(|envelope| &envelope.item)
+        self.history.items().iter().map(|envelope| &envelope.item)
     }
 
     /// Returns annotated history items without cloning their response payloads.
     pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
-        &self.items
+        self.history.items()
     }
 
     /// Returns raw items in the history and consumes the snapshot.
@@ -269,11 +259,11 @@ impl ContextManager {
 
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
-        Arc::unwrap_or_clone(self.items)
+        self.history.into_items()
     }
 
     pub(crate) fn history_version(&self) -> u64 {
-        self.history_version
+        self.history.history_version()
     }
 
     // Estimate token usage using byte-based heuristics from the truncation helpers.
@@ -298,7 +288,8 @@ impl ContextManager {
             i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX);
 
         let items_tokens = self
-            .items
+            .history
+            .items()
             .iter()
             .map(|envelope| estimate_item_token_count(&envelope.item))
             .fold(0i64, i64::saturating_add);
@@ -307,10 +298,10 @@ impl ContextManager {
     }
 
     pub(crate) fn remove_first_item(&mut self) {
-        if !self.items.is_empty() {
+        if !self.history.items().is_empty() {
             // Remove the oldest item (front of the list). Items are ordered from
             // oldest → newest, so index 0 is the first entry recorded.
-            let items = Arc::make_mut(&mut self.items);
+            let items = self.history.items_mut();
             let removed = items.remove(0);
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
@@ -326,14 +317,13 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.user_message_revision = self.user_message_revision.saturating_add(1);
-        self.replace_compacted(items);
+        self.history.replace(items, HistoryReplacement::Reset);
+        self.world_state_baseline = None;
     }
 
     /// Compaction changes the model's history without changing the user's authorization.
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.items = Arc::new(items);
-        self.history_version = self.history_version.saturating_add(1);
+        self.history.replace(items, HistoryReplacement::Compaction);
         self.world_state_baseline = None;
     }
 
@@ -358,10 +348,10 @@ impl ContextManager {
             return;
         }
 
-        let snapshot = self.items.clone();
-        let user_positions = user_message_positions(&snapshot);
+        let snapshot = self.history.clone();
+        let user_positions = user_message_positions(snapshot.items());
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace_annotated(Arc::unwrap_or_clone(snapshot));
+            self.replace_annotated(snapshot.into_items());
             return;
         };
 
@@ -372,12 +362,15 @@ impl ContextManager {
             user_positions[user_positions.len() - n_from_end]
         };
 
-        cut_idx =
-            self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
+        cut_idx = self.trim_pre_turn_context_updates(
+            snapshot.items(),
+            first_instruction_turn_idx,
+            cut_idx,
+        );
 
-        let mut retained_items = snapshot[..cut_idx].to_vec();
+        let mut retained_items = snapshot.items()[..cut_idx].to_vec();
         if cut_idx == first_instruction_turn_idx
-            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
+            && let Some(first_turn_id) = snapshot.items()[first_instruction_turn_idx].turn_id()
         {
             retained_items.retain_mut(|item| {
                 if item.turn_id() == Some(first_turn_id)
@@ -418,14 +411,16 @@ impl ContextManager {
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
         // Get reasoning items excluding all the ones after the last instruction boundary.
         let Some(last_user_index) = self
-            .items
+            .history
+            .items()
             .iter()
             .rposition(|envelope| is_user_turn_boundary(&envelope.item))
         else {
             return 0;
         };
 
-        self.items
+        self.history
+            .items()
             .iter()
             .take(last_user_index)
             .filter(|envelope| {
@@ -447,11 +442,14 @@ impl ContextManager {
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
         let start = self
-            .items
+            .history
+            .items()
             .iter()
             .rposition(|envelope| is_model_generated_item(&envelope.item))
-            .map_or(self.items.len(), |index| index.saturating_add(1));
-        self.items[start..].iter().map(|envelope| &envelope.item)
+            .map_or(self.history.items().len(), |index| index.saturating_add(1));
+        self.history.items()[start..]
+            .iter()
+            .map(|envelope| &envelope.item)
     }
 
     /// When true, the server already accounted for past reasoning tokens and
@@ -486,7 +484,7 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry or names an external tool event
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
-        let items = Arc::make_mut(&mut self.items);
+        let items = self.history.items_mut();
 
         // all function/tool calls must have a corresponding output
         normalize::ensure_call_outputs_present(items);

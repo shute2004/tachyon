@@ -35,6 +35,7 @@ mod input_identity;
 mod item;
 mod response_projection;
 mod rollout_payload;
+mod timeline;
 
 pub use envelope::HistoryEnvelope;
 pub use input_association::InputAssociation;
@@ -58,6 +59,9 @@ pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
 pub use response_projection::project_response_item_semantics;
+pub use timeline::HistoryAppendKind;
+pub use timeline::HistoryReplacement;
+pub use timeline::HistoryTimeline;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
@@ -452,3 +456,7 @@ mod input_identity_tests;
 #[cfg(test)]
 #[path = "input_association_tests.rs"]
 mod input_association_tests;
+
+#[cfg(test)]
+#[path = "timeline_tests.rs"]
+mod timeline_tests;

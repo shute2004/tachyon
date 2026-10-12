@@ -67,6 +67,20 @@ the added variant. The change does not alter rollout serialization or make live/
 provider-neutral: `ResponseItem` envelopes remain the compatibility and persistence representation
 for now.
 
+`codex-history::HistoryTimeline<T>` now owns the primary chronological `Arc<Vec<T>>` storage and
+its history-generation and user-message revisions. Core's `ContextManager` stores its existing
+Responses envelopes in this timeline, and shared conversation snapshots clone that same timeline
+so items and revision counters remain a single copy-on-write history. Core still classifies user
+input through its existing authorization-message predicate after the existing item filtering;
+`HistoryAppendKind::UserInput` is descriptive revision bookkeeping, not trusted admission or a
+security boundary. Compaction advances only the history generation, while reset and rollback
+advance both counters. Existing normalization and removal paths use the explicit mutable-items
+lane, which does not change revisions automatically.
+
+This extracts storage ownership only. The actual stored values and rollout persistence remain
+Responses-shaped `ResponseItemEnvelope`s; storing the canonical item vocabulary in the generic
+timeline is possible, but the live Core history and durable payload migration remain pending.
+
 The existing provider, protocol, transport, and route identities likewise belong to
 `tachyon-model::route`; Core retains `model_runtime::route` as a compatibility re-export.
 Endpoint resolution, authentication, and concrete transport execution remain adapter-owned.

@@ -152,6 +152,62 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
 }
 
 #[test]
+fn context_manager_timeline_owns_history_and_revision_transitions() {
+    let mut history = ContextManager::new();
+    let user = user_msg("initial input");
+    history.record_items([&user], TruncationPolicy::Tokens(10_000));
+
+    let recorded = history.conversation_history_snapshot();
+    assert_eq!(recorded.history_version(), 0);
+    assert_eq!(recorded.user_message_revision(), 1);
+    assert_eq!(recorded.items().count(), 1);
+
+    let assistant = assistant_msg("response");
+    history.record_items([&assistant], TruncationPolicy::Tokens(10_000));
+    assert_eq!(recorded.items().count(), 1);
+    let appended = history.conversation_history_snapshot();
+    assert_eq!(appended.history_version(), 0);
+    assert_eq!(appended.user_message_revision(), 1);
+    assert_eq!(appended.items().count(), 2);
+
+    history.replace_compacted(vec![ResponseItemEnvelope::new(assistant_msg("compact"))]);
+    let compacted = history.conversation_history_snapshot();
+    assert_eq!(compacted.history_version(), 1);
+    assert_eq!(compacted.user_message_revision(), 1);
+    assert_eq!(appended.items().count(), 2);
+
+    history.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("reset"))]);
+    let reset = history.conversation_history_snapshot();
+    assert_eq!(reset.history_version(), 2);
+    assert_eq!(reset.user_message_revision(), 2);
+
+    let rollback_user = user_msg("rollback input");
+    let rollback_assistant = assistant_msg("rollback response");
+    history.record_items(
+        [&rollback_user, &rollback_assistant],
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .user_message_revision(),
+        3
+    );
+    history.drop_last_n_user_turns(1);
+    let rolled_back = history.conversation_history_snapshot();
+    assert_eq!(rolled_back.history_version(), 3);
+    assert_eq!(rolled_back.user_message_revision(), 4);
+    assert_eq!(
+        rolled_back.items().cloned().collect::<Vec<_>>(),
+        vec![assistant_msg("reset")]
+    );
+    assert_eq!(
+        reset.items().cloned().collect::<Vec<_>>(),
+        vec![assistant_msg("reset")]
+    );
+}
+
+#[test]
 fn conversation_history_snapshot_excludes_contextual_user_messages() {
     let contextual_message = crate::context::ContextualUserFragment::into(UserInstructions {
         directory: None,
@@ -1476,8 +1532,8 @@ fn record_items_truncates_function_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    assert_eq!(history.annotated_items().len(), 1);
+    match &history.annotated_items()[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => {
             let content = output.text_content().unwrap_or_default();
             assert_ne!(content, long_output);
@@ -1492,7 +1548,7 @@ fn record_items_truncates_function_call_output_content() {
         }
         other => panic!("unexpected history item: {other:?}"),
     }
-    assert_eq!(history.items[0].turn_id(), Some("turn-1"));
+    assert_eq!(history.annotated_items()[0].turn_id(), Some("turn-1"));
 }
 
 #[test]
@@ -1511,8 +1567,8 @@ fn record_items_truncates_custom_tool_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    assert_eq!(history.annotated_items().len(), 1);
+    match &history.annotated_items()[0].item {
         ResponseItem::CustomToolCallOutput { output, .. } => {
             let output = output.text_content().unwrap_or_default();
             assert_ne!(output, long_output);
@@ -1548,7 +1604,7 @@ fn record_items_respects_custom_token_limit() {
 
     history.record_items([&item], policy);
 
-    let stored = match &history.items[0].item {
+    let stored = match &history.annotated_items()[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => output,
         other => panic!("unexpected history item: {other:?}"),
     };
