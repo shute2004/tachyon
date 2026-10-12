@@ -282,6 +282,302 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
     }
 }
 
+/// Builds a fresh Responses-shaped item for a canonical compaction result only when the current
+/// adapter can reconstruct the exact canonical semantics without a migration template.
+pub(super) fn response_item_from_new_model_input(
+    item: &ModelInputItem,
+    tools: &[ModelToolSpec],
+) -> Result<ResponseItem> {
+    let response_item = match item {
+        ModelInputItem::Message(message) => ResponseItem::Message {
+            id: None,
+            role: response_message_role(message.role),
+            content: message
+                .content
+                .iter()
+                .map(|content| response_content_from_new_model(content, message.role))
+                .collect::<Result<Vec<_>>>()?,
+            phase: message.phase.map(response_message_phase),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ModelInputItem::Reasoning(reasoning) => ResponseItem::Reasoning {
+            id: None,
+            summary: reasoning
+                .summary
+                .iter()
+                .map(|text| ReasoningItemReasoningSummary::SummaryText { text: text.clone() })
+                .collect(),
+            content: Some(
+                reasoning
+                    .content
+                    .iter()
+                    .map(|text| ReasoningItemContent::ReasoningText { text: text.clone() })
+                    .collect(),
+            ),
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ModelInputItem::ToolCall(call) => response_item_from_new_model_tool_call(call, tools)?,
+        ModelInputItem::ToolResult(_) => {
+            return Err(invalid_request(
+                "canonical compaction tool results require their matching projected call",
+            ));
+        }
+    };
+
+    if model_input_item_from_response(&response_item).as_ref() == Some(item) {
+        Ok(response_item)
+    } else {
+        Err(invalid_request(
+            "canonical compaction item cannot be represented losslessly by the current Codex adapter",
+        ))
+    }
+}
+
+fn response_content_from_new_model(
+    content: &ModelContent,
+    role: ModelMessageRole,
+) -> Result<ContentItem> {
+    match content {
+        ModelContent::Text(text) if role == ModelMessageRole::Assistant => {
+            Ok(ContentItem::OutputText { text: text.clone() })
+        }
+        ModelContent::Text(text) => Ok(ContentItem::InputText { text: text.clone() }),
+        ModelContent::Image { source, detail } => match source {
+            ModelMediaSource::Uri(image_url) => Ok(ContentItem::InputImage {
+                image_url: image_url.clone(),
+                detail: detail.map(response_image_detail),
+            }),
+            ModelMediaSource::Bytes { .. } => Err(invalid_request(
+                "canonical compaction image bytes cannot be represented without losing source identity",
+            )),
+        },
+        ModelContent::Audio { source } => match source {
+            ModelMediaSource::Uri(audio_url) => Ok(ContentItem::InputAudio {
+                audio_url: audio_url.clone(),
+            }),
+            ModelMediaSource::Bytes { .. } => Err(invalid_request(
+                "canonical compaction audio bytes cannot be represented without losing source identity",
+            )),
+        },
+    }
+}
+
+fn response_item_from_new_model_tool_call(
+    call: &ModelToolCall,
+    tools: &[ModelToolSpec],
+) -> Result<ResponseItem> {
+    match &call.input {
+        ModelToolInput::Json(arguments) if is_client_tool_search(call, tools)? => {
+            Ok(ResponseItem::ToolSearchCall {
+                id: None,
+                call_id: Some(call.call_id.0.clone()),
+                status: None,
+                execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+                arguments: arguments.clone(),
+                internal_chat_message_metadata_passthrough: None,
+            })
+        }
+        ModelToolInput::Json(arguments) => Ok(ResponseItem::FunctionCall {
+            id: None,
+            name: call.name.clone(),
+            namespace: call.namespace.clone(),
+            arguments: serde_json::to_string(arguments)
+                .map_err(|err| invalid_request(err.to_string()))?,
+            encrypted_function_args: None,
+            call_id: call.call_id.0.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        }),
+        ModelToolInput::Text(input) => Ok(ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: call.call_id.0.clone(),
+            name: call.name.clone(),
+            namespace: call.namespace.clone(),
+            input: input.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        }),
+    }
+}
+
+fn is_client_tool_search(call: &ModelToolCall, tools: &[ModelToolSpec]) -> Result<bool> {
+    if call.namespace.is_some() || call.name != TOOL_SEARCH_NAME {
+        return Ok(false);
+    }
+    let matching: Vec<_> = tools
+        .iter()
+        .filter_map(|tool| match tool {
+            ModelToolSpec::Function {
+                namespace: None,
+                name,
+                purpose,
+                ..
+            } if name == TOOL_SEARCH_NAME => Some(*purpose),
+            _ => None,
+        })
+        .collect();
+    if matching.contains(&ModelToolPurpose::Discovery) && matching.len() != 1 {
+        return Err(invalid_request(
+            "canonical tool_search call has ambiguous request declarations",
+        ));
+    }
+    Ok(matches!(matching.as_slice(), [ModelToolPurpose::Discovery]))
+}
+
+pub(super) fn response_item_from_new_model_tool_result(
+    result: &ModelToolResult,
+    call: &ResponseItem,
+) -> Result<ResponseItem> {
+    let output_kind = match call {
+        ResponseItem::FunctionCall { call_id, .. } if call_id == &result.call_id.0 => {
+            NewModelToolOutputKind::Function
+        }
+        ResponseItem::CustomToolCall { call_id, .. } if call_id == &result.call_id.0 => {
+            NewModelToolOutputKind::Custom
+        }
+        ResponseItem::ToolSearchCall {
+            call_id: Some(call_id),
+            execution,
+            ..
+        } if call_id == &result.call_id.0 && execution == TOOL_SEARCH_CLIENT_EXECUTION => {
+            NewModelToolOutputKind::Discovery
+        }
+        _ => {
+            return Err(invalid_request(
+                "canonical compaction tool result does not match a projected call with the same call ID",
+            ));
+        }
+    };
+
+    if result
+        .content
+        .iter()
+        .any(|content| matches!(content, ModelToolResultContent::DiscoveredTools(_)))
+    {
+        if output_kind != NewModelToolOutputKind::Discovery {
+            return Err(invalid_request(
+                "canonical discovered tools require a matching client tool_search call",
+            ));
+        }
+        let [ModelToolResultContent::DiscoveredTools(tools)] = result.content.as_slice() else {
+            return Err(invalid_request(
+                "canonical discovered tools cannot be mixed with other tool-result content",
+            ));
+        };
+        if result.is_error != Some(false) {
+            return Err(invalid_request(
+                "canonical discovered tools require a successful tool-result status",
+            ));
+        }
+        let tools = codex_tools_from_model(tools)?
+            .iter()
+            .map(|tool| serde_json::to_value(tool).map_err(|err| invalid_request(err.to_string())))
+            .collect::<Result<Vec<_>>>()?;
+        let response_item = ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some(result.call_id.0.clone()),
+            status: TOOL_SEARCH_COMPLETED_STATUS.to_string(),
+            execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+            tools,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        return ensure_new_model_tool_result_round_trip(result, response_item);
+    }
+    if output_kind == NewModelToolOutputKind::Discovery {
+        return Err(invalid_request(
+            "client tool_search results must contain discovered tools",
+        ));
+    }
+
+    let content = result
+        .content
+        .iter()
+        .map(|content| match content {
+            ModelToolResultContent::Text(text) => {
+                Ok(FunctionCallOutputContentItem::InputText { text: text.clone() })
+            }
+            ModelToolResultContent::Image { source, detail } => match source {
+                ModelMediaSource::Uri(image_url) => Ok(
+                    FunctionCallOutputContentItem::InputImage {
+                        image_url: image_url.clone(),
+                        detail: detail.map(response_image_detail),
+                    },
+                ),
+                ModelMediaSource::Bytes { .. } => Err(invalid_request(
+                    "canonical compaction image bytes cannot be represented without losing source identity",
+                )),
+            },
+            ModelToolResultContent::Audio { source } => match source {
+                ModelMediaSource::Uri(audio_url) => {
+                    Ok(FunctionCallOutputContentItem::InputAudio {
+                        audio_url: audio_url.clone(),
+                    })
+                }
+                ModelMediaSource::Bytes { .. } => Err(invalid_request(
+                    "canonical compaction audio bytes cannot be represented without losing source identity",
+                )),
+            },
+            ModelToolResultContent::Json(_) => Err(invalid_request(
+                "canonical JSON tool results are not representable by the current Codex adapter",
+            )),
+            ModelToolResultContent::DiscoveredTools(_) => Err(invalid_request(
+                "canonical discovered tools are not representable in this tool-result shape",
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::ContentItems(content),
+        success: result.is_error.map(|is_error| !is_error),
+    };
+    let response_item = match output_kind {
+        NewModelToolOutputKind::Function => ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(result.call_id.0.clone()),
+            name: None,
+            namespace: None,
+            output,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        NewModelToolOutputKind::Custom => ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: result.call_id.0.clone(),
+            name: None,
+            output,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        NewModelToolOutputKind::Discovery => {
+            return Err(invalid_request(
+                "client tool_search results must contain discovered tools",
+            ));
+        }
+    };
+    ensure_new_model_tool_result_round_trip(result, response_item)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NewModelToolOutputKind {
+    Function,
+    Custom,
+    Discovery,
+}
+
+fn ensure_new_model_tool_result_round_trip(
+    result: &ModelToolResult,
+    response_item: ResponseItem,
+) -> Result<ResponseItem> {
+    if model_input_item_from_response(&response_item)
+        .as_ref()
+        .is_some_and(|item| item == &ModelInputItem::ToolResult(result.clone()))
+    {
+        Ok(response_item)
+    } else {
+        Err(invalid_request(
+            "canonical compaction tool result cannot be represented losslessly by the current Codex adapter",
+        ))
+    }
+}
+
 fn response_item_from_model_input(
     item: &ModelInputItem,
     legacy: &ResponseItem,

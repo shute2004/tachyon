@@ -244,7 +244,7 @@ fn response_message_phase(phase: ModelMessagePhase) -> MessagePhase {
     }
 }
 
-fn token_usage_from_model(usage: ModelUsage) -> Result<TokenUsage, String> {
+pub(super) fn token_usage_from_model(usage: ModelUsage) -> Result<TokenUsage, String> {
     let input_tokens = i64::try_from(usage.input_tokens)
         .map_err(|_| "canonical input token count exceeds legacy i64 range".to_string())?;
     let output_tokens = i64::try_from(usage.output_tokens)

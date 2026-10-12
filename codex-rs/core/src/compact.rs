@@ -851,3 +851,6 @@ fn is_compaction_completion_event(event: &ModelRuntimeEvent) -> bool {
 #[cfg(test)]
 #[path = "compact_tests.rs"]
 mod tests;
+
+#[path = "compact_backend.rs"]
+pub(crate) mod backend;

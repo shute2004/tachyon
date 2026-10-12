@@ -49,11 +49,15 @@ use futures::future::poll_fn;
 pub(crate) use harness_event::HarnessSamplingEvent;
 pub(crate) use harness_event::normalize_sampling_event;
 pub(crate) use historical_selection::HistoricalModelSelection;
+use ir::ModelInputItem;
 use ir::ModelRequest;
+use ir::ModelToolResult;
+use ir::ModelToolSpec;
 use route::ModelProviderId;
 use tachyon_model::ModelEvent;
 use tachyon_model::backend::ModelBackend;
 use tachyon_model::backend::ModelBackendError;
+use tachyon_model::backend::ModelCompactionResult;
 use tachyon_model::backend::ModelEventStream;
 use tachyon_model::backend::ModelTurnBackend;
 pub(crate) use tool_result::to_response_item as tool_result_to_response_item;
@@ -97,6 +101,27 @@ pub(crate) fn try_model_request_from_prompt(prompt: &Prompt) -> Option<ModelRequ
     codex_request::try_model_request_from_prompt(prompt)
 }
 
+/// Rebuilds one fresh Codex item from canonical compaction output when the conversion is lossless.
+pub(crate) fn response_item_from_new_model_input(
+    item: &ModelInputItem,
+    tools: &[ModelToolSpec],
+) -> Result<ResponseItem> {
+    codex_request::response_item_from_new_model_input(item, tools)
+}
+
+pub(crate) fn response_item_from_new_model_tool_result(
+    result: &ModelToolResult,
+    call: &ResponseItem,
+) -> Result<ResponseItem> {
+    codex_request::response_item_from_new_model_tool_result(result, call)
+}
+
+pub(crate) fn token_usage_from_model(
+    usage: ir::ModelUsage,
+) -> std::result::Result<codex_protocol::protocol::TokenUsage, String> {
+    harness_event::token_usage_from_model(usage)
+}
+
 /// Session-scoped model execution runtime.
 ///
 /// Durable harness conversation history remains owned above this boundary. The runtime may retain
@@ -131,6 +156,14 @@ impl ModelRuntime {
     /// Reports whether this runtime can execute the existing Codex remote-compaction path.
     pub(crate) fn supports_codex_remote_compaction(&self) -> bool {
         matches!(&self.backend, ModelRuntimeBackend::Codex(_))
+    }
+
+    /// Reports whether the selected canonical backend opted into backend-managed compaction.
+    pub(crate) fn supports_backend_compaction(&self) -> bool {
+        match &self.backend {
+            ModelRuntimeBackend::Codex(_) => false,
+            ModelRuntimeBackend::Canonical(backend) => backend.supports_compaction(),
+        }
     }
 
     /// Creates a fresh execution handle for one harness turn bound to the selected provider.
@@ -315,6 +348,40 @@ impl ModelTurnRuntime {
         }
     }
 
+    /// Runs backend-managed compaction on this canonical provider-bound turn handle.
+    pub(crate) async fn compact_backend_request(
+        &mut self,
+        model_id: &str,
+        request: &ModelRequest,
+    ) -> Result<ModelCompactionResult> {
+        match &mut self.backend {
+            ModelTurnRuntimeBackend::Codex(_) => Err(CodexErr::InvalidRequest(
+                "Codex model runtime does not support backend-managed compaction".to_string(),
+            )),
+            ModelTurnRuntimeBackend::Canonical {
+                backend,
+                requested_provider_id,
+            } => {
+                let actual_provider_id = backend.route().provider_id();
+                if actual_provider_id != requested_provider_id {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "configured model provider `{}` does not match model backend route provider `{}`",
+                        requested_provider_id.id(),
+                        actual_provider_id.id(),
+                    )));
+                }
+                let result = backend
+                    .compact(model_id, request)
+                    .await
+                    .map_err(model_backend_error_to_codex)?;
+                result
+                    .validate_retained_inputs(request.input.len())
+                    .map_err(model_backend_error_to_codex)?;
+                Ok(result)
+            }
+        }
+    }
+
     /// Converts one current Codex/OpenAI stream event into the C3 runtime event boundary.
     ///
     /// Generic model semantics become `ModelEvent`; provider/product data and unsupported model
@@ -494,3 +561,7 @@ pub(crate) fn model_backend_error_to_codex(error: ModelBackendError) -> CodexErr
         ModelBackendError::Cancelled => CodexErr::TurnAborted,
     }
 }
+
+#[cfg(test)]
+#[path = "backend_compaction_tests.rs"]
+mod backend_compaction_tests;

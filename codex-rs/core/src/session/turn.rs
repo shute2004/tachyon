@@ -1224,6 +1224,24 @@ async fn run_auto_compact(
         return Ok(());
     }
 
+    if sess.services.model_runtime().supports_backend_compaction() {
+        emit_compact_metric(
+            &sess.services.session_telemetry,
+            "backend",
+            /*manual*/ false,
+        );
+        crate::compact::backend::run_inline_auto_compact_task(
+            Arc::clone(sess),
+            step_context,
+            turn_runtime,
+            initial_context_injection,
+            reason,
+            phase,
+        )
+        .await?;
+        return Ok(());
+    }
+
     let remote_compaction = if sess
         .services
         .model_runtime()

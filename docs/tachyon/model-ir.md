@@ -104,10 +104,30 @@ Retryable failures reuse the compaction turn handle; nonretryable errors and pre
 canonical EOF terminate without a legacy fallback. Codex rate-limit/server-reasoning
 notifications and response IDs retain their existing adapter-specific behavior.
 Both manual and automatic model compaction gate Codex remote dispatch on the selected
-runtime, not provider identity alone. Canonical backends remain local even with OpenAI
-remote V2 capability; the earlier TokenBudget path and Codex remote V1/V2 selection are unchanged.
+runtime, not provider identity alone. Canonical backends without their own compaction capability
+remain on local compaction even with OpenAI remote V2 capability; the earlier TokenBudget path
+and Codex remote V1/V2 selection are unchanged.
 
-Remote compaction remains unimplemented by this slice. Regular sampling now preserves canonical
+Canonical backends may opt into backend-managed compaction. Manual compaction creates a fresh
+provider-bound turn handle; inline compaction reuses the current sampling handle. The backend
+receives the exact normalized request snapshot and returns retained input positions or fresh
+canonical items. Retained items preserve their original IDs and sidecar metadata. Source/attached
+notice groups remain intact, and only explicitly marked, unassociated, non-client context is
+removed for reinjection by the full-context producer. Invalid references, ambiguous tool pairs,
+unrepresentable items, and overflowing usage fail before replacing history or advancing the
+window. Fresh items are also limited to 10,000 estimated tokens using the existing history
+estimator; oversized output fails without truncating retained history. This is a heuristic
+budget, not an exact provider-tokenizer guarantee. Backend errors do not authorize a fallback
+to Codex or local sampling.
+
+This path still installs through a temporary Responses-shaped history projection, not a fully
+neutral durable-history implementation. Fresh tool calls use request declarations at the Codex
+adapter boundary; fresh results use their actual retained or projected counterpart. JSON tool
+results, byte-backed media, and unsupported discovery declarations remain explicit errors rather
+than being stringified or losing identity. Removing these compatibility limits is unfinished
+extraction work, not a new product feature.
+
+Regular sampling now preserves canonical
 reasoning-content section starts as transient host events; local compaction continues to ignore
 noncompletion stream structure, including these section starts.
 Realtime and delegated WebSocket

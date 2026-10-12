@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::model_runtime::response_item_from_new_model_input;
+use crate::model_runtime::response_item_from_new_model_tool_result;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_tools::JsonSchema;
@@ -39,6 +41,415 @@ fn assert_prompt_request_semantics_round_trip(prompt: &Prompt) -> ModelRequest {
     assert_eq!(rebuilt.cyber_access_program, prompt.cyber_access_program);
 
     request
+}
+
+fn assert_new_item_round_trip(item: &ModelInputItem) -> ResponseItem {
+    let response_item =
+        response_item_from_new_model_input(item, &[]).expect("canonical item should round-trip");
+    assert_eq!(
+        model_input_item_from_response(&response_item),
+        Some(item.clone())
+    );
+    response_item
+}
+
+fn assert_new_item_rejected(item: &ModelInputItem) {
+    let error =
+        match item {
+            ModelInputItem::ToolResult(result) => {
+                let call =
+                    if result.content.iter().any(|content| {
+                        matches!(content, ModelToolResultContent::DiscoveredTools(_))
+                    }) {
+                        ResponseItem::ToolSearchCall {
+                            id: None,
+                            call_id: Some(result.call_id.0.clone()),
+                            status: None,
+                            execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+                            arguments: json!({"query": "tools"}),
+                            internal_chat_message_metadata_passthrough: None,
+                        }
+                    } else {
+                        ResponseItem::FunctionCall {
+                            id: None,
+                            name: "test".to_string(),
+                            namespace: None,
+                            arguments: "{}".to_string(),
+                            encrypted_function_args: None,
+                            call_id: result.call_id.0.clone(),
+                            internal_chat_message_metadata_passthrough: None,
+                        }
+                    };
+                response_item_from_new_model_tool_result(result, &call)
+                    .expect_err("lossy tool result must be rejected")
+            }
+            _ => response_item_from_new_model_input(item, &[])
+                .expect_err("lossy item must be rejected"),
+        };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(_)
+    ));
+}
+
+#[test]
+fn fresh_message_conversion_preserves_roles_phases_and_has_no_identity_metadata() {
+    for (role, role_name) in [
+        (ModelMessageRole::System, "system"),
+        (ModelMessageRole::Developer, "developer"),
+        (ModelMessageRole::User, "user"),
+        (ModelMessageRole::Assistant, "assistant"),
+    ] {
+        for phase in [
+            None,
+            Some(ModelMessagePhase::Commentary),
+            Some(ModelMessagePhase::Final),
+        ] {
+            let item = ModelInputItem::Message(ModelMessage {
+                role,
+                phase,
+                content: vec![ModelContent::Text("compacted text".to_string())],
+            });
+            let response_item = assert_new_item_round_trip(&item);
+            let ResponseItem::Message {
+                id,
+                role: actual_role,
+                content,
+                phase: actual_phase,
+                internal_chat_message_metadata_passthrough,
+            } = response_item
+            else {
+                panic!("expected a message response item");
+            };
+            assert_eq!(id, None);
+            assert_eq!(actual_role, role_name);
+            assert_eq!(actual_phase, phase.map(response_message_phase));
+            assert_eq!(internal_chat_message_metadata_passthrough, None);
+            assert!(matches!(
+                content.as_slice(),
+                [ContentItem::InputText { text } | ContentItem::OutputText { text }]
+                    if text == "compacted text"
+            ));
+            assert_eq!(
+                matches!(content.as_slice(), [ContentItem::OutputText { .. }]),
+                role == ModelMessageRole::Assistant
+            );
+        }
+    }
+}
+
+#[test]
+fn fresh_reasoning_and_tool_call_conversion_has_no_provider_identity_or_metadata() {
+    let reasoning = ModelInputItem::Reasoning(ModelReasoning {
+        summary: vec!["summary".to_string()],
+        content: vec!["reasoning text".to_string()],
+    });
+    let response_item = assert_new_item_round_trip(&reasoning);
+    let ResponseItem::Reasoning {
+        id,
+        encrypted_content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = response_item
+    else {
+        panic!("expected reasoning response item");
+    };
+    assert_eq!(id, None);
+    assert_eq!(encrypted_content, None);
+    assert_eq!(internal_chat_message_metadata_passthrough, None);
+
+    for input in [
+        ModelToolInput::Json(json!({"path": "README.md"})),
+        ModelToolInput::Text("raw tool input".to_string()),
+    ] {
+        let is_json = matches!(&input, ModelToolInput::Json(_));
+        let item = ModelInputItem::ToolCall(ModelToolCall {
+            call_id: ModelToolCallId("call-compacted".to_string()),
+            namespace: Some("workspace".to_string()),
+            name: "inspect".to_string(),
+            input,
+        });
+        match assert_new_item_round_trip(&item) {
+            ResponseItem::FunctionCall {
+                id,
+                call_id,
+                namespace,
+                encrypted_function_args,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } => {
+                assert_eq!(id, None);
+                assert_eq!(call_id, "call-compacted");
+                assert_eq!(namespace.as_deref(), Some("workspace"));
+                assert_eq!(encrypted_function_args, None);
+                assert_eq!(internal_chat_message_metadata_passthrough, None);
+                assert!(is_json);
+            }
+            ResponseItem::CustomToolCall {
+                id,
+                call_id,
+                namespace,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } => {
+                assert_eq!(id, None);
+                assert_eq!(call_id, "call-compacted");
+                assert_eq!(namespace.as_deref(), Some("workspace"));
+                assert_eq!(internal_chat_message_metadata_passthrough, None);
+                assert!(!is_json);
+            }
+            _ => panic!("expected a tool-call response item"),
+        }
+    }
+}
+
+#[test]
+fn fresh_tool_result_conversion_preserves_uri_content_and_status_tristate() {
+    for is_error in [None, Some(false), Some(true)] {
+        let item = ModelInputItem::ToolResult(ModelToolResult {
+            call_id: ModelToolCallId("call-result".to_string()),
+            content: vec![
+                ModelToolResultContent::Text("tool output".to_string()),
+                ModelToolResultContent::Image {
+                    source: ModelMediaSource::Uri("https://example.test/image.png".to_string()),
+                    detail: Some(ModelImageDetail::High),
+                },
+                ModelToolResultContent::Audio {
+                    source: ModelMediaSource::Uri("https://example.test/audio.wav".to_string()),
+                },
+            ],
+            is_error,
+        });
+        let call = ResponseItem::FunctionCall {
+            id: None,
+            name: "inspect".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call-result".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let response_item = response_item_from_new_model_tool_result(
+            match &item {
+                ModelInputItem::ToolResult(result) => result,
+                _ => unreachable!(),
+            },
+            &call,
+        )
+        .expect("function result should round-trip with its call");
+        assert_eq!(model_input_item_from_response(&response_item), Some(item));
+        let ResponseItem::FunctionCallOutput {
+            id,
+            call_id,
+            output,
+            internal_chat_message_metadata_passthrough,
+            ..
+        } = response_item
+        else {
+            panic!("expected a function-call output response item");
+        };
+        assert_eq!(id, None);
+        assert_eq!(call_id.as_deref(), Some("call-result"));
+        assert_eq!(output.success, is_error.map(|is_error| !is_error));
+        assert_eq!(internal_chat_message_metadata_passthrough, None);
+    }
+}
+
+#[test]
+fn fresh_tool_result_conversion_rejects_json_and_byte_media_without_lossy_fallback() {
+    for content in [
+        ModelToolResultContent::Json(json!({"structured": true})),
+        ModelToolResultContent::Image {
+            source: ModelMediaSource::Bytes {
+                media_type: "image/png".to_string(),
+                data: std::sync::Arc::from([1_u8, 2_u8]),
+            },
+            detail: Some(ModelImageDetail::Auto),
+        },
+        ModelToolResultContent::Audio {
+            source: ModelMediaSource::Bytes {
+                media_type: "audio/wav".to_string(),
+                data: std::sync::Arc::from([3_u8, 4_u8]),
+            },
+        },
+    ] {
+        assert_new_item_rejected(&ModelInputItem::ToolResult(ModelToolResult {
+            call_id: ModelToolCallId("call-unsupported".to_string()),
+            content: vec![content],
+            is_error: None,
+        }));
+    }
+
+    for content in [
+        ModelContent::Image {
+            source: ModelMediaSource::Bytes {
+                media_type: "image/png".to_string(),
+                data: std::sync::Arc::from([5_u8, 6_u8]),
+            },
+            detail: Some(ModelImageDetail::High),
+        },
+        ModelContent::Audio {
+            source: ModelMediaSource::Bytes {
+                media_type: "audio/wav".to_string(),
+                data: std::sync::Arc::from([7_u8, 8_u8]),
+            },
+        },
+    ] {
+        assert_new_item_rejected(&ModelInputItem::Message(ModelMessage {
+            role: ModelMessageRole::User,
+            phase: None,
+            content: vec![content],
+        }));
+    }
+}
+
+#[test]
+fn fresh_discovered_tools_require_an_exact_semantic_round_trip() {
+    let simple_tool = ModelToolSpec::Function {
+        namespace: None,
+        name: "lookup".to_string(),
+        description: "Lookup records".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        output_schema: None,
+        strict: false,
+        availability: ModelToolAvailability::Deferred,
+        purpose: ModelToolPurpose::Invocation,
+    };
+    let discovery_call_ir = ModelInputItem::ToolCall(ModelToolCall {
+        call_id: ModelToolCallId("call-discovery".to_string()),
+        namespace: None,
+        name: TOOL_SEARCH_NAME.to_string(),
+        input: ModelToolInput::Json(json!({"query": "lookup"})),
+    });
+    let discovery_spec = ModelToolSpec::Function {
+        namespace: None,
+        name: TOOL_SEARCH_NAME.to_string(),
+        description: "Find additional tools".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        output_schema: None,
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Discovery,
+    };
+    let discovery_call = response_item_from_new_model_input(&discovery_call_ir, &[discovery_spec])
+        .expect("the declared discovery call projects to the client search shape");
+    assert!(matches!(
+        &discovery_call,
+        ResponseItem::ToolSearchCall {
+            id: None,
+            call_id: Some(call_id),
+            execution,
+            internal_chat_message_metadata_passthrough: None,
+            ..
+        } if call_id == "call-discovery" && execution == TOOL_SEARCH_CLIENT_EXECUTION
+    ));
+    let item = ModelInputItem::ToolResult(ModelToolResult {
+        call_id: ModelToolCallId("call-discovery".to_string()),
+        content: vec![ModelToolResultContent::DiscoveredTools(vec![simple_tool])],
+        is_error: Some(false),
+    });
+    let ModelInputItem::ToolResult(result) = &item else {
+        unreachable!();
+    };
+    let response_item = response_item_from_new_model_tool_result(result, &discovery_call)
+        .expect("discovered tools should round-trip with their client search call");
+    assert_eq!(model_input_item_from_response(&response_item), Some(item));
+    let ResponseItem::ToolSearchOutput {
+        id,
+        call_id,
+        status,
+        execution,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = response_item
+    else {
+        panic!("expected a client tool-search output response item");
+    };
+    assert_eq!(id, None);
+    assert_eq!(call_id.as_deref(), Some("call-discovery"));
+    assert_eq!(status, TOOL_SEARCH_COMPLETED_STATUS);
+    assert_eq!(execution, TOOL_SEARCH_CLIENT_EXECUTION);
+    assert_eq!(internal_chat_message_metadata_passthrough, None);
+
+    let lossy_tool = ModelToolSpec::Function {
+        namespace: None,
+        name: "structured_result".to_string(),
+        description: "Has an output schema".to_string(),
+        input_schema: json!({"type": "object"}),
+        output_schema: Some(json!({"type": "string"})),
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Invocation,
+    };
+    assert_new_item_rejected(&ModelInputItem::ToolResult(ModelToolResult {
+        call_id: ModelToolCallId("call-discovery-lossy".to_string()),
+        content: vec![ModelToolResultContent::DiscoveredTools(vec![lossy_tool])],
+        is_error: Some(false),
+    }));
+}
+
+#[test]
+fn fresh_custom_tool_result_uses_the_matching_custom_call_shape() {
+    let call = ModelInputItem::ToolCall(ModelToolCall {
+        call_id: ModelToolCallId("call-custom".to_string()),
+        namespace: None,
+        name: "apply_patch".to_string(),
+        input: ModelToolInput::Text("*** Begin Patch".to_string()),
+    });
+    let projected_call = assert_new_item_round_trip(&call);
+    let result = ModelToolResult {
+        call_id: ModelToolCallId("call-custom".to_string()),
+        content: vec![ModelToolResultContent::Text("applied".to_string())],
+        is_error: Some(false),
+    };
+    let projected_result = response_item_from_new_model_tool_result(&result, &projected_call)
+        .expect("matching custom result should be representable");
+    assert!(matches!(
+        &projected_result,
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id,
+            internal_chat_message_metadata_passthrough: None,
+            ..
+        } if call_id == "call-custom"
+    ));
+    assert_eq!(
+        model_input_item_from_response(&projected_result),
+        Some(ModelInputItem::ToolResult(result))
+    );
+}
+
+#[test]
+fn tool_search_name_is_discovery_only_when_request_purpose_says_so() {
+    let call = ModelInputItem::ToolCall(ModelToolCall {
+        call_id: ModelToolCallId("call-search".to_string()),
+        namespace: None,
+        name: TOOL_SEARCH_NAME.to_string(),
+        input: ModelToolInput::Json(json!({"query": "tools"})),
+    });
+    let invocation = ModelToolSpec::Function {
+        namespace: None,
+        name: TOOL_SEARCH_NAME.to_string(),
+        description: "Invocation with a reserved-looking name".to_string(),
+        input_schema: json!({"type": "object"}),
+        output_schema: None,
+        strict: false,
+        availability: ModelToolAvailability::Immediate,
+        purpose: ModelToolPurpose::Invocation,
+    };
+    let projected = response_item_from_new_model_input(&call, &[invocation])
+        .expect("invocation declarations stay ordinary calls");
+    assert!(matches!(&projected, ResponseItem::FunctionCall { .. }));
+    assert_eq!(model_input_item_from_response(&projected), Some(call));
 }
 
 #[test]

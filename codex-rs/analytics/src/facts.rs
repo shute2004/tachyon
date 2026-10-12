@@ -429,6 +429,7 @@ pub enum CompactionImplementation {
     Responses,
     ResponsesCompactionV2,
     ResponsesCompact,
+    Backend,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
