@@ -365,9 +365,27 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
 
 #[tokio::test]
 async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
+    const OUTPUT_LIMIT: usize = 64 * 1024;
+    const TRUNCATION_MARKER: &str = "... command output truncated for persistence ...";
+
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
-    let exec = exec_completion("explicit", "call-1");
+    let oversized_output =
+        |name: &str| format!("{name}-prefix{}-{name}-suffix", "x".repeat(70 * 1024));
+    let mut exec = exec_completion("explicit", "call-1");
+    let RolloutItem::EventMsg(EventMsg::ExecCommandEnd(event)) = &mut exec else {
+        panic!("fixture should be a legacy command completion");
+    };
+    event.stdout = oversized_output("stdout");
+    event.stderr = oversized_output("stderr");
+    event.aggregated_output = oversized_output("aggregate");
+    event.formatted_output = oversized_output("formatted");
+    event.interaction_input = Some("preserve this input".to_string());
+    let additional_tools = rollout_response_item(ResponseItem::AdditionalTools {
+        id: None,
+        role: "assistant".to_string(),
+        tools: vec![json!({"type": "function", "name": "preserved-tool"})],
+    });
     let reasoning = serde_json::from_value(json!({
         "type": "event_msg",
         "payload": {"type": "agent_reasoning", "text": "summary"}
@@ -378,12 +396,13 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
         "payload": {"type": "agent_reasoning_raw_content", "text": "raw"}
     }))
     .expect("build legacy reasoning content");
-    write_rollout(
+    let path = write_rollout(
         home.path(),
         thread_id,
         SessionSource::Cli,
         vec![
             started("explicit"),
+            additional_tools,
             exec,
             completed("explicit"),
             reasoning,
@@ -396,6 +415,56 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
         .migrate_rollouts(apply_options())
         .await
         .expect("migrate legacy completion events");
+
+    let lines = read_rollout(&path);
+    assert_eq!(
+        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        (0..lines.len() as u64).map(Some).collect::<Vec<_>>(),
+        "projected rollout ordinals remain contiguous"
+    );
+    let durable_command = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match &event.item {
+                TurnItem::CommandExecution(command) => Some(command),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("find migrated command execution");
+    for (name, output) in [
+        ("stdout", durable_command.stdout.as_deref()),
+        ("stderr", durable_command.stderr.as_deref()),
+        ("aggregate", durable_command.aggregated_output.as_deref()),
+        ("formatted", durable_command.formatted_output.as_deref()),
+    ] {
+        let output = output.expect("all command outputs are present");
+        assert!(
+            output.len() <= OUTPUT_LIMIT,
+            "{name} exceeds persistence cap"
+        );
+        assert!(output.starts_with(&format!("{name}-prefix")));
+        assert!(output.ends_with(&format!("-{name}-suffix")));
+        assert!(output.contains(TRUNCATION_MARKER));
+    }
+    assert_eq!(
+        durable_command.interaction_input.as_deref(),
+        Some("preserve this input")
+    );
+    assert_eq!(durable_command.id, "call-1");
+    assert_eq!(
+        durable_command.command,
+        vec!["echo".to_string(), "ok".to_string()]
+    );
+    assert!(lines.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::ResponseItem(response)
+            if matches!(
+                &response.item,
+                ResponseItem::AdditionalTools { role, tools, .. }
+                    if role == "assistant" && tools.len() == 1
+            )
+    )));
 
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 2);
@@ -421,9 +490,27 @@ async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
     let reasoning: serde_json::Value =
         serde_json::from_slice(&items.items[1].item_json).expect("parse projected reasoning");
     assert_eq!(command["type"], "commandExecution");
+    assert_eq!(
+        command["aggregatedOutput"],
+        json!(durable_command.aggregated_output)
+    );
     assert_eq!(reasoning["type"], "reasoning");
     assert_eq!(reasoning["summary"], json!(["summary"]));
     assert_eq!(reasoning["content"], json!(["raw"]));
+
+    let first_migration_bytes = fs::read(&path).expect("read migrated rollout");
+    let second_migration = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("rerun migration");
+    assert_eq!(
+        second_migration.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(
+        fs::read(&path).expect("read idempotent rollout"),
+        first_migration_bytes
+    );
 }
 
 #[tokio::test]
