@@ -11,6 +11,7 @@
 //! contract deliberately exposes no endpoint or authentication types, `ModelProviderInfo`, Codex
 //! `Prompt` or `ResponseEvent`, or provider-private execution state.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
@@ -22,7 +23,9 @@ use std::task::Context;
 use std::task::Poll;
 
 use crate::ModelEvent;
+use crate::ModelInputItem;
 use crate::ModelRequest;
+use crate::ModelUsage;
 use crate::route::ModelProviderId;
 use crate::route::ModelRoute;
 
@@ -32,6 +35,60 @@ pub type ModelBackendFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>
 /// Pinned source of ordered canonical model events.
 pub type ModelEventStream = Pin<Box<dyn ModelEventSource>>;
 
+/// Result of one backend-managed compaction operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCompactionResult {
+    /// Replacement conversation history in the order it should be installed.
+    pub history: Vec<ModelCompactionItem>,
+    /// Provider-neutral usage reported for the compaction request, when available.
+    pub usage: Option<ModelUsage>,
+}
+
+/// One item in a backend-managed compaction result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelCompactionItem {
+    /// Retain an item from the exact normalized `ModelRequest::input` snapshot sent to compact.
+    ///
+    /// This is a request-slot reference, not a provider item ID. The caller remains responsible
+    /// for validating attached item groups and harness context/provenance before installation.
+    RetainedInput { index: usize },
+    /// A newly produced replacement-history item with no claim to original input identity.
+    NewItem(ModelInputItem),
+}
+
+impl ModelCompactionResult {
+    /// Validates only that retained-input references are in range and unique.
+    ///
+    /// This does not validate usage, attached item groups, or harness context/provenance. Callers
+    /// must validate and prepare the complete replacement before installing any part of it.
+    /// Empty history is permitted by this reference-only validator.
+    pub fn validate_retained_inputs(&self, input_len: usize) -> Result<(), ModelBackendError> {
+        let mut retained_inputs = HashSet::new();
+        for (output_index, item) in self.history.iter().enumerate() {
+            let ModelCompactionItem::RetainedInput { index } = item else {
+                continue;
+            };
+            if *index >= input_len {
+                return Err(ModelBackendError::Failed {
+                    message: format!(
+                        "compaction history item {output_index} references input index {index}, but request input length is {input_len}"
+                    ),
+                    retryable: false,
+                });
+            }
+            if !retained_inputs.insert(*index) {
+                return Err(ModelBackendError::Failed {
+                    message: format!(
+                        "compaction history item {output_index} references input index {index} more than once"
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Session-scoped factory for provider-bound, turn-scoped execution handles.
 pub trait ModelBackend: std::fmt::Debug + Send + Sync {
     /// Start a fresh harness-turn handle bound to `provider_id`.
@@ -40,6 +97,14 @@ pub trait ModelBackend: std::fmt::Debug + Send + Sync {
     /// reusable provider-private resources behind the factory, but turn-affinity state must be
     /// fresh for every call.
     fn begin_turn(&self, provider_id: ModelProviderId) -> Box<dyn ModelTurnBackend>;
+
+    /// Reports whether this backend opts into backend-managed model compaction.
+    ///
+    /// This is an explicit backend capability, not a property inferred from a provider, protocol,
+    /// endpoint, or transport. Backends that do not implement compaction should keep the default.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
 
     /// Creates an independent session-scoped backend for a delegated child session.
     ///
@@ -101,6 +166,24 @@ pub trait ModelTurnBackend: Send + Sync {
         model_id: &'a str,
         request: &'a ModelRequest,
     ) -> ModelBackendFuture<'a, Result<ModelEventStream, ModelBackendError>>;
+
+    /// Compacts the supplied canonical request using backend-managed behavior.
+    ///
+    /// Callers should route here only when the session-scoped backend opted in through
+    /// [`ModelBackend::supports_compaction`]. The operation remains on this provider-bound turn
+    /// handle. Retained history entries must refer to the exact normalized `request.input` slots;
+    /// newly produced entries must use [`ModelCompactionItem::NewItem`].
+    fn compact<'a>(
+        &'a mut self,
+        _model_id: &'a str,
+        _request: &'a ModelRequest,
+    ) -> ModelBackendFuture<'a, Result<ModelCompactionResult, ModelBackendError>> {
+        Box::pin(std::future::ready(Err(
+            ModelBackendError::UnsupportedRequest(
+                "backend-managed compaction is not supported by this backend".to_string(),
+            ),
+        )))
+    }
 }
 
 /// Poll-based source for an ordered stream of canonical model events.
