@@ -177,7 +177,7 @@ fn honors_exact_name_budget_and_omits_when_one_byte_short() {
     assert!(exact.contains(&format!("- {name}\n")));
 
     let one_byte_short = render_single_group(&namespaces, exact_body_budget - 1);
-    assert!(one_byte_short.len() <= exact_body_budget - 1);
+    assert!(one_byte_short.len() < exact_body_budget);
     assert!(!one_byte_short.contains(&format!("- {name}\n")));
     assert!(one_byte_short.contains("... 1 additional namespaces omitted.\n"));
 }

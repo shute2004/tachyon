@@ -149,7 +149,7 @@ fn queued_association_is_process_local_and_preserves_legacy_bytes() {
         text_elements: Vec::new(),
     }];
     let queued = TurnInput::UserInput {
-        content: content.clone(),
+        content,
         client_id: Some("client-message".to_string()),
         input_association: Some(InputAssociation {
             identity,

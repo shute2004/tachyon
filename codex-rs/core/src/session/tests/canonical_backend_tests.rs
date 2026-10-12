@@ -621,7 +621,8 @@ async fn injected_backend_preserves_reasoning_content_section_boundaries() {
     let mut config = canonical_backend_test_config(codex_home.path()).await;
     config
         .features
-        .disable(Feature::ConcurrentReasoningSummaries);
+        .disable(Feature::ConcurrentReasoningSummaries)
+        .expect("disable concurrent reasoning summaries for reasoning-boundary test");
     let backend = Arc::new(FakeBackend::new(/*route_provider_override*/ None));
     let reasoning_id = ModelItemId("reasoning-content".to_string());
     let final_id = ModelItemId("final-answer".to_string());

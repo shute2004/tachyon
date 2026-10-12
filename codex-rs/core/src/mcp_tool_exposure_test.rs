@@ -165,7 +165,8 @@ async fn reuses_mcp_handler_for_equivalent_tool_metadata_across_appends() {
 async fn replaces_mcp_handler_when_any_tool_metadata_changes() {
     let config = test_config().await;
     let catalog = ResolvedMcpCatalog::default();
-    let mutations: [(&str, fn(&mut ToolInfo)); 18] = [
+    type ToolInfoMutator = fn(&mut ToolInfo);
+    let mutations: [(&str, ToolInfoMutator); 18] = [
         ("server name", |tool| {
             tool.server_name = "other_server".to_owned()
         }),

@@ -129,7 +129,7 @@ fn normalized_tools_snapshot_round_trips_as_known_resumed_state() {
         serde_json::to_value(original.snapshot()).expect("serialize the world-state snapshot");
     assert_eq!(
         snapshot_json,
-        serde_json::json!({"tools": {"app": normalized_description.clone()}})
+        serde_json::json!({"tools": {"app": normalized_description}})
     );
     let resumed_snapshot: WorldStateSnapshot =
         serde_json::from_value(snapshot_json).expect("deserialize a resumed world-state snapshot");
