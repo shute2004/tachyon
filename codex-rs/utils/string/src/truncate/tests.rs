@@ -1,5 +1,6 @@
 use super::split_string;
 use super::truncate_middle_chars;
+use super::truncate_middle_with_marker;
 use super::truncate_middle_with_token_budget;
 use pretty_assertions::assert_eq;
 
@@ -114,4 +115,47 @@ fn truncate_middle_bytes_handles_utf8_content() {
     let s = "😀😀😀😀😀😀😀😀😀😀\nsecond line with text\n";
     let out = truncate_middle_chars(s, /*max_bytes*/ 20);
     assert_eq!(out, "😀😀…21 chars truncated…with text\n");
+}
+
+#[test]
+fn truncate_middle_with_marker_uses_exact_ascii_byte_budget() {
+    let input = "abcdefghijklmnopqrstuvwxyz0123456789";
+    let output = truncate_middle_with_marker(input, /*max_bytes*/ 32, "...");
+
+    assert_eq!(output, "abcdefghijklmn...vwxyz0123456789");
+    assert_eq!(output.len(), 32);
+}
+
+#[test]
+fn truncate_middle_with_marker_uses_utf8_boundaries_with_exact_byte_budget() {
+    let input = "ab😀cdefghijklmno😀";
+    let output = truncate_middle_with_marker(input, /*max_bytes*/ 18, "…");
+
+    assert_eq!(output, "ab😀c…lmno😀");
+    assert_eq!(output.len(), 18);
+}
+
+#[test]
+fn truncate_middle_with_marker_preserves_fitting_input_and_utf8_boundaries() {
+    assert_eq!(
+        truncate_middle_with_marker("aé", /*max_bytes*/ 3, "..."),
+        "aé"
+    );
+
+    let output = truncate_middle_with_marker("aé🙂z", /*max_bytes*/ 5, "...");
+    assert_eq!(output, "a...z");
+    assert_eq!(output.len(), 5);
+}
+
+#[test]
+fn truncate_middle_with_marker_falls_back_to_prefix_when_marker_is_too_large() {
+    assert_eq!(
+        truncate_middle_with_marker("aé🙂z", /*max_bytes*/ 2, "too long"),
+        "a"
+    );
+    assert_eq!(
+        truncate_middle_with_marker("anything", /*max_bytes*/ 0, "..."),
+        ""
+    );
+    assert_eq!(truncate_middle_with_marker("", /*max_bytes*/ 0, "..."), "");
 }
