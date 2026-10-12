@@ -7,11 +7,18 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  # This parent-level group intentionally differs from the reusable Bazel
+  # workflow's group, since github.workflow is inherited from the caller.
+  group: blocking-ci-parent::${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:
     name: Bazel
+    needs: [blob-size-policy, cargo-deny, codespell, repo-checks]
     uses: ./.github/workflows/bazel.yml
     secrets: inherit
 
@@ -37,11 +44,13 @@ jobs:
 
   rust-ci:
     name: rust-ci
+    needs: [blob-size-policy, cargo-deny, codespell, repo-checks]
     uses: ./.github/workflows/rust-ci.yml
     secrets: inherit
 
   sdk:
     name: sdk
+    needs: [blob-size-policy, cargo-deny, codespell, repo-checks]
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 /// One provider-neutral model request issued by the harness.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelRequest {
     /// Harness/developer instructions that apply to this request.
     pub instructions: String,
@@ -27,18 +27,6 @@ pub struct ModelRequest {
     pub parallel_tool_calls: bool,
     /// Desired model output shape.
     pub output: ModelOutputConfig,
-}
-
-impl Default for ModelRequest {
-    fn default() -> Self {
-        Self {
-            instructions: String::new(),
-            input: Vec::new(),
-            tools: Vec::new(),
-            parallel_tool_calls: false,
-            output: ModelOutputConfig::default(),
-        }
-    }
 }
 
 /// One durable request-side item in the provider-neutral model conversation.

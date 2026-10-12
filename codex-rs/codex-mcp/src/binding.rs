@@ -249,7 +249,7 @@ impl McpBinding {
         server: &str,
         uri: &str,
     ) -> Result<McpResourceReadResult> {
-        let params = crate::mcp::read_resource_request_params(uri, None);
+        let params = crate::mcp::read_resource_request_params(uri, /*connector_id*/ None);
         let result = self.read_resource(server, params).await?;
         let contents = result
             .contents

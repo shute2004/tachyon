@@ -248,7 +248,8 @@ impl McpResourceClient {
 
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
-        self.read_resource_with_connector(server, uri, None).await
+        self.read_resource_with_connector(server, uri, /*connector_id*/ None)
+            .await
     }
 
     /// Reads one resource from the named server with an optional connector scope.

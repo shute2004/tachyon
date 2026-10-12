@@ -576,7 +576,7 @@ fn completed_item_id(
 
 fn model_item_id(item: &ResponseItem) -> Option<ModelItemId> {
     item.id()
-        .map(|id| id.as_str())
+        .map(codex_protocol::ResponseItemId::as_str)
         .filter(|id| !id.is_empty())
         .map(|id| ModelItemId(id.to_string()))
 }

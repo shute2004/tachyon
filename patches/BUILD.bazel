@@ -7,6 +7,7 @@ exports_files([
     "rules_rust_build_script_tools_transition.patch",
     "rules_rust_windows_msvc_direct_link_args.patch",
     "rules_rust_windows_process_wrapper_skip_temp_outputs.patch",
+    "rules_rust_process_wrapper_param_file.patch",
     "rules_cc_rusty_v8_custom_libcxx.patch",
     "rules_rs_build_script_deps_annotation.patch",
     "rules_rs_windows_msvc_linker.patch",
