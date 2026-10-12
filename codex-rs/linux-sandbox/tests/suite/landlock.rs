@@ -23,6 +23,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+#[path = "denied_files_tests.rs"]
+mod denied_files_tests;
+
 // At least on GitHub CI, the arm64 tests appear to need longer timeouts.
 
 #[cfg(not(target_arch = "aarch64"))]
