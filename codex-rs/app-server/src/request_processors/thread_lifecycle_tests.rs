@@ -7,7 +7,6 @@ use crate::thread_state::ThreadStateManager;
 use crate::thread_status::ThreadWatchManager;
 use codex_analytics::AnalyticsEventsClient;
 use codex_core::StartThreadOptions;
-use codex_core::ThreadManager;
 use codex_exec_server::EnvironmentManager;
 use codex_login::CodexAuth;
 use std::collections::HashSet;
@@ -73,7 +72,8 @@ async fn connection_closed_during_thread_start_still_starts_listener() -> anyhow
             ConnectionId(1),
             /*raw_events_enabled*/ false,
         )
-        .await?,
+        .await
+        .expect("closed connection still installs a cleanup listener"),
         EnsureConversationListenerResult::ConnectionClosed
     ));
     let thread_state = thread_state_manager.thread_state(thread_id).await;
@@ -95,7 +95,8 @@ async fn connection_closed_during_thread_start_still_starts_listener() -> anyhow
             live_connection,
             /*raw_events_enabled*/ false,
         )
-        .await?,
+        .await
+        .expect("live connection attaches to the existing listener"),
         EnsureConversationListenerResult::Attached
     ));
     assert!(thread_state_manager.has_subscribers(thread_id).await);

@@ -1,8 +1,11 @@
+use std::future::Future;
 use std::future::pending;
 use std::future::ready;
 use std::io;
 use std::io::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use pretty_assertions::assert_eq;
 use tokio::sync::oneshot;
@@ -44,28 +47,41 @@ async fn stalled_open_does_not_block_other_opens_or_reads() {
 #[tokio::test]
 async fn pending_opens_are_bounded_before_the_open_future_is_polled() {
     let manager = FileReadHandleManager::default();
-    let mut pending_opens = (0..MAX_OPEN_FILE_READS)
-        .map(|index| {
-            Box::pin(manager.open(
-                format!("pending-{index}"),
-                pending::<io::Result<tokio::fs::File>>(),
-            ))
+    let mut pending_opens = Vec::with_capacity(MAX_OPEN_FILE_READS);
+    for index in 0..MAX_OPEN_FILE_READS {
+        let open_started = Arc::new(AtomicBool::new(false));
+        let open_started_by_future = Arc::clone(&open_started);
+        let mut open = Box::pin(manager.open(format!("pending-{index}"), async move {
+            open_started_by_future.store(true, Ordering::SeqCst);
+            pending::<io::Result<tokio::fs::File>>().await
+        }));
+        futures::future::poll_fn(|cx| match open.as_mut().poll(cx) {
+            std::task::Poll::Pending if open_started.load(Ordering::SeqCst) => {
+                std::task::Poll::Ready(())
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(_) => {
+                panic!("open completed before its inner open future was polled")
+            }
         })
-        .collect::<Vec<_>>();
-    for open in &mut pending_opens {
-        assert!(futures::poll!(open.as_mut()).is_pending());
+        .await;
+        pending_opens.push(open);
     }
 
-    let mut overflow = Box::pin(manager.open(
-        "overflow".to_string(),
-        pending::<io::Result<tokio::fs::File>>(),
-    ));
-    assert!(matches!(
-        futures::poll!(overflow.as_mut()),
-        std::task::Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
-    ));
+    let overflow_polled = Arc::new(AtomicBool::new(false));
+    let overflow_polled_by_future = Arc::clone(&overflow_polled);
+    let error = manager
+        .open("overflow".to_string(), async move {
+            overflow_polled_by_future.store(true, Ordering::SeqCst);
+            Err(io::Error::other(
+                "overflow open future should not be polled",
+            ))
+        })
+        .await
+        .expect_err("overflow should be rejected before polling its open future");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(!overflow_polled.load(Ordering::SeqCst));
 
-    drop(overflow);
     drop(pending_opens);
 }
 

@@ -43,7 +43,7 @@ mod tests {
                 }],
             });
         let history_item: HistoryItem = model_item.clone();
-        let _: tachyon_model::ModelInputItem = history_item.clone();
+        let _: &tachyon_model::ModelInputItem = &history_item;
         assert_eq!(history_item, model_item);
         let HistoryItem::Message(message) = history_item else {
             panic!("expected the aliased canonical message type");
