@@ -2,6 +2,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::context_manager::history_record::StoredHistoryRecord;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
@@ -39,6 +40,7 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -48,7 +50,7 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
     /// Primary chronological history storage and its copy-on-write revision snapshots.
-    history: HistoryTimeline<ResponseItemEnvelope>,
+    history: HistoryTimeline<StoredHistoryRecord>,
     token_info: Option<TokenUsageInfo>,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
@@ -66,7 +68,7 @@ pub(crate) struct ContextManager {
 }
 
 struct SharedConversationHistory {
-    history: HistoryTimeline<ResponseItemEnvelope>,
+    history: HistoryTimeline<StoredHistoryRecord>,
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
@@ -78,15 +80,15 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
         self.history.user_message_revision()
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+    fn items(&self) -> Box<dyn Iterator<Item = Cow<'_, ResponseItem>> + Send + '_> {
         Box::new(
             self.history
                 .items()
                 .iter()
-                .map(|envelope| &envelope.item)
+                .map(StoredHistoryRecord::response_item)
                 .filter(|item| {
                     !matches!(
-                        item,
+                        item.as_ref(),
                         ResponseItem::Message { role, content, .. }
                             if role == "user" && is_contextual_user_message_content(content)
                     )
@@ -214,7 +216,8 @@ impl ContextManager {
             } else {
                 HistoryAppendKind::Ordinary
             };
-            self.history.record(processed, kind);
+            self.history
+                .record(StoredHistoryRecord::from_response_envelope(processed), kind);
         }
     }
 
@@ -234,19 +237,26 @@ impl ContextManager {
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
-        self.history.into_items()
+        self.into_annotated_items()
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
     pub(crate) fn raw_items(
         &self,
-    ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
-        self.history.items().iter().map(|envelope| &envelope.item)
+    ) -> impl Clone + ExactSizeIterator<Item = Cow<'_, ResponseItem>> + DoubleEndedIterator {
+        self.history
+            .items()
+            .iter()
+            .map(StoredHistoryRecord::response_item)
     }
 
-    /// Returns annotated history items without cloning their response payloads.
-    pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
-        self.history.items()
+    /// Reconstructs annotated compatibility items without maintaining a secondary cache.
+    pub(crate) fn annotated_items(&self) -> Vec<ResponseItemEnvelope> {
+        self.history
+            .items()
+            .iter()
+            .map(StoredHistoryRecord::response_envelope)
+            .collect()
     }
 
     /// Returns raw items in the history and consumes the snapshot.
@@ -259,7 +269,11 @@ impl ContextManager {
 
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
-        self.history.into_items()
+        self.history
+            .into_items()
+            .into_iter()
+            .map(StoredHistoryRecord::into_response_envelope)
+            .collect()
     }
 
     pub(crate) fn history_version(&self) -> u64 {
@@ -291,7 +305,7 @@ impl ContextManager {
             .history
             .items()
             .iter()
-            .map(|envelope| estimate_item_token_count(&envelope.item))
+            .map(|record| estimate_item_token_count(record.response_item().as_ref()))
             .fold(0i64, i64::saturating_add);
 
         Some(base_tokens.saturating_add(items_tokens))
@@ -301,12 +315,18 @@ impl ContextManager {
         if !self.history.items().is_empty() {
             // Remove the oldest item (front of the list). Items are ordered from
             // oldest → newest, so index 0 is the first entry recorded.
-            let items = self.history.items_mut();
+            let mut items = self.annotated_items();
             let removed = items.remove(0);
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(items, &removed.item);
+            normalize::remove_corresponding_for(&mut items, &removed.item);
+            self.history.update_items(
+                items
+                    .into_iter()
+                    .map(StoredHistoryRecord::from_response_envelope)
+                    .collect(),
+            );
             self.world_state_baseline = None;
         }
     }
@@ -317,13 +337,25 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.history.replace(items, HistoryReplacement::Reset);
+        self.history.replace(
+            items
+                .into_iter()
+                .map(StoredHistoryRecord::from_response_envelope)
+                .collect(),
+            HistoryReplacement::Reset,
+        );
         self.world_state_baseline = None;
     }
 
     /// Compaction changes the model's history without changing the user's authorization.
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.history.replace(items, HistoryReplacement::Compaction);
+        self.history.replace(
+            items
+                .into_iter()
+                .map(StoredHistoryRecord::from_response_envelope)
+                .collect(),
+            HistoryReplacement::Compaction,
+        );
         self.world_state_baseline = None;
     }
 
@@ -349,9 +381,14 @@ impl ContextManager {
         }
 
         let snapshot = self.history.clone();
-        let user_positions = user_message_positions(snapshot.items());
+        let snapshot_items = snapshot
+            .items()
+            .iter()
+            .map(StoredHistoryRecord::response_envelope)
+            .collect::<Vec<_>>();
+        let user_positions = user_message_positions(&snapshot_items);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace_annotated(snapshot.into_items());
+            self.replace_annotated(snapshot_items);
             return;
         };
 
@@ -363,14 +400,14 @@ impl ContextManager {
         };
 
         cut_idx = self.trim_pre_turn_context_updates(
-            snapshot.items(),
+            &snapshot_items,
             first_instruction_turn_idx,
             cut_idx,
         );
 
-        let mut retained_items = snapshot.items()[..cut_idx].to_vec();
+        let mut retained_items = snapshot_items[..cut_idx].to_vec();
         if cut_idx == first_instruction_turn_idx
-            && let Some(first_turn_id) = snapshot.items()[first_instruction_turn_idx].turn_id()
+            && let Some(first_turn_id) = snapshot_items[first_instruction_turn_idx].turn_id()
         {
             retained_items.retain_mut(|item| {
                 if item.turn_id() == Some(first_turn_id)
@@ -414,7 +451,7 @@ impl ContextManager {
             .history
             .items()
             .iter()
-            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
+            .rposition(|record| is_user_turn_boundary(record.response_item().as_ref()))
         else {
             return 0;
         };
@@ -423,16 +460,16 @@ impl ContextManager {
             .items()
             .iter()
             .take(last_user_index)
-            .filter(|envelope| {
+            .filter(|record| {
                 matches!(
-                    &envelope.item,
+                    record.response_item().as_ref(),
                     ResponseItem::Reasoning {
                         encrypted_content: Some(_),
                         ..
                     }
                 )
             })
-            .map(|envelope| estimate_item_token_count(&envelope.item))
+            .map(|record| estimate_item_token_count(record.response_item().as_ref()))
             .fold(0i64, i64::saturating_add)
     }
 
@@ -440,16 +477,16 @@ impl ContextManager {
     // They are not reflected in `last_token_usage.total_tokens`.
     fn items_after_last_model_generated_item(
         &self,
-    ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
+    ) -> impl Clone + ExactSizeIterator<Item = Cow<'_, ResponseItem>> + DoubleEndedIterator {
         let start = self
             .history
             .items()
             .iter()
-            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .rposition(|record| is_model_generated_item(record.response_item().as_ref()))
             .map_or(self.history.items().len(), |index| index.saturating_add(1));
         self.history.items()[start..]
             .iter()
-            .map(|envelope| &envelope.item)
+            .map(StoredHistoryRecord::response_item)
     }
 
     /// When true, the server already accounted for past reasoning tokens and
@@ -462,7 +499,7 @@ impl ContextManager {
             .unwrap_or(0);
         let items_after_last_model_generated_tokens = self
             .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add);
         if server_reasoning_included {
             last_tokens.saturating_add(items_after_last_model_generated_tokens)
@@ -475,7 +512,7 @@ impl ContextManager {
 
     pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
         self.items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add)
     }
 
@@ -484,19 +521,26 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry or names an external tool event
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
-        let items = self.history.items_mut();
+        let mut items = self.annotated_items();
 
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(items);
+        normalize::ensure_call_outputs_present(&mut items);
 
         // Paired outputs must have a corresponding call; named external outputs stand alone.
-        normalize::remove_orphan_outputs(items);
+        normalize::remove_orphan_outputs(&mut items);
 
         // strip images when model does not support them
-        normalize::strip_images_when_unsupported(input_modalities, items);
+        normalize::strip_images_when_unsupported(input_modalities, &mut items);
 
         // strip audio when model does not support it
-        normalize::strip_audio_when_unsupported(input_modalities, items);
+        normalize::strip_audio_when_unsupported(input_modalities, &mut items);
+
+        self.history.update_items(
+            items
+                .into_iter()
+                .map(StoredHistoryRecord::from_response_envelope)
+                .collect(),
+        );
     }
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.

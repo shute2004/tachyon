@@ -41,37 +41,39 @@ impl AgentControl {
             .get::<GuardianReviewEvidence>();
         let mut messages = root_history
             .raw_items()
-            .filter_map(|item| match (parse_turn_item(item), item) {
-                (Some(TurnItem::UserMessage(message)), _) => {
-                    let message = message.message();
-                    (!is_summary_message(&message)
-                        && !message.trim_start().starts_with("<user_action>"))
-                    .then(|| {
-                        GuardianRootMessage::User(
-                            guardian_truncate_text(&message, MAX_ROOT_MESSAGE_TOKENS).0,
-                        )
-                    })
-                }
-                (Some(TurnItem::AgentMessage(message)), _)
-                    if matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) =>
-                {
-                    let text = message
-                        .content
-                        .iter()
-                        .map(|content| match content {
-                            AgentMessageContent::Text { text } => text.as_str(),
+            .filter_map(
+                |item| match (parse_turn_item(item.as_ref()), item.as_ref()) {
+                    (Some(TurnItem::UserMessage(message)), _) => {
+                        let message = message.message();
+                        (!is_summary_message(&message)
+                            && !message.trim_start().starts_with("<user_action>"))
+                        .then(|| {
+                            GuardianRootMessage::User(
+                                guardian_truncate_text(&message, MAX_ROOT_MESSAGE_TOKENS).0,
+                            )
                         })
-                        .collect::<String>();
-                    Some(GuardianRootMessage::Assistant(
-                        guardian_truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS).0,
-                    ))
-                }
-                (_, ResponseItem::FunctionCall { call_id, .. }) => root_evidence
-                    .as_ref()
-                    .and_then(|evidence| evidence.user_input_for_call(call_id))
-                    .map(GuardianRootMessage::UserInput),
-                _ => None,
-            })
+                    }
+                    (Some(TurnItem::AgentMessage(message)), _)
+                        if matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) =>
+                    {
+                        let text = message
+                            .content
+                            .iter()
+                            .map(|content| match content {
+                                AgentMessageContent::Text { text } => text.as_str(),
+                            })
+                            .collect::<String>();
+                        Some(GuardianRootMessage::Assistant(
+                            guardian_truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS).0,
+                        ))
+                    }
+                    (_, ResponseItem::FunctionCall { call_id, .. }) => root_evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.user_input_for_call(call_id))
+                        .map(GuardianRootMessage::UserInput),
+                    _ => None,
+                },
+            )
             .collect::<Vec<_>>();
         messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
         let history = root_history.conversation_history_snapshot();

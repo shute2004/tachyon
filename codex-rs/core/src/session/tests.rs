@@ -203,6 +203,7 @@ use codex_protocol::mcp::CallToolResult as McpCallToolResult;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -714,7 +715,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
 }
 
 pub(super) fn raw_history_items(history: &ContextManager) -> Vec<ResponseItem> {
-    history.raw_items().cloned().collect()
+    history.raw_items().map(Cow::into_owned).collect()
 }
 
 fn raw_envelopes(items: &[ResponseItemEnvelope]) -> Vec<ResponseItem> {
@@ -2520,6 +2521,7 @@ async fn prepares_image_failures_before_history_insertion() {
         .next()
         .expect("history should contain one item")
         .id()
+        .cloned()
         .expect("history item should have an ID");
     let uuid = id
         .strip_prefix("fco_")
@@ -3424,7 +3426,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     });
     assert_eq!(
         persisted_replacement_history.cloned(),
-        Some(live_history.annotated_items().to_vec())
+        Some(live_history.annotated_items())
     );
 }
 
@@ -9871,7 +9873,11 @@ async fn record_context_update_items(
         .await
         .expect("world state should build");
     let history = session.clone_history().await;
-    history.raw_items().skip(previous_len).cloned().collect()
+    history
+        .raw_items()
+        .skip(previous_len)
+        .map(Cow::into_owned)
+        .collect()
 }
 
 #[tokio::test]
@@ -11812,7 +11818,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     // Verify the `<turn_aborted>` marker is still recorded in history for the model.
     assert!(
         history.raw_items().any(|item| {
-            let ResponseItem::Message { role, content, .. } = item else {
+            let ResponseItem::Message { role, content, .. } = item.as_ref() else {
                 return false;
             };
             if role != "user" {

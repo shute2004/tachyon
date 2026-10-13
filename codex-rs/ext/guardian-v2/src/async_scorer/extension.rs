@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -613,7 +614,7 @@ impl GuardianV2Extension {
                 .items()
                 .filter(|item| {
                     matches!(
-                        item,
+                        item.as_ref(),
                         ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
                     )
                 })
@@ -621,14 +622,14 @@ impl GuardianV2Extension {
         } else {
             None
         };
-        let parent_compaction = latest_parent_compaction.and_then(|item| {
+        let parent_compaction = latest_parent_compaction.as_ref().and_then(|item| {
             encrypted_parent_compaction(
-                std::iter::once(item),
+                std::iter::once(item.as_ref()),
                 guardian_config.max_parent_compaction_tokens,
             )
         });
         if parent_compaction.is_none()
-            && latest_parent_compaction.is_some_and(|item| match item {
+            && latest_parent_compaction.is_some_and(|item| match item.as_ref() {
                 ResponseItem::Compaction {
                     id: Some(_),
                     encrypted_content,
@@ -692,13 +693,17 @@ impl GuardianV2Extension {
             };
             let trusted_user_inputs =
                 guardian_evidence.user_input_fragments(conversation_history.as_ref());
+            let compatibility_history = conversation_history
+                .items()
+                .map(Cow::into_owned)
+                .collect::<Vec<_>>();
             let transcript = guardian_config
                 .transcript
-                .build(conversation_history.items());
+                .build(compatibility_history.iter());
             truncations.extend(transcript.truncations);
             let rendered_images = guardian_config
                 .transcript
-                .images(conversation_history.items(), node_repl_images);
+                .images(compatibility_history.iter(), node_repl_images);
             truncations.record(
                 "transcript_image",
                 rendered_images.omitted_bytes,

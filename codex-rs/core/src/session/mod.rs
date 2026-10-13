@@ -1507,12 +1507,18 @@ impl Session {
             && turn_context.config.memories.disable_on_external_context
         {
             let history = self.clone_history().await;
-            if let Some(item) = history
-                .raw_items()
-                .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
-            {
-                mark_thread_memory_mode_polluted_if_external_context(self, &turn_context, item)
-                    .await;
+            if let Some(item) = history.raw_items().find(|item| {
+                matches!(
+                    item.as_ref(),
+                    ResponseItem::FunctionCallOutput { call_id: None, .. }
+                )
+            }) {
+                mark_thread_memory_mode_polluted_if_external_context(
+                    self,
+                    &turn_context,
+                    item.as_ref(),
+                )
+                .await;
             }
         }
     }
@@ -3977,11 +3983,10 @@ impl Session {
                 crate::compact_remote_v2::truncate_retained_messages_for_remote_compaction(
                     history
                         .annotated_items()
-                        .iter()
+                        .into_iter()
                         .filter(|item| {
                             crate::compact_remote_v2::is_client_authored_developer_message(item)
                         })
-                        .cloned()
                         .collect(),
                     crate::compact_remote_v2::RETAINED_MESSAGE_TOKEN_BUDGET,
                 )

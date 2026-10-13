@@ -41,6 +41,7 @@ use image::Luma;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
+use std::borrow::Cow;
 use test_case::test_case;
 
 const EXEC_FORMAT_MAX_BYTES: usize = 10_000;
@@ -118,25 +119,35 @@ fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
 }
 
 fn raw_items(history: &ContextManager) -> Vec<ResponseItem> {
-    history.raw_items().cloned().collect()
+    history.raw_items().map(Cow::into_owned).collect()
 }
 
 #[test]
-fn conversation_history_snapshot_shares_response_items_until_history_changes() {
+fn conversation_history_snapshot_keeps_old_content_until_history_changes() {
     let mut history = create_history_with_items(vec![assistant_msg("original")]);
+    let timeline_snapshot = history.clone();
     let snapshot = history.conversation_history_snapshot();
 
-    let original = history.raw_items().next().expect("original history item");
-    let shared = snapshot.items().next().expect("shared snapshot item");
-    assert!(std::ptr::eq(original, shared));
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        timeline_snapshot.history.items().as_ptr()
+    ));
+    assert!(matches!(
+        snapshot.items().next(),
+        Some(Cow::Owned(item)) if item == assistant_msg("original")
+    ));
 
     history.record_items(
         std::iter::once(&assistant_msg("later")),
         TruncationPolicy::Tokens(10_000),
     );
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        timeline_snapshot.history.items().as_ptr()
+    ));
 
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![assistant_msg("original")],
     );
     assert_eq!(
@@ -198,11 +209,11 @@ fn context_manager_timeline_owns_history_and_revision_transitions() {
     assert_eq!(rolled_back.history_version(), 3);
     assert_eq!(rolled_back.user_message_revision(), 4);
     assert_eq!(
-        rolled_back.items().cloned().collect::<Vec<_>>(),
+        rolled_back.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![assistant_msg("reset")]
     );
     assert_eq!(
-        reset.items().cloned().collect::<Vec<_>>(),
+        reset.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![assistant_msg("reset")]
     );
 }
@@ -227,7 +238,7 @@ fn conversation_history_snapshot_excludes_contextual_user_messages() {
     let snapshot = history.conversation_history_snapshot();
 
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![user_message, assistant_message, developer_message],
     );
 }
@@ -541,15 +552,15 @@ fn for_prompt_preserves_inter_agent_assistant_messages() {
 }
 
 #[test]
-fn cloned_history_shares_items_until_mutated() {
+fn cloned_history_shares_primary_timeline_until_mutated() {
     let first = assistant_msg(&"first ".repeat(1_024));
     let second = assistant_msg("second");
     let history = create_history_with_items(vec![first.clone()]);
     let mut snapshot = history.clone();
 
     assert!(std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
     ));
 
     snapshot.record_items(
@@ -558,8 +569,8 @@ fn cloned_history_shares_items_until_mutated() {
     );
 
     assert!(!std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
     ));
     assert_eq!(raw_items(&history), std::slice::from_ref(&first));
     assert_eq!(raw_items(&snapshot), &[first, second]);
@@ -576,11 +587,140 @@ fn annotated_history_apis_preserve_envelopes() {
 
     history.replace_annotated(vec![first_envelope.clone()]);
 
-    assert_eq!(
-        history.annotated_items(),
-        std::slice::from_ref(&first_envelope)
-    );
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items, vec![first_envelope]);
     assert_eq!(history.into_raw_items(), vec![first_item]);
+}
+
+#[test]
+fn mixed_primary_history_preserves_canonical_and_opaque_projections_across_mutations() {
+    let known_message = user_msg("known-role input");
+    let opaque_reasoning = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque encrypted reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: known_message.clone(),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(41),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning.clone(),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(42),
+                ..Default::default()
+            }),
+        },
+    ];
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+
+    {
+        let mut raw_items = history.raw_items();
+        assert!(matches!(
+            raw_items.next(),
+            Some(Cow::Owned(item)) if item == known_message
+        ));
+        assert!(matches!(
+            raw_items.next(),
+            Some(Cow::Borrowed(item)) if item == &opaque_reasoning
+        ));
+        assert!(raw_items.next().is_none());
+    }
+
+    let snapshot = history.conversation_history_snapshot();
+    let frozen_history = history.clone();
+    let frozen_revisions = (snapshot.history_version(), snapshot.user_message_revision());
+    let frozen_items = vec![known_message.clone(), opaque_reasoning.clone()];
+    assert_eq!(frozen_revisions, (0, 1));
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen_history.history.items().as_ptr()
+    ));
+    assert_eq!(frozen_history.annotated_items(), original_envelopes);
+    let mut snapshot_items = snapshot.items();
+    assert!(matches!(
+        snapshot_items.next(),
+        Some(Cow::Owned(item)) if item == known_message
+    ));
+    assert!(matches!(
+        snapshot_items.next(),
+        Some(Cow::Borrowed(item)) if item == &opaque_reasoning
+    ));
+
+    let assert_snapshot_unchanged = || {
+        assert_eq!(
+            (snapshot.history_version(), snapshot.user_message_revision()),
+            frozen_revisions
+        );
+        assert_eq!(
+            snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
+            frozen_items
+        );
+        assert_eq!(frozen_history.annotated_items(), original_envelopes);
+    };
+
+    let appended_envelope = ResponseItemEnvelope {
+        item: assistant_msg("appended response"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(43),
+            ..Default::default()
+        }),
+    };
+    history.record_annotated_items(
+        std::slice::from_ref(&appended_envelope),
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(history.history.history_version(), 0);
+    assert_eq!(history.history.user_message_revision(), 1);
+    let mut after_append = original_envelopes.clone();
+    after_append.push(appended_envelope);
+    assert_eq!(history.annotated_items(), after_append);
+    assert_snapshot_unchanged();
+
+    let compacted_prefix = ResponseItemEnvelope {
+        item: assistant_msg("surviving prefix"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(44),
+            ..Default::default()
+        }),
+    };
+    let compacted_user = ResponseItemEnvelope {
+        item: user_msg("compacted user turn"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(45),
+            ..Default::default()
+        }),
+    };
+    let compacted_reasoning = ResponseItemEnvelope {
+        item: opaque_reasoning,
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(46),
+            ..Default::default()
+        }),
+    };
+    let compacted_envelopes = vec![
+        compacted_prefix.clone(),
+        compacted_user,
+        compacted_reasoning,
+    ];
+    history.replace_compacted(compacted_envelopes.clone());
+    assert_eq!(history.history.history_version(), 1);
+    assert_eq!(history.history.user_message_revision(), 1);
+    assert_eq!(history.annotated_items(), compacted_envelopes);
+    assert_snapshot_unchanged();
+
+    history.drop_last_n_user_turns(1);
+    assert_eq!(history.history.history_version(), 2);
+    assert_eq!(history.history.user_message_revision(), 2);
+    assert_eq!(history.annotated_items(), vec![compacted_prefix]);
+    assert_snapshot_unchanged();
 }
 
 #[test_case(None, 100, 5, true; "model policy")]
@@ -614,13 +754,14 @@ fn record_annotated_items_preserves_metadata_while_processing_item(
 
     history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
 
-    assert_eq!(history.annotated_items().len(), 1);
-    assert_eq!(history.annotated_items()[0].metadata, envelope.metadata);
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    assert_eq!(annotated_items[0].metadata, envelope.metadata);
     assert_eq!(
-        history.annotated_items()[0].item != envelope.item,
+        annotated_items[0].item != envelope.item,
         expected_truncation
     );
-    let ResponseItem::FunctionCallOutput { output, .. } = &history.annotated_items()[0].item else {
+    let ResponseItem::FunctionCallOutput { output, .. } = &annotated_items[0].item else {
         panic!("expected function call output");
     };
     assert_eq!(
@@ -1532,8 +1673,9 @@ fn record_items_truncates_function_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.annotated_items().len(), 1);
-    match &history.annotated_items()[0].item {
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    match &annotated_items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => {
             let content = output.text_content().unwrap_or_default();
             assert_ne!(content, long_output);
@@ -1548,7 +1690,7 @@ fn record_items_truncates_function_call_output_content() {
         }
         other => panic!("unexpected history item: {other:?}"),
     }
-    assert_eq!(history.annotated_items()[0].turn_id(), Some("turn-1"));
+    assert_eq!(annotated_items[0].turn_id(), Some("turn-1"));
 }
 
 #[test]
@@ -1567,8 +1709,9 @@ fn record_items_truncates_custom_tool_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.annotated_items().len(), 1);
-    match &history.annotated_items()[0].item {
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    match &annotated_items[0].item {
         ResponseItem::CustomToolCallOutput { output, .. } => {
             let output = output.text_content().unwrap_or_default();
             assert_ne!(output, long_output);
@@ -1604,7 +1747,8 @@ fn record_items_respects_custom_token_limit() {
 
     history.record_items([&item], policy);
 
-    let stored = match &history.annotated_items()[0].item {
+    let annotated_items = history.annotated_items();
+    let stored = match &annotated_items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => output,
         other => panic!("unexpected history item: {other:?}"),
     };

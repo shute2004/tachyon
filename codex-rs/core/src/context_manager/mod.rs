@@ -1,5 +1,6 @@
 mod history;
 mod history_item;
+mod history_record;
 mod normalize;
 pub(crate) mod updates;
 

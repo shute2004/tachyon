@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use codex_protocol::mcp::is_node_repl_backed_tool;
@@ -521,9 +522,11 @@ fn render_guardian_transcript_entries_with_offset(
 /// Keep both tool calls and tool results here. The reviewer often needs the
 /// agent's exact queried path / arguments as well as the returned evidence to
 /// decide whether the pending approval is justified.
-pub(crate) fn collect_guardian_transcript_entries<'a>(
-    items: impl IntoIterator<Item = &'a ResponseItem>,
-) -> Vec<GuardianTranscriptEntry> {
+pub(crate) fn collect_guardian_transcript_entries<I>(items: I) -> Vec<GuardianTranscriptEntry>
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     let mut entries = Vec::new();
     let mut tool_names_by_call_id = HashMap::new();
     let non_empty_entry = |kind, text: String| {
@@ -535,6 +538,7 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
         |kind, serialized: Option<String>| serialized.and_then(|text| non_empty_entry(kind, text));
 
     for item in items {
+        let item = item.borrow();
         let entry = match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
                 if is_contextual_user_message_content(content) {
@@ -575,8 +579,7 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
                 arguments,
                 ..
             } => {
-                tool_names_by_call_id
-                    .insert(call_id.as_str(), (name.as_str(), namespace.as_deref()));
+                tool_names_by_call_id.insert(call_id.clone(), (name.clone(), namespace.clone()));
                 (!arguments.trim().is_empty()).then(|| GuardianTranscriptEntry {
                     kind: GuardianTranscriptEntryKind::Tool(format!("tool {name} call")),
                     text: arguments.clone(),
@@ -589,8 +592,7 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
                 input,
                 ..
             } => {
-                tool_names_by_call_id
-                    .insert(call_id.as_str(), (name.as_str(), namespace.as_deref()));
+                tool_names_by_call_id.insert(call_id.clone(), (name.clone(), namespace.clone()));
                 (!input.trim().is_empty()).then(|| GuardianTranscriptEntry {
                     kind: GuardianTranscriptEntryKind::Tool(format!("tool {name} call")),
                     text: input.clone(),
@@ -611,7 +613,9 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
                 call_id, output, ..
             } => output.body.to_text().and_then(|text| {
                 let kind = match tool_names_by_call_id.get(call_id.as_str()) {
-                    Some((name, namespace)) if is_node_repl_backed_tool(name, *namespace) => {
+                    Some((name, namespace))
+                        if is_node_repl_backed_tool(name, namespace.as_deref()) =>
+                    {
                         GuardianTranscriptEntryKind::NodeReplToolResult(format!(
                             "tool {name} result"
                         ))

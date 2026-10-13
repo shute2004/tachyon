@@ -86,6 +86,15 @@ impl<T> HistoryTimeline<T> {
         }
     }
 
+    /// Update stored items without classifying the change as a history replacement.
+    ///
+    /// This is for normalization and paired-removal paths that transform existing records. It
+    /// does not represent a reset or compaction and makes no input-trust or authentication
+    /// decision.
+    pub fn update_items(&mut self, items: Vec<T>) {
+        self.items = Arc::new(items);
+    }
+
     /// Mutable access for existing normalization/removal paths.
     ///
     /// Mutating through this lane does not automatically alter either revision.

@@ -415,7 +415,7 @@ mod tests {
                 .raw_items()
                 .next()
                 .expect("history item")
-                .clone(),
+                .into_owned(),
         );
         let raw_history_event = rx.recv().await.expect("history raw response item event");
         let EventMsg::RawResponseItem(raw_history_item) = raw_history_event.msg else {

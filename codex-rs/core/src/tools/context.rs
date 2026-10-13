@@ -93,7 +93,7 @@ impl ToolInvocation {
             .await
             .raw_items()
             .rev()
-            .find_map(|item| match item {
+            .find_map(|item| match item.as_ref() {
                 ResponseItem::FunctionCall { id, call_id, .. }
                 | ResponseItem::CustomToolCall { id, call_id, .. }
                     if call_id == &self.call_id =>

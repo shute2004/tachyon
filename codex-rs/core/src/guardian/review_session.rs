@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -269,29 +270,31 @@ impl GuardianReviewSessionReuseKey {
     }
 }
 
-fn encrypted_parent_compaction<'a, I>(items: I) -> Option<ResponseItem>
+fn encrypted_parent_compaction<I>(items: I) -> Option<ResponseItem>
 where
-    I: IntoIterator<Item = &'a ResponseItem>,
+    I: IntoIterator,
     I::IntoIter: DoubleEndedIterator,
+    I::Item: Borrow<ResponseItem>,
 {
-    let item = items.into_iter().rev().find(|item| {
-        matches!(
-            item,
+    let item = items.into_iter().rev().find_map(|item| {
+        let is_compaction = matches!(
+            item.borrow(),
             ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-        )
+        );
+        is_compaction.then_some(item)
     })?;
 
-    match item {
+    match item.borrow() {
         ResponseItem::Compaction {
             id: Some(_),
             encrypted_content,
             ..
-        } if !encrypted_content.is_empty() => Some(item.clone()),
+        } if !encrypted_content.is_empty() => Some(item.borrow().clone()),
         ResponseItem::ContextCompaction {
             id: Some(_),
             encrypted_content: Some(encrypted_content),
             ..
-        } if !encrypted_content.is_empty() => Some(item.clone()),
+        } if !encrypted_content.is_empty() => Some(item.borrow().clone()),
         _ => None,
     }
 }
@@ -1005,7 +1008,7 @@ async fn run_review_on_session(
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "user" && content.iter().any(|content| {
                 matches!(content, ContentItem::InputText { text }
                     if text == GUARDIAN_TRANSCRIPT_START)
@@ -1057,13 +1060,17 @@ async fn run_review_on_session(
                 let reviewer_history = review_session.session.clone_history().await;
                 let reviewer_image_urls = reviewer_history
                     .raw_items()
-                    .flat_map(|item| match item {
-                        ResponseItem::Message { content, .. } => content.as_slice(),
-                        _ => &[],
-                    })
-                    .filter_map(|item| match item {
-                        ContentItem::InputImage { image_url, .. } => Some(image_url.as_str()),
-                        _ => None,
+                    .flat_map(|item| match item.as_ref() {
+                        ResponseItem::Message { content, .. } => content
+                            .iter()
+                            .filter_map(|item| match item {
+                                ContentItem::InputImage { image_url, .. } => {
+                                    Some(image_url.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
                     })
                     .collect::<HashSet<_>>();
                 let context_window = model_info.resolved_context_window().map(|supported| {
@@ -1292,7 +1299,7 @@ async fn ensure_guardian_followup_reminder(review_session: &GuardianReviewSessio
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "developer"
                 && content.iter().any(|content| {
                     matches!(content, ContentItem::InputText { text }
@@ -1336,7 +1343,7 @@ async fn ensure_guardian_node_repl_policy(
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "developer"
                 && content.iter().any(|content| {
                     matches!(content, ContentItem::InputText { text } if text == &policy_body)

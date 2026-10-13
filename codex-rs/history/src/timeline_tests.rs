@@ -23,6 +23,15 @@ fn history_timeline_clone_and_default_do_not_require_item_traits() {
     let timeline: HistoryTimeline<NonCloneNonDefault> = HistoryTimeline::default();
     let snapshot = timeline.clone();
 
+    assert!(std::ptr::eq(
+        timeline.items().as_ptr(),
+        snapshot.items().as_ptr()
+    ));
+    assert_eq!(timeline.history_version(), snapshot.history_version());
+    assert_eq!(
+        timeline.user_message_revision(),
+        snapshot.user_message_revision()
+    );
     assert!(snapshot.items().is_empty());
     assert_eq!(snapshot.history_version(), 0);
     assert_eq!(snapshot.user_message_revision(), 0);
@@ -64,6 +73,47 @@ fn history_timeline_tracks_append_replacement_and_snapshot_revisions() {
     assert_eq!(before_mutation.items(), &["reset"][..]);
     assert_eq!(timeline.history_version(), 2);
     assert_eq!(timeline.user_message_revision(), 2);
+}
+
+#[test]
+fn history_timeline_update_items_preserves_revisions_and_snapshots() {
+    let mut timeline = HistoryTimeline::default();
+    timeline.record("ordinary", HistoryAppendKind::Ordinary);
+    timeline.record("user", HistoryAppendKind::UserInput);
+    timeline.replace(vec!["compacted"], HistoryReplacement::Compaction);
+    timeline.replace(vec!["before-reset", "reset"], HistoryReplacement::Reset);
+
+    let before_update = timeline.clone();
+    assert_eq!(timeline.history_version(), 2);
+    assert_eq!(timeline.user_message_revision(), 2);
+
+    timeline.update_items(vec!["normalized-oldest", "normalized-newest"]);
+
+    assert_eq!(
+        timeline.items(),
+        &["normalized-oldest", "normalized-newest"]
+    );
+    assert_eq!(timeline.history_version(), 2);
+    assert_eq!(timeline.user_message_revision(), 2);
+    assert_eq!(before_update.items(), &["before-reset", "reset"]);
+    assert_eq!(before_update.history_version(), 2);
+    assert_eq!(before_update.user_message_revision(), 2);
+
+    let before_empty_update = timeline.clone();
+    timeline.update_items(Vec::new());
+
+    assert!(timeline.items().is_empty());
+    assert_eq!(timeline.history_version(), 2);
+    assert_eq!(timeline.user_message_revision(), 2);
+    assert_eq!(before_update.items(), &["before-reset", "reset"]);
+    assert_eq!(before_update.history_version(), 2);
+    assert_eq!(before_update.user_message_revision(), 2);
+    assert_eq!(
+        before_empty_update.items(),
+        &["normalized-oldest", "normalized-newest"]
+    );
+    assert_eq!(before_empty_update.history_version(), 2);
+    assert_eq!(before_empty_update.user_message_revision(), 2);
 }
 
 #[test]
