@@ -233,8 +233,6 @@ impl ChatWidget {
 
         let allow_unelevated =
             self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated);
-        let setup_choice_is_required =
-            !allow_unelevated || self.elevated_windows_sandbox_setup_required();
         let mut header = ColumnRenderable::new();
         header.push(*Box::new(
             Paragraph::new(if allow_unelevated {
@@ -251,9 +249,6 @@ impl ChatWidget {
         ));
 
         let accept_otel = self.session_telemetry.clone();
-        let legacy_otel = self.session_telemetry.clone();
-        let legacy_preset = preset.clone();
-        let legacy_profile_selection = profile_selection.clone();
         let quit_otel = self.session_telemetry.clone();
         let retry_preset = preset.clone();
         let retry_profile_selection = profile_selection.clone();
@@ -274,26 +269,6 @@ impl ChatWidget {
             dismiss_on_select: true,
             ..Default::default()
         }];
-        if allow_unelevated {
-            items.push(SelectionItem {
-                name: "Use non-admin sandbox (higher risk if prompt injected)".to_string(),
-                description: None,
-                actions: vec![Box::new(move |tx| {
-                    legacy_otel.counter(
-                        "codex.windows_sandbox.elevated_prompt_use_legacy",
-                        /*inc*/ 1,
-                        &[],
-                    );
-                    tx.send(AppEvent::BeginWindowsSandboxLegacySetup {
-                        preset: legacy_preset.clone(),
-                        profile_selection: legacy_profile_selection.clone(),
-                    });
-                })],
-                dismiss_on_select: true,
-                require_explicit_confirmation: true,
-                ..Default::default()
-            });
-        }
         items.push(SelectionItem {
             name: "Quit".to_string(),
             description: None,
@@ -306,6 +281,7 @@ impl ChatWidget {
                 tx.send(AppEvent::Exit(ExitMode::ShutdownFirst));
             })],
             dismiss_on_select: true,
+            require_explicit_confirmation: true,
             ..Default::default()
         });
 
@@ -314,14 +290,12 @@ impl ChatWidget {
             footer_hint: Some(standard_popup_hint_line()),
             items,
             header: Box::new(header),
-            on_cancel: setup_choice_is_required.then(|| {
-                Box::new(move |tx: &AppEventSender| {
-                    tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
-                        preset: retry_preset.clone(),
-                        profile_selection: retry_profile_selection.clone(),
-                    });
-                }) as _
-            }),
+            on_cancel: Some(Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
+                    preset: retry_preset.clone(),
+                    profile_selection: retry_profile_selection.clone(),
+                });
+            }) as _),
             ..Default::default()
         });
     }
@@ -344,8 +318,6 @@ impl ChatWidget {
 
         let allow_unelevated =
             self.windows_sandbox_mode_allowed(WindowsSandboxModeToml::Unelevated);
-        let setup_choice_is_required =
-            !allow_unelevated || self.elevated_windows_sandbox_setup_required();
         let mut lines = Vec::new();
         lines.push(line![
             "Couldn't set up your sandbox with Administrator permissions".bold()
@@ -353,7 +325,7 @@ impl ChatWidget {
         lines.push(line![""]);
         if allow_unelevated {
             lines.push(line![
-                "You can still use Codex in a non-admin sandbox. It carries greater risk if prompt injected."
+                "You can retry setting up the default sandbox or quit Codex."
             ]);
         } else {
             lines.push(line![
@@ -367,19 +339,14 @@ impl ChatWidget {
         let mut header = ColumnRenderable::new();
         header.push(*Box::new(Paragraph::new(lines).wrap(Wrap { trim: false })));
 
-        let elevated_preset = preset.clone();
-        let legacy_preset = preset;
-        let retry_preset = elevated_preset.clone();
+        let retry_preset = preset.clone();
         let retry_profile_selection = profile_selection.clone();
-        let elevated_profile_selection = profile_selection.clone();
-        let legacy_profile_selection = profile_selection;
         let quit_otel = self.session_telemetry.clone();
         let mut items = vec![SelectionItem {
             name: "Try setting up admin sandbox again".to_string(),
             description: None,
             actions: vec![Box::new({
                 let otel = self.session_telemetry.clone();
-                let preset = elevated_preset;
                 move |tx| {
                     otel.counter(
                         "codex.windows_sandbox.fallback_retry_elevated",
@@ -388,37 +355,13 @@ impl ChatWidget {
                     );
                     tx.send(AppEvent::BeginWindowsSandboxElevatedSetup {
                         preset: preset.clone(),
-                        profile_selection: elevated_profile_selection.clone(),
+                        profile_selection: profile_selection.clone(),
                     });
                 }
             })],
             dismiss_on_select: true,
             ..Default::default()
         }];
-        if allow_unelevated {
-            items.push(SelectionItem {
-                name: "Use Codex with non-admin sandbox".to_string(),
-                description: None,
-                actions: vec![Box::new({
-                    let otel = self.session_telemetry.clone();
-                    let preset = legacy_preset;
-                    move |tx| {
-                        otel.counter(
-                            "codex.windows_sandbox.fallback_use_legacy",
-                            /*inc*/ 1,
-                            &[],
-                        );
-                        tx.send(AppEvent::BeginWindowsSandboxLegacySetup {
-                            preset: preset.clone(),
-                            profile_selection: legacy_profile_selection.clone(),
-                        });
-                    }
-                })],
-                dismiss_on_select: true,
-                require_explicit_confirmation: true,
-                ..Default::default()
-            });
-        }
         items.push(SelectionItem {
             name: "Quit".to_string(),
             description: None,
@@ -431,6 +374,7 @@ impl ChatWidget {
                 tx.send(AppEvent::Exit(ExitMode::ShutdownFirst));
             })],
             dismiss_on_select: true,
+            require_explicit_confirmation: true,
             ..Default::default()
         });
 
@@ -439,14 +383,12 @@ impl ChatWidget {
             footer_hint: Some(standard_popup_hint_line()),
             items,
             header: Box::new(header),
-            on_cancel: setup_choice_is_required.then(|| {
-                Box::new(move |tx: &AppEventSender| {
-                    tx.send(AppEvent::OpenWindowsSandboxFallbackPrompt {
-                        preset: retry_preset.clone(),
-                        profile_selection: retry_profile_selection.clone(),
-                    });
-                }) as _
-            }),
+            on_cancel: Some(Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::OpenWindowsSandboxFallbackPrompt {
+                    preset: retry_preset.clone(),
+                    profile_selection: retry_profile_selection.clone(),
+                });
+            }) as _),
             ..Default::default()
         });
     }
