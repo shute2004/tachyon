@@ -4,6 +4,7 @@ use crate::RolloutItem;
 use crate::protocol::EventMsg;
 use codex_extension_items::ExtensionItem;
 use codex_protocol::items::TurnItem;
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -12,6 +13,11 @@ use codex_utils_string::truncate_middle_with_marker;
 const PERSISTED_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const COMMAND_OUTPUT_TRUNCATION_MARKER: &str =
     "\n... command output truncated for persistence ...\n";
+const PERSISTED_MCP_TOOL_RESULT_MAX_BYTES: usize = 64 * 1024;
+const PERSISTED_MCP_TOOL_RESULT_PREVIEW_MAX_BYTES: usize =
+    (PERSISTED_MCP_TOOL_RESULT_MAX_BYTES - 128) / 2;
+const MCP_TOOL_RESULT_TRUNCATION_MARKER: &str =
+    "\n... MCP tool result truncated for persistence ...\n";
 
 /// Whether a rollout `item` should be persisted in rollout files.
 pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistoryMode) -> bool {
@@ -32,8 +38,9 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistory
 
 /// Return the persisted projection of a rollout item without changing the live item.
 ///
-/// Paginated command output fields are capped independently at 64 KiB, including the UTF-8-safe
-/// truncation marker. All other retained items are borrowed unchanged.
+/// Paginated command output fields and serialized MCP tool results are capped independently at
+/// 64 KiB. MCP results use a smaller text-preview budget so JSON escaping cannot push the
+/// projected result back over its serialized cap. All other retained items are borrowed unchanged.
 pub fn persisted_rollout_item(
     item: &RolloutItem,
     history_mode: ThreadHistoryMode,
@@ -48,32 +55,72 @@ pub fn persisted_rollout_item(
     if !matches!(history_mode, ThreadHistoryMode::Paginated) {
         return Some(Cow::Borrowed(item));
     }
-    let TurnItem::CommandExecution(command) = &event.item else {
-        return Some(Cow::Borrowed(item));
-    };
-    let output_is_oversized = [
-        command.stdout.as_deref(),
-        command.stderr.as_deref(),
-        command.aggregated_output.as_deref(),
-        command.formatted_output.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|output| output.len() > PERSISTED_COMMAND_OUTPUT_MAX_BYTES);
-    if !output_is_oversized {
-        return Some(Cow::Borrowed(item));
-    }
+    match &event.item {
+        TurnItem::CommandExecution(command) => {
+            let output_is_oversized = [
+                command.stdout.as_deref(),
+                command.stderr.as_deref(),
+                command.aggregated_output.as_deref(),
+                command.formatted_output.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|output| output.len() > PERSISTED_COMMAND_OUTPUT_MAX_BYTES);
+            if !output_is_oversized {
+                return Some(Cow::Borrowed(item));
+            }
 
-    let mut projected = item.clone();
-    if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut projected
-        && let TurnItem::CommandExecution(command) = &mut event.item
-    {
-        truncate_command_output(&mut command.stdout);
-        truncate_command_output(&mut command.stderr);
-        truncate_command_output(&mut command.aggregated_output);
-        truncate_command_output(&mut command.formatted_output);
+            let mut projected = item.clone();
+            if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut projected
+                && let TurnItem::CommandExecution(command) = &mut event.item
+            {
+                truncate_command_output(&mut command.stdout);
+                truncate_command_output(&mut command.stderr);
+                truncate_command_output(&mut command.aggregated_output);
+                truncate_command_output(&mut command.formatted_output);
+            }
+            Some(Cow::Owned(projected))
+        }
+        TurnItem::McpToolCall(tool_call) => {
+            let Some(result) = &tool_call.result else {
+                return Some(Cow::Borrowed(item));
+            };
+            let Ok(serialized_result) = serde_json::to_string(result) else {
+                return Some(Cow::Borrowed(item));
+            };
+            if serialized_result.len() <= PERSISTED_MCP_TOOL_RESULT_MAX_BYTES {
+                return Some(Cow::Borrowed(item));
+            }
+
+            // The preview contains serialized JSON plus the marker's newlines, so embedding it
+            // as a JSON string can expand it by at most 2x (quotes, backslashes, and newlines).
+            // Its conservative half-cap plus less than 128 bytes of fixed CallToolResult framing
+            // keeps the projected result within 64 KiB and makes another projection idempotent.
+            let preview = truncate_middle_with_marker(
+                &serialized_result,
+                PERSISTED_MCP_TOOL_RESULT_PREVIEW_MAX_BYTES,
+                MCP_TOOL_RESULT_TRUNCATION_MARKER,
+            );
+            let projected_result = CallToolResult {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": preview,
+                })],
+                structured_content: None,
+                is_error: result.is_error,
+                meta: None,
+            };
+
+            let mut projected = item.clone();
+            if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = &mut projected
+                && let TurnItem::McpToolCall(tool_call) = &mut event.item
+            {
+                tool_call.result = Some(projected_result);
+            }
+            Some(Cow::Owned(projected))
+        }
+        _ => Some(Cow::Borrowed(item)),
     }
-    Some(Cow::Owned(projected))
 }
 
 fn truncate_command_output(output: &mut Option<String>) {
