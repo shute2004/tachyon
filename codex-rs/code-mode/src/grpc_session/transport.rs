@@ -1,10 +1,11 @@
-use std::io;
+use std::sync::Arc;
 
 use codex_code_mode_protocol::grpc::code_mode_host_client::CodeModeHostClient;
 use codex_code_mode_protocol::host::MAX_FRAME_BYTES;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use http_body_util::BodyExt;
+use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::http::Request;
 use tonic::codegen::http::Response;
@@ -17,7 +18,7 @@ use tower::util::BoxCloneSyncService;
 
 use super::GrpcClient;
 
-pub(super) type GrpcTransport = BoxCloneSyncService<Request<Body>, Response<Body>, io::Error>;
+pub(super) type GrpcTransport = BoxCloneSyncService<Request<Body>, Response<Body>, Status>;
 
 pub(super) struct SharedTransport {
     endpoint: TransportEndpoint,
@@ -60,7 +61,7 @@ impl SharedTransport {
                                 format!("invalid gRPC code-mode Unix socket endpoint: {error}")
                             })?
                             .connect_lazy();
-                        let transport = channel.map_err(io::Error::other);
+                        let transport = channel.map_err(|error| Status::from_error(Box::new(error)));
                         CodeModeHostClient::new(BoxCloneSyncService::new(transport))
                     }
                     TransportEndpoint::Url {
@@ -113,17 +114,32 @@ impl SharedTransport {
                                 let request = request.map(|body| {
                                     reqwest::Body::wrap_stream(body.into_data_stream())
                                 });
-                                let request =
-                                    reqwest::Request::try_from(request).map_err(io::Error::other)?;
+                                let request = reqwest::Request::try_from(request)
+                                    .map_err(|error| Status::invalid_argument(error.to_string()))?;
                                 let response: Response<reqwest::Body> =
-                                    client.execute(request).await.map_err(io::Error::other)?.into();
-                                Ok::<_, io::Error>(response.map(Body::new))
+                                    client
+                                        .execute(request)
+                                        .await
+                                        .map_err(|error| {
+                                            let mut status =
+                                                if error.is_connect() || error.is_request() {
+                                                    Status::unavailable(error.to_string())
+                                                } else {
+                                                    Status::unknown(error.to_string())
+                                                };
+                                            status.set_source(Arc::new(error));
+                                            status
+                                        })?
+                                        .into();
+                                Ok::<_, Status>(response.map(Body::new))
                             }
                         });
                         CodeModeHostClient::with_origin(BoxCloneSyncService::new(transport), origin)
                     }
                     TransportEndpoint::Connected(channel) => {
-                        let transport = channel.clone().map_err(io::Error::other);
+                        let transport = channel
+                            .clone()
+                            .map_err(|error| Status::from_error(Box::new(error)));
                         CodeModeHostClient::new(BoxCloneSyncService::new(transport))
                     }
                 };
