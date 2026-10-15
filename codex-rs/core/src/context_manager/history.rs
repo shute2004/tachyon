@@ -387,7 +387,7 @@ impl ContextManager {
     ///
     /// This mirrors thread-rollback semantics:
     /// - `num_turns == 0` is a no-op
-    /// - if there are no user turns, this is a no-op
+    /// - if there are no user turns, the existing records are reset unchanged
     /// - if `num_turns` exceeds the number of user turns, all user turns are dropped while
     ///   preserving any items that occurred before the first user message.
     ///
@@ -409,7 +409,7 @@ impl ContextManager {
             .collect::<Vec<_>>();
         let user_positions = user_message_positions(&snapshot_items);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace_annotated(snapshot_items);
+            self.replace_records(snapshot.items().to_vec(), HistoryReplacement::Reset);
             return;
         };
 
@@ -426,11 +426,14 @@ impl ContextManager {
             cut_idx,
         );
 
-        let mut retained_items = snapshot_items[..cut_idx].to_vec();
+        let mut retained_records = snapshot.items()[..cut_idx].to_vec();
         if cut_idx == first_instruction_turn_idx
             && let Some(first_turn_id) = snapshot_items[first_instruction_turn_idx].turn_id()
         {
-            retained_items.retain_mut(|item| {
+            // Project records for the legacy developer cleanup, but retain the original record
+            // unless that cleanup actually changes its item.
+            retained_records.retain_mut(|record| {
+                let mut item = record.response_envelope();
                 if item.turn_id() == Some(first_turn_id)
                     && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
                 {
@@ -444,14 +447,24 @@ impl ContextManager {
                                 if ModelSwitchInstructions::matches_text(text)
                         )
                     });
-                    !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
-                } else {
-                    true
+                    if content.is_empty()
+                        || set_annotated_content(&mut item.item, content).is_none()
+                    {
+                        return false;
+                    }
+                    let item_changed = {
+                        let original_item = record.response_item();
+                        &item.item != original_item.as_ref()
+                    };
+                    if item_changed {
+                        record.replace_response_item(item.item);
+                    }
                 }
+                true
             });
         }
 
-        self.replace_annotated(retained_items);
+        self.replace_records(retained_records, HistoryReplacement::Reset);
     }
 
     pub(crate) fn update_token_info(

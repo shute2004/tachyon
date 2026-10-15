@@ -1889,6 +1889,238 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
 }
 
 #[test]
+fn drop_last_n_user_turns_preserves_original_surviving_records_and_snapshot() {
+    let metadata = |limit| {
+        Some(CodexHarnessMetadata {
+            client_authored: limit % 2 == 0,
+            reinjectable_context: limit % 2 == 1,
+            fallback_token_limit_override: Some(limit),
+            ..Default::default()
+        })
+    };
+    let canonical_message = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "rollback-survivor")),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "surviving canonical item".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let opaque_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "rollback-opaque")),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque encrypted reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: canonical_message,
+            metadata: metadata(51),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning,
+            metadata: metadata(52),
+        },
+        ResponseItemEnvelope {
+            item: user_input_text_msg("first user turn"),
+            metadata: metadata(53),
+        },
+        ResponseItemEnvelope {
+            item: assistant_msg("first assistant response"),
+            metadata: metadata(54),
+        },
+        ResponseItemEnvelope {
+            item: user_input_text_msg("second user turn"),
+            metadata: metadata(55),
+        },
+        ResponseItemEnvelope {
+            item: assistant_msg("second assistant response"),
+            metadata: metadata(56),
+        },
+    ];
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+
+    let frozen = history.clone();
+    let frozen_snapshot = history.conversation_history_snapshot();
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(
+        (
+            frozen_snapshot.history_version(),
+            frozen_snapshot.user_message_revision()
+        ),
+        (0, 2)
+    );
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), original_envelopes[..4].to_vec());
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (1, 3)
+    );
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(frozen.annotated_items(), original_envelopes);
+    assert_eq!(
+        frozen_snapshot
+            .items()
+            .map(Cow::into_owned)
+            .collect::<Vec<_>>(),
+        original_envelopes
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (
+            frozen_snapshot.history_version(),
+            frozen_snapshot.user_message_revision()
+        ),
+        (0, 2)
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_without_user_boundary_resets_and_zero_is_noop() {
+    let original = ResponseItemEnvelope {
+        item: assistant_msg("history without user boundary"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(71),
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![original.clone()]);
+    let frozen = history.clone();
+    let original_items_ptr = history.history.items().as_ptr();
+
+    history.drop_last_n_user_turns(/*num_turns*/ 0);
+
+    assert_eq!(history.annotated_items(), vec![original.clone()]);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (1, 1)
+    );
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        original_items_ptr
+    ));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), vec![original.clone()]);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (2, 2)
+    );
+    assert_eq!(frozen.annotated_items(), vec![original]);
+    assert_eq!(
+        (
+            frozen.history.history_version(),
+            frozen.history.user_message_revision()
+        ),
+        (1, 1)
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_keeps_legacy_no_switch_developer_cleanup() {
+    let turn_id = "first-turn";
+    let empty_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: Vec::new(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            ..Default::default()
+        }),
+    };
+    let unclassified_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "persistent developer instructions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            content_item_kinds: None,
+            ..Default::default()
+        }),
+    };
+    let mut first_user = user_input_text_msg("first user turn");
+    first_user.set_turn_id_if_missing(turn_id);
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: empty_developer,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(81),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: unclassified_developer,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(82),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: first_user,
+            metadata: None,
+        },
+    ];
+    let expected_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "persistent developer instructions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let expected_envelope = ResponseItemEnvelope {
+        item: expected_developer,
+        metadata: original_envelopes[1].metadata.clone(),
+    };
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), vec![expected_envelope]);
+}
+
+#[test]
 fn drop_last_n_user_turns_trims_saved_prefix_update_above_rolled_back_turn() {
     let items = vec![
         assistant_msg("session prefix item"),
