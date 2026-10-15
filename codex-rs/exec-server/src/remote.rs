@@ -53,6 +53,7 @@ use crate::trace_context::current_trace_context_headers;
 const ERROR_BODY_PREVIEW_BYTES: usize = 4096;
 const NOISE_RELAY_SECURITY_PROFILE: &str = "noise_hybrid_ik_v1";
 
+mod reconnect_backoff;
 mod registration_retry;
 
 #[derive(Clone)]
@@ -713,7 +714,11 @@ async fn run_remote_environment_connections<H: NoiseStreamHandler>(
             }
         }
 
-        sleep(backoff).await;
+        sleep(reconnect_backoff::reconnect_delay(
+            backoff,
+            uuid::Uuid::new_v4().as_u64_pair().1,
+        ))
+        .await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -767,6 +772,15 @@ fn normalize_environment_id(environment_id: String) -> Result<String, ExecServer
 #[derive(Deserialize)]
 struct RegistryErrorBody {
     error: Option<RegistryError>,
+    detail: Option<serde_json::Value>,
+}
+
+impl RegistryErrorBody {
+    fn into_error(self) -> Option<RegistryError> {
+        // Keep the canonical error authoritative when both envelopes are present.
+        let Self { error, detail } = self;
+        error.or_else(|| serde_json::from_value(detail?).ok())
+    }
 }
 
 #[derive(Deserialize)]
@@ -799,7 +813,7 @@ fn environment_registry_auth_error(status: StatusCode, body: &str) -> ExecServer
 fn environment_registry_http_error(status: StatusCode, body: &str) -> ExecServerError {
     let parsed = serde_json::from_str::<RegistryErrorBody>(body).ok();
     let (code, message) = parsed
-        .and_then(|body| body.error)
+        .and_then(RegistryErrorBody::into_error)
         .map(|error| {
             (
                 error.code,
@@ -825,7 +839,7 @@ fn environment_registry_http_error(status: StatusCode, body: &str) -> ExecServer
 fn registry_error_message(body: &str) -> Option<String> {
     serde_json::from_str::<RegistryErrorBody>(body)
         .ok()
-        .and_then(|body| body.error)
+        .and_then(RegistryErrorBody::into_error)
         .and_then(|error| error.message)
         .or_else(|| preview_error_body(body))
 }
