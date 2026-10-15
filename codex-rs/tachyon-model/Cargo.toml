@@ -8,4 +8,9 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-serde_json = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

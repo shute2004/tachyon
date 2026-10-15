@@ -31,6 +31,9 @@ pub mod route;
 
 use std::sync::Arc;
 
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 /// One provider-neutral model request issued by the harness.
@@ -49,7 +52,8 @@ pub struct ModelRequest {
 }
 
 /// One durable request-side item in the provider-neutral model conversation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelInputItem {
     Message(ModelMessage),
     Reasoning(ModelReasoning),
@@ -61,14 +65,14 @@ pub enum ModelInputItem {
 ///
 /// Opaque or encrypted continuation state is backend-private and is not represented in the
 /// canonical model IR.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelReasoning {
     pub summary: Vec<String>,
     pub content: Vec<String>,
 }
 
 /// A role-bearing model message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelMessage {
     pub role: ModelMessageRole,
     /// Optional assistant-message lifecycle phase. Providers that do not expose this distinction
@@ -78,7 +82,8 @@ pub struct ModelMessage {
 }
 
 /// Roles with stable meaning across the model-runtime boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelMessageRole {
     System,
     Developer,
@@ -87,7 +92,8 @@ pub enum ModelMessageRole {
 }
 
 /// Harness-significant lifecycle phase for assistant text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelMessagePhase {
     /// Interim assistant text that may be followed by more model/tool activity in the same turn.
     Commentary,
@@ -96,7 +102,8 @@ pub enum ModelMessagePhase {
 }
 
 /// Provider-neutral message content.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelContent {
     Text(String),
     Image {
@@ -109,14 +116,16 @@ pub enum ModelContent {
 }
 
 /// Media input without assuming that a provider accepts data URLs, hosted URLs, or uploaded files.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelMediaSource {
     Uri(String),
     Bytes { media_type: String, data: Arc<[u8]> },
 }
 
 /// Optional image-fidelity hint. Adapters may reject or approximate unsupported hints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelImageDetail {
     Auto,
     Low,
@@ -125,7 +134,8 @@ pub enum ModelImageDetail {
 }
 
 /// Tool declaration exposed to a model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelToolSpec {
     /// JSON-schema-described function call.
     Function {
@@ -133,6 +143,11 @@ pub enum ModelToolSpec {
         name: String,
         description: String,
         input_schema: Value,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_present_output_schema"
+        )]
         output_schema: Option<Value>,
         strict: bool,
         availability: ModelToolAvailability,
@@ -157,8 +172,16 @@ pub enum ModelToolSpec {
     },
 }
 
+fn deserialize_present_output_schema<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 /// When a tool becomes visible to the model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelToolAvailability {
     /// The tool is present in the current model-visible tool surface.
     Immediate,
@@ -167,7 +190,8 @@ pub enum ModelToolAvailability {
 }
 
 /// Semantic role of a model-visible tool declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelToolPurpose {
     /// Normal harness capability invoked for its declared effect or result.
     Invocation,
@@ -176,7 +200,8 @@ pub enum ModelToolPurpose {
 }
 
 /// Input contract for a free-form tool without assuming a provider-specific wire shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelFreeformInputFormat {
     /// Unconstrained free-form text.
     Text,
@@ -185,11 +210,11 @@ pub enum ModelFreeformInputFormat {
 }
 
 /// Correlation identifier for one logical tool call.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ModelToolCallId(pub String);
 
 /// Model-authored request to invoke a harness tool.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelToolCall {
     pub call_id: ModelToolCallId,
     pub namespace: Option<String>,
@@ -198,7 +223,8 @@ pub struct ModelToolCall {
 }
 
 /// Tool-call input without assuming that every provider encodes function arguments as JSON text.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelToolInput {
     Json(Value),
     Text(String),
@@ -212,7 +238,7 @@ pub enum ModelToolInputKind {
 }
 
 /// Harness-authored result for a previous model tool call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelToolResult {
     pub call_id: ModelToolCallId,
     pub content: Vec<ModelToolResultContent>,
@@ -222,7 +248,8 @@ pub struct ModelToolResult {
 
 /// Tool-result content is distinct from ordinary message content because structured JSON output is
 /// a first-class harness capability even when a provider's message content model is text/media only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelToolResultContent {
     Text(String),
     Json(Value),
@@ -366,3 +393,7 @@ pub struct ModelUsage {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "serialization_tests.rs"]
+mod serialization_tests;

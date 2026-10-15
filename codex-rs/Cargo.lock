@@ -13743,6 +13743,9 @@ dependencies = [
 name = "tachyon-model"
 version = "0.0.0"
 dependencies = [
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
 ]
 

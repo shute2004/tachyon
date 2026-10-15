@@ -47,8 +47,13 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - request completion and provider-reported token usage.
 
 The Rust definitions live in the `tachyon-model` crate at
-`codex-rs/tachyon-model/src/lib.rs`. This crate depends only on `std` and `serde_json`,
-not on Core, provider protocols, authentication, or UI crates. Core's
+`codex-rs/tachyon-model/src/lib.rs`. This crate uses `serde`, `serde_json`, and `schemars`
+for lossless request-item serialization and schema generation, without depending on Core,
+provider protocols, authentication, or UI crates. Request-side enums use externally tagged
+snake-case variants; JSON stays distinct from text, and byte-backed media stays distinct from
+URI-backed media. Arbitrary-precision JSON values retain their numeric representation.
+This codec is a prerequisite for durable canonical history, not a completed migration of the
+rollout, replay, or model-request paths described below. Core's
 `codex-rs/core/src/model_runtime/ir.rs` re-exports those same types for existing callers;
 there is no second IR definition or conversion between the two import paths.
 
