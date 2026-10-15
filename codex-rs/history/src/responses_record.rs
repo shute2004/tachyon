@@ -370,8 +370,7 @@ fn reconstruct_response_item(item: &HistoryItem, decoration: &ResponsesDecoratio
                 id: id.clone(),
                 name: call.name.clone(),
                 namespace: call.namespace.clone(),
-                arguments: serde_json::to_string(arguments)
-                    .expect("JSON values serialize to function arguments"),
+                arguments: arguments.to_string(),
                 encrypted_function_args: None,
                 call_id: call.call_id.0.clone(),
                 internal_chat_message_metadata_passthrough: passthrough.clone(),
