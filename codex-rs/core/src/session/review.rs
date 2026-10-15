@@ -196,13 +196,10 @@ pub(super) async fn spawn_review_thread(
     if tc.environments.single_local_environment_cwd().is_some() {
         tc.turn_metadata_state.spawn_git_enrichment_task();
     }
-    // TODO(ccunningham): Review turns currently rely on `spawn_task` for TurnComplete but do not
-    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
-    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
-    sess.spawn_task(Arc::clone(&tc), input, ReviewTask::new())
-        .await;
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+    sess.clear_connector_selection().await;
 
-    // Announce entering review mode so UIs can switch modes.
+    // Announce entering review mode before starting the task so fast failures cannot overtake it.
     let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
         id: uuid::Uuid::now_v7().to_string(),
         target: resolved.target,
@@ -210,4 +207,10 @@ pub(super) async fn spawn_review_thread(
     });
     sess.emit_turn_item_started(&tc, &item).await;
     sess.emit_turn_item_completed(&tc, item).await;
+
+    // TODO(ccunningham): Review turns currently rely on `start_task` for TurnComplete but do not
+    // emit a parent TurnStarted. Consider giving review a full parent turn lifecycle
+    // (TurnStarted + TurnComplete) for consistency with other standalone tasks.
+    sess.start_task(Arc::clone(&tc), input, ReviewTask::new())
+        .await;
 }

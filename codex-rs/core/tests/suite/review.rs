@@ -56,6 +56,7 @@ use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
 
 /// Verify that submitting `Op::Review` emits review item lifecycle,
 /// legacy review events, and TurnComplete when the model returns a structured review payload.
@@ -293,6 +294,58 @@ async fn review_op_emits_lifecycle_and_review_output() {
         !saw_assistant_xml,
         "assistant review output contains user_action markup"
     );
+
+    let _codex_home_guard = codex_home;
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_overload_preserves_legacy_event_order() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let request_log = responses::mount_response_once(
+        &server,
+        ResponseTemplate::new(503).set_body_json(serde_json::json!({
+            "error": { "code": "server_is_overloaded" }
+        })),
+    )
+    .await;
+    let codex_home = Arc::new(TempDir::new().unwrap());
+    let codex = new_conversation_for_server(&server, codex_home.clone(), |config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    })
+    .await;
+
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                target: ReviewTarget::Custom {
+                    instructions: "Return an overload error".to_string(),
+                },
+                user_facing_hint: None,
+            },
+        })
+        .await
+        .unwrap();
+
+    let mut observed = Vec::new();
+    loop {
+        match wait_for_event(&codex, |_| true).await {
+            EventMsg::EnteredReviewMode(_) => observed.push("entered"),
+            EventMsg::Error(_) => observed.push("error"),
+            EventMsg::ExitedReviewMode(_) => observed.push("exited"),
+            EventMsg::TurnComplete(_) => {
+                observed.push("complete");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(observed, vec!["entered", "error", "exited", "complete"]);
+    assert_eq!(request_log.requests().len(), 1);
 
     let _codex_home_guard = codex_home;
     server.verify().await;
