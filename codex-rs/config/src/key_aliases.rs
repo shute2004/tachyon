@@ -37,6 +37,15 @@ pub(crate) fn normalize_key_aliases(path: &[String], table: &mut TomlMap<String,
 }
 
 pub(crate) fn normalized_with_key_aliases(value: &TomlValue, path: &[String]) -> TomlValue {
+    if !CONFIG_KEY_ALIASES.iter().any(|alias| {
+        alias
+            .table_path
+            .get(..path.len())
+            .is_some_and(|prefix| prefix.iter().copied().eq(path.iter().map(String::as_str)))
+    }) {
+        return value.clone();
+    }
+
     match value {
         TomlValue::Table(table) => {
             let mut normalized = TomlMap::new();
@@ -57,3 +66,7 @@ pub(crate) fn normalized_with_key_aliases(value: &TomlValue, path: &[String]) ->
         _ => value.clone(),
     }
 }
+
+#[cfg(test)]
+#[path = "key_aliases_tests.rs"]
+mod tests;

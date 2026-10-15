@@ -2,6 +2,7 @@ use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
@@ -9,7 +10,7 @@ use uuid::Uuid;
 // the resume/fork hydration metadata derived from the same replay.
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
-    pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) history: Vec<ResponsesHistoryRecord>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
     pub(super) world_state_baseline: Option<WorldStateSnapshot>,
@@ -231,7 +232,7 @@ impl Session {
                         ctx.turn_id.as_deref(),
                     ) {
                         active_segment.previous_turn_settings = Some(PreviousTurnSettings {
-                            model: ctx.model.clone(),
+                            model_selection: crate::model_runtime::historical_model_selection_from_codex_turn_context_item(ctx),
                             comp_hash: ctx.comp_hash.clone(),
                             realtime_active: ctx.realtime_active,
                         });
@@ -357,8 +358,9 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
+                        let history_items = history.annotated_items();
                         let user_messages =
-                            compact::collect_annotated_user_messages(history.annotated_items());
+                            compact::collect_annotated_user_messages(&history_items);
                         let rebuilt = compact::build_compacted_history(
                             Vec::new(),
                             &user_messages,
@@ -428,7 +430,7 @@ impl Session {
             id: None,
         });
         RolloutReconstruction {
-            history: history.into_annotated_items(),
+            history: history.into_records(),
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,

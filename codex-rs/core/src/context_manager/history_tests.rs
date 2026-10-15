@@ -41,6 +41,7 @@ use image::Luma;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
+use std::borrow::Cow;
 use test_case::test_case;
 
 const EXEC_FORMAT_MAX_BYTES: usize = 10_000;
@@ -118,25 +119,35 @@ fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
 }
 
 fn raw_items(history: &ContextManager) -> Vec<ResponseItem> {
-    history.raw_items().cloned().collect()
+    history.raw_items().map(Cow::into_owned).collect()
 }
 
 #[test]
-fn conversation_history_snapshot_shares_response_items_until_history_changes() {
+fn conversation_history_snapshot_keeps_old_content_until_history_changes() {
     let mut history = create_history_with_items(vec![assistant_msg("original")]);
+    let timeline_snapshot = history.clone();
     let snapshot = history.conversation_history_snapshot();
 
-    let original = history.raw_items().next().expect("original history item");
-    let shared = snapshot.items().next().expect("shared snapshot item");
-    assert!(std::ptr::eq(original, shared));
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        timeline_snapshot.history.items().as_ptr()
+    ));
+    assert!(matches!(
+        snapshot.items().next(),
+        Some(Cow::Owned(item)) if item == assistant_msg("original")
+    ));
 
     history.record_items(
         std::iter::once(&assistant_msg("later")),
         TruncationPolicy::Tokens(10_000),
     );
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        timeline_snapshot.history.items().as_ptr()
+    ));
 
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![assistant_msg("original")],
     );
     assert_eq!(
@@ -148,6 +159,62 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
     assert_ne!(
         snapshot.history_version(),
         history.conversation_history_snapshot().history_version()
+    );
+}
+
+#[test]
+fn context_manager_timeline_owns_history_and_revision_transitions() {
+    let mut history = ContextManager::new();
+    let user = user_msg("initial input");
+    history.record_items([&user], TruncationPolicy::Tokens(10_000));
+
+    let recorded = history.conversation_history_snapshot();
+    assert_eq!(recorded.history_version(), 0);
+    assert_eq!(recorded.user_message_revision(), 1);
+    assert_eq!(recorded.items().count(), 1);
+
+    let assistant = assistant_msg("response");
+    history.record_items([&assistant], TruncationPolicy::Tokens(10_000));
+    assert_eq!(recorded.items().count(), 1);
+    let appended = history.conversation_history_snapshot();
+    assert_eq!(appended.history_version(), 0);
+    assert_eq!(appended.user_message_revision(), 1);
+    assert_eq!(appended.items().count(), 2);
+
+    history.replace_compacted(vec![ResponseItemEnvelope::new(assistant_msg("compact"))]);
+    let compacted = history.conversation_history_snapshot();
+    assert_eq!(compacted.history_version(), 1);
+    assert_eq!(compacted.user_message_revision(), 1);
+    assert_eq!(appended.items().count(), 2);
+
+    history.replace_annotated(vec![ResponseItemEnvelope::new(assistant_msg("reset"))]);
+    let reset = history.conversation_history_snapshot();
+    assert_eq!(reset.history_version(), 2);
+    assert_eq!(reset.user_message_revision(), 2);
+
+    let rollback_user = user_msg("rollback input");
+    let rollback_assistant = assistant_msg("rollback response");
+    history.record_items(
+        [&rollback_user, &rollback_assistant],
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .user_message_revision(),
+        3
+    );
+    history.drop_last_n_user_turns(1);
+    let rolled_back = history.conversation_history_snapshot();
+    assert_eq!(rolled_back.history_version(), 3);
+    assert_eq!(rolled_back.user_message_revision(), 4);
+    assert_eq!(
+        rolled_back.items().map(Cow::into_owned).collect::<Vec<_>>(),
+        vec![assistant_msg("reset")]
+    );
+    assert_eq!(
+        reset.items().map(Cow::into_owned).collect::<Vec<_>>(),
+        vec![assistant_msg("reset")]
     );
 }
 
@@ -171,7 +238,7 @@ fn conversation_history_snapshot_excludes_contextual_user_messages() {
     let snapshot = history.conversation_history_snapshot();
 
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
+        snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
         vec![user_message, assistant_message, developer_message],
     );
 }
@@ -449,7 +516,7 @@ fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add),
         expected_tokens
     );
@@ -462,7 +529,7 @@ fn items_after_last_model_generated_tokens_are_zero_without_model_generated_item
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add),
         0
     );
@@ -485,15 +552,15 @@ fn for_prompt_preserves_inter_agent_assistant_messages() {
 }
 
 #[test]
-fn cloned_history_shares_items_until_mutated() {
+fn cloned_history_shares_primary_timeline_until_mutated() {
     let first = assistant_msg(&"first ".repeat(1_024));
     let second = assistant_msg("second");
     let history = create_history_with_items(vec![first.clone()]);
     let mut snapshot = history.clone();
 
     assert!(std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
     ));
 
     snapshot.record_items(
@@ -502,8 +569,8 @@ fn cloned_history_shares_items_until_mutated() {
     );
 
     assert!(!std::ptr::eq(
-        history.annotated_items().as_ptr(),
-        snapshot.annotated_items().as_ptr()
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
     ));
     assert_eq!(raw_items(&history), std::slice::from_ref(&first));
     assert_eq!(raw_items(&snapshot), &[first, second]);
@@ -520,11 +587,248 @@ fn annotated_history_apis_preserve_envelopes() {
 
     history.replace_annotated(vec![first_envelope.clone()]);
 
-    assert_eq!(
-        history.annotated_items(),
-        std::slice::from_ref(&first_envelope)
-    );
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items, vec![first_envelope]);
     assert_eq!(history.into_raw_items(), vec![first_item]);
+}
+
+#[test]
+fn replacing_primary_records_preserves_metadata_order_revisions_and_cow() {
+    let known_user = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "known input".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let opaque_reasoning = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque continuation".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let reset_envelopes = vec![
+        ResponseItemEnvelope {
+            item: known_user,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(51),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning.clone(),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(52),
+                ..Default::default()
+            }),
+        },
+    ];
+    let reset_records = reset_envelopes
+        .iter()
+        .cloned()
+        .map(StoredHistoryRecord::from_response_envelope)
+        .collect();
+    let mut history = ContextManager::new();
+    history.replace_records(reset_records, HistoryReplacement::Reset);
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+    assert_eq!(history.annotated_items(), reset_envelopes);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (1, 1)
+    );
+
+    let snapshot = history.clone();
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
+    ));
+
+    let compacted_envelopes = vec![
+        ResponseItemEnvelope {
+            item: assistant_msg("compacted assistant"),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(61),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(62),
+                ..Default::default()
+            }),
+        },
+    ];
+    let compacted_records = compacted_envelopes
+        .iter()
+        .cloned()
+        .map(StoredHistoryRecord::from_response_envelope)
+        .collect();
+    history.replace_records(compacted_records, HistoryReplacement::Compaction);
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+    assert_eq!(history.annotated_items(), compacted_envelopes);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (2, 1)
+    );
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        snapshot.history.items().as_ptr()
+    ));
+    assert_eq!(snapshot.annotated_items(), reset_envelopes);
+
+    let consumed_records = history.into_records();
+    assert_eq!(
+        consumed_records
+            .iter()
+            .map(StoredHistoryRecord::response_envelope)
+            .collect::<Vec<_>>(),
+        compacted_envelopes
+    );
+    assert!(consumed_records[0].canonical_item().is_some());
+    assert!(consumed_records[1].canonical_item().is_none());
+}
+
+#[test]
+fn mixed_primary_history_preserves_canonical_and_opaque_projections_across_mutations() {
+    let known_message = user_msg("known-role input");
+    let opaque_reasoning = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque encrypted reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: known_message.clone(),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(41),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning.clone(),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(42),
+                ..Default::default()
+            }),
+        },
+    ];
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+
+    {
+        let mut raw_items = history.raw_items();
+        assert!(matches!(
+            raw_items.next(),
+            Some(Cow::Owned(item)) if item == known_message
+        ));
+        assert!(matches!(
+            raw_items.next(),
+            Some(Cow::Borrowed(item)) if item == &opaque_reasoning
+        ));
+        assert!(raw_items.next().is_none());
+    }
+
+    let snapshot = history.conversation_history_snapshot();
+    let frozen_history = history.clone();
+    let frozen_revisions = (snapshot.history_version(), snapshot.user_message_revision());
+    let frozen_items = vec![known_message.clone(), opaque_reasoning.clone()];
+    assert_eq!(frozen_revisions, (0, 1));
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen_history.history.items().as_ptr()
+    ));
+    assert_eq!(frozen_history.annotated_items(), original_envelopes);
+    let mut snapshot_items = snapshot.items();
+    assert!(matches!(
+        snapshot_items.next(),
+        Some(Cow::Owned(item)) if item == known_message
+    ));
+    assert!(matches!(
+        snapshot_items.next(),
+        Some(Cow::Borrowed(item)) if item == &opaque_reasoning
+    ));
+
+    let assert_snapshot_unchanged = || {
+        assert_eq!(
+            (snapshot.history_version(), snapshot.user_message_revision()),
+            frozen_revisions
+        );
+        assert_eq!(
+            snapshot.items().map(Cow::into_owned).collect::<Vec<_>>(),
+            frozen_items
+        );
+        assert_eq!(frozen_history.annotated_items(), original_envelopes);
+    };
+
+    let appended_envelope = ResponseItemEnvelope {
+        item: assistant_msg("appended response"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(43),
+            ..Default::default()
+        }),
+    };
+    history.record_annotated_items(
+        std::slice::from_ref(&appended_envelope),
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(history.history.history_version(), 0);
+    assert_eq!(history.history.user_message_revision(), 1);
+    let mut after_append = original_envelopes.clone();
+    after_append.push(appended_envelope);
+    assert_eq!(history.annotated_items(), after_append);
+    assert_snapshot_unchanged();
+
+    let compacted_prefix = ResponseItemEnvelope {
+        item: assistant_msg("surviving prefix"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(44),
+            ..Default::default()
+        }),
+    };
+    let compacted_user = ResponseItemEnvelope {
+        item: user_msg("compacted user turn"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(45),
+            ..Default::default()
+        }),
+    };
+    let compacted_reasoning = ResponseItemEnvelope {
+        item: opaque_reasoning,
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(46),
+            ..Default::default()
+        }),
+    };
+    let compacted_envelopes = vec![
+        compacted_prefix.clone(),
+        compacted_user,
+        compacted_reasoning,
+    ];
+    history.replace_compacted(compacted_envelopes.clone());
+    assert_eq!(history.history.history_version(), 1);
+    assert_eq!(history.history.user_message_revision(), 1);
+    assert_eq!(history.annotated_items(), compacted_envelopes);
+    assert_snapshot_unchanged();
+
+    history.drop_last_n_user_turns(1);
+    assert_eq!(history.history.history_version(), 2);
+    assert_eq!(history.history.user_message_revision(), 2);
+    assert_eq!(history.annotated_items(), vec![compacted_prefix]);
+    assert_snapshot_unchanged();
 }
 
 #[test_case(None, 100, 5, true; "model policy")]
@@ -558,13 +862,14 @@ fn record_annotated_items_preserves_metadata_while_processing_item(
 
     history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
 
-    assert_eq!(history.annotated_items().len(), 1);
-    assert_eq!(history.annotated_items()[0].metadata, envelope.metadata);
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    assert_eq!(annotated_items[0].metadata, envelope.metadata);
     assert_eq!(
-        history.annotated_items()[0].item != envelope.item,
+        annotated_items[0].item != envelope.item,
         expected_truncation
     );
-    let ResponseItem::FunctionCallOutput { output, .. } = &history.annotated_items()[0].item else {
+    let ResponseItem::FunctionCallOutput { output, .. } = &annotated_items[0].item else {
         panic!("expected function call output");
     };
     assert_eq!(
@@ -604,6 +909,75 @@ fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
     assert_eq!(normalized.len(), 1);
     assert_eq!(normalized[0].metadata, envelope.metadata);
     assert_ne!(normalized[0].item, envelope.item);
+}
+
+#[test]
+fn for_prompt_records_matches_annotated_projection_and_preserves_cow_snapshot() {
+    let first = ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "records-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "keep".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(DEFAULT_IMAGE_DETAIL),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(17),
+            ..Default::default()
+        }),
+    };
+    let second = ResponseItemEnvelope {
+        item: ResponseItem::Reasoning {
+            id: Some(ResponseItemId::with_suffix("rs", "records-opaque")),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("opaque continuation".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(29),
+            ..Default::default()
+        }),
+    };
+    let original = vec![first.clone(), second.clone()];
+    let mut history = ContextManager::new();
+    history.replace_annotated(original.clone());
+    let snapshot = history.clone();
+    let original_items = history.history.items().as_ptr();
+
+    let records = history.clone().for_prompt_records(&[InputModality::Text]);
+    let projected_records = records
+        .iter()
+        .map(StoredHistoryRecord::response_envelope)
+        .collect::<Vec<_>>();
+    let projected_annotated = history.clone().for_prompt_annotated(&[InputModality::Text]);
+
+    assert_eq!(projected_records, projected_annotated);
+    assert_eq!(projected_records.len(), 2);
+    assert_ne!(projected_records[0].item, first.item);
+    assert_eq!(projected_records[0].metadata, first.metadata);
+    assert_eq!(projected_records[1], second);
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        original_items
+    ));
+    assert_eq!(snapshot.annotated_items(), original);
 }
 
 #[test]
@@ -1034,6 +1408,184 @@ fn remove_first_item_removes_matching_output_for_function_call() {
 }
 
 #[test]
+fn normalization_and_remove_first_preserve_cow_history_records_and_metadata() {
+    let with_budget = |item, fallback_token_limit_override| ResponseItemEnvelope {
+        item,
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(fallback_token_limit_override),
+            ..Default::default()
+        }),
+    };
+    let call = with_budget(
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "do_it".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-cow".to_string(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        11,
+    );
+    let output = with_budget(
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-cow".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        22,
+    );
+    let image = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "look".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "https://example.test/cow.png".to_string(),
+                    detail: Some(DEFAULT_IMAGE_DETAIL),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-image".to_string()),
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        33,
+    );
+    let plain_message = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-plain")),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "plain message".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        34,
+    );
+    let opaque_reasoning = with_budget(
+        ResponseItem::Reasoning {
+            id: Some(ResponseItemId::with_suffix("rs", "cow-opaque")),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("opaque reasoning".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        44,
+    );
+    let original = vec![
+        call.clone(),
+        output.clone(),
+        image,
+        plain_message,
+        opaque_reasoning.clone(),
+    ];
+    let mut history = ContextManager::new();
+    history.replace_annotated(original.clone());
+    let frozen = history.clone();
+    let revisions = (
+        history.history.history_version(),
+        history.history.user_message_revision(),
+    );
+
+    history.normalize_history(&[InputModality::Text]);
+
+    let normalized_image = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "look".to_string(),
+                },
+                ContentItem::InputText {
+                    text: "image content omitted because you do not support image input"
+                        .to_string(),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-image".to_string()),
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("images.unsupported".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        33,
+    );
+    let normalized_plain_message = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-plain")),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "plain message".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        },
+        34,
+    );
+    let expected_normalized = vec![
+        call,
+        output,
+        normalized_image.clone(),
+        normalized_plain_message.clone(),
+        opaque_reasoning.clone(),
+    ];
+    assert_eq!(history.annotated_items(), expected_normalized);
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision(),
+        ),
+        revisions
+    );
+
+    history.remove_first_item();
+
+    assert_eq!(
+        history.annotated_items(),
+        vec![normalized_image, normalized_plain_message, opaque_reasoning]
+    );
+    assert_eq!(frozen.annotated_items(), original);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision(),
+        ),
+        revisions
+    );
+}
+
+#[test]
 fn remove_first_item_removes_matching_call_for_output() {
     let items = vec![
         ResponseItem::FunctionCallOutput {
@@ -1337,6 +1889,238 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
 }
 
 #[test]
+fn drop_last_n_user_turns_preserves_original_surviving_records_and_snapshot() {
+    let metadata = |limit| {
+        Some(CodexHarnessMetadata {
+            client_authored: limit % 2 == 0,
+            reinjectable_context: limit % 2 == 1,
+            fallback_token_limit_override: Some(limit),
+            ..Default::default()
+        })
+    };
+    let canonical_message = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "rollback-survivor")),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "surviving canonical item".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let opaque_reasoning = ResponseItem::Reasoning {
+        id: Some(ResponseItemId::with_suffix("rs", "rollback-opaque")),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque encrypted reasoning".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: canonical_message,
+            metadata: metadata(51),
+        },
+        ResponseItemEnvelope {
+            item: opaque_reasoning,
+            metadata: metadata(52),
+        },
+        ResponseItemEnvelope {
+            item: user_input_text_msg("first user turn"),
+            metadata: metadata(53),
+        },
+        ResponseItemEnvelope {
+            item: assistant_msg("first assistant response"),
+            metadata: metadata(54),
+        },
+        ResponseItemEnvelope {
+            item: user_input_text_msg("second user turn"),
+            metadata: metadata(55),
+        },
+        ResponseItemEnvelope {
+            item: assistant_msg("second assistant response"),
+            metadata: metadata(56),
+        },
+    ];
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+
+    let frozen = history.clone();
+    let frozen_snapshot = history.conversation_history_snapshot();
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(
+        (
+            frozen_snapshot.history_version(),
+            frozen_snapshot.user_message_revision()
+        ),
+        (0, 2)
+    );
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), original_envelopes[..4].to_vec());
+    assert!(history.history.items()[0].canonical_item().is_some());
+    assert!(history.history.items()[1].canonical_item().is_none());
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (1, 3)
+    );
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(frozen.annotated_items(), original_envelopes);
+    assert_eq!(
+        frozen_snapshot
+            .items()
+            .map(Cow::into_owned)
+            .collect::<Vec<_>>(),
+        original_envelopes
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        (
+            frozen_snapshot.history_version(),
+            frozen_snapshot.user_message_revision()
+        ),
+        (0, 2)
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_without_user_boundary_resets_and_zero_is_noop() {
+    let original = ResponseItemEnvelope {
+        item: assistant_msg("history without user boundary"),
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(71),
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![original.clone()]);
+    let frozen = history.clone();
+    let original_items_ptr = history.history.items().as_ptr();
+
+    history.drop_last_n_user_turns(/*num_turns*/ 0);
+
+    assert_eq!(history.annotated_items(), vec![original.clone()]);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (1, 1)
+    );
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        original_items_ptr
+    ));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), vec![original.clone()]);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision()
+        ),
+        (2, 2)
+    );
+    assert_eq!(frozen.annotated_items(), vec![original]);
+    assert_eq!(
+        (
+            frozen.history.history_version(),
+            frozen.history.user_message_revision()
+        ),
+        (1, 1)
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_keeps_legacy_no_switch_developer_cleanup() {
+    let turn_id = "first-turn";
+    let empty_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: Vec::new(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            ..Default::default()
+        }),
+    };
+    let unclassified_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "persistent developer instructions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            content_item_kinds: None,
+            ..Default::default()
+        }),
+    };
+    let mut first_user = user_input_text_msg("first user turn");
+    first_user.set_turn_id_if_missing(turn_id);
+    let original_envelopes = vec![
+        ResponseItemEnvelope {
+            item: empty_developer,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(81),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: unclassified_developer,
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(82),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: first_user,
+            metadata: None,
+        },
+    ];
+    let expected_developer = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "persistent developer instructions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(turn_id.to_string()),
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let expected_envelope = ResponseItemEnvelope {
+        item: expected_developer,
+        metadata: original_envelopes[1].metadata.clone(),
+    };
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&original_envelopes, TruncationPolicy::Tokens(10_000));
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.annotated_items(), vec![expected_envelope]);
+}
+
+#[test]
 fn drop_last_n_user_turns_trims_saved_prefix_update_above_rolled_back_turn() {
     let items = vec![
         assistant_msg("session prefix item"),
@@ -1476,8 +2260,9 @@ fn record_items_truncates_function_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    match &annotated_items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => {
             let content = output.text_content().unwrap_or_default();
             assert_ne!(content, long_output);
@@ -1492,7 +2277,7 @@ fn record_items_truncates_function_call_output_content() {
         }
         other => panic!("unexpected history item: {other:?}"),
     }
-    assert_eq!(history.items[0].turn_id(), Some("turn-1"));
+    assert_eq!(annotated_items[0].turn_id(), Some("turn-1"));
 }
 
 #[test]
@@ -1511,8 +2296,9 @@ fn record_items_truncates_custom_tool_call_output_content() {
 
     history.record_items([&item], policy);
 
-    assert_eq!(history.items.len(), 1);
-    match &history.items[0].item {
+    let annotated_items = history.annotated_items();
+    assert_eq!(annotated_items.len(), 1);
+    match &annotated_items[0].item {
         ResponseItem::CustomToolCallOutput { output, .. } => {
             let output = output.text_content().unwrap_or_default();
             assert_ne!(output, long_output);
@@ -1548,7 +2334,8 @@ fn record_items_respects_custom_token_limit() {
 
     history.record_items([&item], policy);
 
-    let stored = match &history.items[0].item {
+    let annotated_items = history.annotated_items();
+    let stored = match &annotated_items[0].item {
         ResponseItem::FunctionCallOutput { output, .. } => output,
         other => panic!("unexpected history item: {other:?}"),
     };

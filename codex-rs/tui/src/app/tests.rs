@@ -30,6 +30,8 @@ mod stream_animation_tests;
 mod thread_usage;
 #[path = "tests/turn_submission.rs"]
 mod turn_submission;
+#[path = "tests/windows_legacy_rejection_tests.rs"]
+mod windows_legacy_rejection_tests;
 
 use super::*;
 use crate::app_backtrack::BacktrackSelection;

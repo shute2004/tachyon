@@ -1440,6 +1440,18 @@ pub struct ReasoningSummaryPartAddedNotification {
     pub summary_index: i64,
 }
 
+/// EXPERIMENTAL - Marks the start of a raw reasoning content part without carrying text.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ReasoningContentPartAddedNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    #[ts(type = "number")]
+    pub content_index: i64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

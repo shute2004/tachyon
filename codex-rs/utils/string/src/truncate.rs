@@ -8,6 +8,26 @@ pub fn truncate_middle_chars(s: &str, max_bytes: usize) -> String {
     truncate_with_byte_estimate(s, max_bytes, /*use_tokens*/ false)
 }
 
+/// Truncate `s` on UTF-8 boundaries to a total byte budget of `max_bytes`,
+/// including `marker`. If `s` fits, it is returned unchanged; if `marker` does
+/// not fit, the longest fitting original prefix is returned.
+pub fn truncate_middle_with_marker(s: &str, max_bytes: usize, marker: &str) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+
+    if marker.len() > max_bytes {
+        return s[..s.floor_char_boundary(max_bytes)].to_string();
+    }
+
+    let content_budget = max_bytes - marker.len();
+    let (prefix_budget, suffix_budget) = split_budget(content_budget);
+    let prefix_end = s.floor_char_boundary(prefix_budget);
+    let suffix_start = s.ceil_char_boundary(s.len() - suffix_budget);
+
+    assemble_truncated_output(&s[..prefix_end], &s[suffix_start..], marker)
+}
+
 /// Truncate the middle of a UTF-8 string to at most `max_tokens` approximate
 /// tokens, preserving the beginning and the end. Returns the possibly
 /// truncated string and `Some(original_token_count)` if truncation occurred;

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "EXPERIMENTAL - Marks the start of a raw reasoning content part without carrying text.",
+  "properties": {
+    "contentIndex": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "itemId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "contentIndex",
+    "itemId",
+    "threadId",
+    "turnId"
+  ],
+  "title": "ReasoningContentPartAddedNotification",
+  "type": "object"
+}

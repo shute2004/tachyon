@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::trim_function_call_history_to_fit_context_window;
@@ -58,7 +59,7 @@ pub(super) async fn run_remote_compact_attempt(
     }
     let trace_input_history = compaction_trace
         .is_enabled()
-        .then(|| history.raw_items().cloned().collect());
+        .then(|| history.raw_items().map(Cow::into_owned).collect());
     let prompt_input = history.for_prompt(&turn_context.model_info().input_modalities);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {

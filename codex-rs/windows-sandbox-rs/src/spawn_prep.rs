@@ -80,6 +80,12 @@ pub(crate) struct LegacyAclSids<'a> {
     pub(crate) write_root_sids: &'a [RootCapabilitySid],
 }
 
+pub(crate) fn reject_legacy_backend() -> Result<()> {
+    anyhow::bail!(
+        "The same-user legacy Windows sandbox backend is disabled because it cannot enforce filesystem deletion boundaries; use the elevated Windows sandbox backend"
+    )
+}
+
 fn prepare_spawn_context_common(
     permission_profile: &PermissionProfile,
     workspace_roots: &[AbsolutePathBuf],
@@ -129,6 +135,7 @@ pub(crate) fn prepare_legacy_spawn_context(
     command: &[String],
     options: SpawnPrepOptions,
 ) -> Result<SpawnContext> {
+    reject_legacy_backend()?;
     let common = prepare_spawn_context_common(
         permission_profile,
         workspace_roots,
@@ -509,17 +516,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_spawn_env_applies_offline_network_rewrite() {
-        let codex_home = TempDir::new().expect("tempdir");
-        let cwd = TempDir::new().expect("tempdir");
-        let mut env_map = HashMap::new();
-        let workspace_roots = workspace_roots_for(cwd.path());
+    fn legacy_spawn_context_rejects_before_side_effects() {
+        const LEGACY_BACKEND_DISABLED: &str = "The same-user legacy Windows sandbox backend is disabled because it cannot enforce filesystem deletion boundaries; use the elevated Windows sandbox backend";
 
-        let _context = prepare_legacy_spawn_context(
+        let temp_dir = TempDir::new().expect("tempdir");
+        let codex_home = temp_dir.path().join("codex-home");
+        let cwd = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&cwd).expect("create workspace");
+        let workspace_roots = workspace_roots_for(&cwd);
+        let mut env_map = HashMap::from([("HTTP_PROXY".to_string(), "sentinel".to_string())]);
+        let original_env = env_map.clone();
+
+        let error = prepare_legacy_spawn_context(
             &PermissionProfile::workspace_write(),
             workspace_roots.as_slice(),
-            codex_home.path(),
-            cwd.path(),
+            &codex_home,
+            &cwd,
             &mut env_map,
             &["cmd.exe".to_string()],
             SpawnPrepOptions {
@@ -527,13 +539,12 @@ mod tests {
                 add_git_safe_directory: false,
             },
         )
-        .expect("legacy env prep");
+        .err()
+        .expect("same-user legacy backend must be disabled");
 
-        assert_eq!(env_map.get("SBX_NONET_ACTIVE"), Some(&"1".to_string()));
-        assert_eq!(
-            env_map.get("HTTP_PROXY"),
-            Some(&"http://127.0.0.1:9".to_string())
-        );
+        assert_eq!(error.to_string(), LEGACY_BACKEND_DISABLED);
+        assert!(!codex_home.exists(), "Codex home must not be created");
+        assert_eq!(env_map, original_env, "environment must remain unchanged");
     }
 
     #[test]

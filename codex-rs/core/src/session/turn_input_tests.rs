@@ -806,6 +806,7 @@ async fn steer_only_enforces_expected_turn_id() {
                     text_elements: Vec::new(),
                 }],
                 client_id: None,
+                input_association: None,
             }],
             NeverEndingTask {
                 kind: TaskKind::Regular,
@@ -859,6 +860,7 @@ async fn rejects_non_regular_turns() {
                         text_elements: Vec::new(),
                     }],
                     client_id: None,
+                    input_association: None,
                 }],
                 NeverEndingTask {
                     kind: task_kind,

@@ -19,6 +19,7 @@ use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -135,10 +136,23 @@ impl SessionState {
         reference_context_item: Option<TurnContextItem>,
         replacement: HistoryReplacement,
     ) {
-        match replacement {
-            HistoryReplacement::Compaction => self.history.replace_compacted(items),
-            HistoryReplacement::Reset => self.history.replace_annotated(items),
-        }
+        self.replace_history_records(
+            items
+                .into_iter()
+                .map(ResponsesHistoryRecord::from_response_envelope)
+                .collect(),
+            reference_context_item,
+            replacement,
+        );
+    }
+
+    pub(crate) fn replace_history_records(
+        &mut self,
+        items: Vec<ResponsesHistoryRecord>,
+        reference_context_item: Option<TurnContextItem>,
+        replacement: HistoryReplacement,
+    ) {
+        self.history.replace_records(items, replacement);
         self.history
             .set_reference_context_item(reference_context_item);
         self.auto_compact_window.clear_prefill();

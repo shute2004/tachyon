@@ -26,6 +26,7 @@ use super::measure_and_filter_rollout_items;
 use super::update_turn_measurements;
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
+use crate::policy::tests::command_item;
 
 fn retained_message(text: &str) -> RolloutItem {
     RolloutItem::ResponseItem(ResponseItemEnvelope::new(ResponseItem::Message {
@@ -132,6 +133,11 @@ fn mixed_batch_reports_exact_policy_counts_and_bytes() {
     assert_eq!(measurement.post_filter.payload_bytes, kept_bytes);
     assert_eq!(measurement.items[0].payload_bytes, Some(kept_bytes));
     assert_eq!(measurement.items[1].payload_bytes, Some(dropped_bytes));
+    assert_eq!(
+        measurement.items[0].persisted_payload_bytes,
+        Some(kept_bytes)
+    );
+    assert_eq!(measurement.items[1].persisted_payload_bytes, None);
     assert_eq!(measurement.items[0].rollout_item_type, "response.message");
     assert_eq!(measurement.items[1].rollout_item_type, "response.other");
 }
@@ -149,6 +155,61 @@ fn retained_items_are_byte_identical() {
     assert_eq!(
         measurement.post_filter.payload_bytes,
         measurement.items[0].payload_bytes.expect("payload bytes")
+    );
+}
+
+#[test]
+fn command_output_metrics_measure_original_and_projected_turn_sizes() {
+    let command = command_item([Some("x".repeat(128 * 1024)), None, None, None]);
+    let items = vec![turn_started("turn"), command.clone(), turn_complete("turn")];
+    let original_command_bytes = serde_json::to_vec(&command)
+        .expect("serialize original command")
+        .len() as u64;
+
+    let (persisted, measurement) =
+        measure_and_filter_rollout_items(&items, ThreadHistoryMode::Paginated);
+    let projected_command_bytes = serde_json::to_vec(&persisted[1])
+        .expect("serialize projected command")
+        .len() as u64;
+    let original_batch_bytes = items
+        .iter()
+        .map(|item| {
+            serde_json::to_vec(item)
+                .expect("serialize input item")
+                .len() as u64
+        })
+        .sum::<u64>();
+    let projected_batch_bytes = persisted
+        .iter()
+        .map(|item| {
+            serde_json::to_vec(item)
+                .expect("serialize persisted item")
+                .len() as u64
+        })
+        .sum::<u64>();
+
+    assert!(original_command_bytes > projected_command_bytes);
+    assert_eq!(
+        measurement.items[1].payload_bytes,
+        Some(original_command_bytes)
+    );
+    assert_eq!(
+        measurement.items[1].persisted_payload_bytes,
+        Some(projected_command_bytes)
+    );
+    assert_eq!(measurement.pre_filter.payload_bytes, original_batch_bytes);
+    assert_eq!(measurement.post_filter.payload_bytes, projected_batch_bytes);
+
+    let mut state = TurnMeasurementState::default();
+    let update = update_turn_measurements(&mut state, &items, &measurement);
+    assert_eq!(update.completed.len(), 1);
+    assert_eq!(
+        update.completed[0].totals.pre_filter.payload_bytes,
+        original_batch_bytes
+    );
+    assert_eq!(
+        update.completed[0].totals.post_filter.payload_bytes,
+        projected_batch_bytes
     );
 }
 

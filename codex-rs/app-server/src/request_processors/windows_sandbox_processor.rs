@@ -114,10 +114,11 @@ fn resolve_allowed_windows_sandbox_setup_mode(
             CoreWindowsSandboxSetupMode::Elevated,
             codex_config::types::WindowsSandboxModeToml::Elevated,
         ),
-        WindowsSandboxSetupMode::Unelevated => (
-            CoreWindowsSandboxSetupMode::Unelevated,
-            codex_config::types::WindowsSandboxModeToml::Unelevated,
-        ),
+        WindowsSandboxSetupMode::Unelevated => {
+            return Err(invalid_request(
+                "invalid Windows sandbox setup mode: legacy unelevated setup is disabled; use elevated mode instead",
+            ));
+        }
     };
     requirements
         .windows_sandbox_mode
@@ -145,7 +146,7 @@ fn determine_windows_sandbox_readiness_from_state(
 ) -> WindowsSandboxReadinessResponse {
     let status = match windows_sandbox_level {
         WindowsSandboxLevel::Disabled => WindowsSandboxReadiness::NotConfigured,
-        WindowsSandboxLevel::RestrictedToken => WindowsSandboxReadiness::Ready,
+        WindowsSandboxLevel::RestrictedToken => WindowsSandboxReadiness::UpdateRequired,
         WindowsSandboxLevel::Elevated => {
             if sandbox_setup_is_complete {
                 WindowsSandboxReadiness::Ready
@@ -168,7 +169,51 @@ mod tests {
     use codex_config::types::WindowsSandboxModeToml;
 
     #[test]
-    fn resolve_allowed_windows_sandbox_setup_mode_rejects_disallowed_mode() {
+    fn resolve_allowed_windows_sandbox_setup_mode_rejects_elevated_when_requirements_disallow() {
+        let requirements = ConfigRequirements {
+            windows_sandbox_mode: ConstrainedWithSource::new(
+                Constrained::allow_only(Some(WindowsSandboxModeToml::Unelevated)),
+                /*source*/ None,
+            ),
+            ..Default::default()
+        };
+
+        let err = resolve_allowed_windows_sandbox_setup_mode(
+            &requirements,
+            WindowsSandboxSetupMode::Elevated,
+        )
+        .expect_err("elevated setup should respect managed requirements");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert!(
+            err.message.contains("invalid Windows sandbox setup mode"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_allowed_windows_sandbox_setup_mode_rejects_legacy_mode_when_unconstrained() {
+        let err = resolve_allowed_windows_sandbox_setup_mode(
+            &ConfigRequirements::default(),
+            WindowsSandboxSetupMode::Unelevated,
+        )
+        .expect_err("legacy unelevated setup should be rejected");
+
+        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
+        assert!(
+            err.message
+                .starts_with("invalid Windows sandbox setup mode:"),
+            "{err:?}"
+        );
+        assert!(
+            err.message.contains("legacy unelevated setup is disabled"),
+            "{err:?}"
+        );
+        assert!(err.message.contains("use elevated mode instead"), "{err:?}");
+    }
+
+    #[test]
+    fn resolve_allowed_windows_sandbox_setup_mode_allows_elevated_when_requirements_allow() {
         let requirements = ConfigRequirements {
             windows_sandbox_mode: ConstrainedWithSource::new(
                 Constrained::allow_only(Some(WindowsSandboxModeToml::Elevated)),
@@ -177,16 +222,12 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_allowed_windows_sandbox_setup_mode(
-            &requirements,
-            WindowsSandboxSetupMode::Unelevated,
-        )
-        .expect_err("unelevated setup should be rejected");
-
-        assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
-        assert!(
-            err.message.contains("invalid Windows sandbox setup mode"),
-            "{err:?}"
+        assert_eq!(
+            resolve_allowed_windows_sandbox_setup_mode(
+                &requirements,
+                WindowsSandboxSetupMode::Elevated,
+            ),
+            Ok(CoreWindowsSandboxSetupMode::Elevated)
         );
     }
 
@@ -201,13 +242,15 @@ mod tests {
     }
 
     #[test]
-    fn determine_windows_sandbox_readiness_reports_ready_for_unelevated_mode() {
-        let response = determine_windows_sandbox_readiness_from_state(
-            WindowsSandboxLevel::RestrictedToken,
-            /*sandbox_setup_is_complete*/ false,
-        );
+    fn determine_windows_sandbox_readiness_requires_update_for_legacy_mode() {
+        for sandbox_setup_is_complete in [false, true] {
+            let response = determine_windows_sandbox_readiness_from_state(
+                WindowsSandboxLevel::RestrictedToken,
+                sandbox_setup_is_complete,
+            );
 
-        assert_eq!(response.status, WindowsSandboxReadiness::Ready);
+            assert_eq!(response.status, WindowsSandboxReadiness::UpdateRequired);
+        }
     }
 
     #[test]

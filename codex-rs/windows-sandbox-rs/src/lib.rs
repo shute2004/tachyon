@@ -375,6 +375,7 @@ mod windows_impl {
     use super::spawn_prep::legacy_session_capability_roots;
     use super::spawn_prep::prepare_legacy_session_security;
     use super::spawn_prep::prepare_legacy_spawn_context;
+    use super::spawn_prep::reject_legacy_backend;
     use super::spawn_prep::root_capability_sids;
     use anyhow::Result;
     use codex_protocol::models::PermissionProfile;
@@ -743,6 +744,7 @@ mod windows_impl {
         cwd: &Path,
         env_map: &HashMap<String, String>,
     ) -> Result<()> {
+        reject_legacy_backend()?;
         let Ok(permissions) = super::resolved_permissions::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
             permission_profile,
             workspace_roots,
@@ -780,8 +782,10 @@ mod windows_impl {
         use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
         use codex_protocol::models::PermissionProfile;
         use codex_protocol::permissions::NetworkSandboxPolicy;
+        use codex_utils_absolute_path::AbsolutePathBuf;
         use std::collections::HashMap;
         use std::path::Path;
+        use tempfile::TempDir;
 
         fn workspace_profile(network_policy: NetworkSandboxPolicy) -> PermissionProfile {
             PermissionProfile::workspace_write_with(
@@ -820,22 +824,64 @@ mod windows_impl {
             assert!(should_apply_network_block(&PermissionProfile::read_only()));
         }
 
+        fn dacl_snapshot(path: &Path) -> Vec<u8> {
+            let (dacl, security_descriptor) =
+                unsafe { crate::acl::fetch_dacl_handle(path) }.expect("fetch test DACL");
+            let snapshot = if dacl.is_null() {
+                None
+            } else {
+                let size = unsafe { (*dacl).AclSize as usize };
+                Some(unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size) }.to_vec())
+            };
+            unsafe {
+                windows_sys::Win32::Foundation::LocalFree(security_descriptor as _);
+            }
+            snapshot.expect("test workspace must have a DACL")
+        }
+
         #[test]
-        fn legacy_preflight_skips_profiles_without_managed_filesystem_permissions() {
+        fn legacy_preflight_rejects_all_profiles_without_side_effects() {
+            const LEGACY_BACKEND_DISABLED: &str = "The same-user legacy Windows sandbox backend is disabled because it cannot enforce filesystem deletion boundaries; use the elevated Windows sandbox backend";
+
+            let temp_dir = TempDir::new().expect("tempdir");
+            let codex_home = temp_dir.path().join("codex-home");
+            let workspace = temp_dir.path().join("workspace");
+            let temp_root = temp_dir.path().join("temp");
+            std::fs::create_dir_all(&workspace).expect("create workspace");
+            std::fs::create_dir_all(&temp_root).expect("create temp root");
+            let workspace_roots = [
+                AbsolutePathBuf::from_absolute_path(&workspace).expect("absolute workspace root")
+            ];
+            let env_map = HashMap::from([
+                ("TEMP".to_string(), temp_root.to_string_lossy().into_owned()),
+                ("TMP".to_string(), temp_root.to_string_lossy().into_owned()),
+            ]);
+            let original_env = env_map.clone();
+            let workspace_dacl = dacl_snapshot(&workspace);
+            let temp_dacl = dacl_snapshot(&temp_root);
+
             for permission_profile in [
                 PermissionProfile::Disabled,
                 PermissionProfile::External {
                     network: NetworkSandboxPolicy::Restricted,
                 },
+                PermissionProfile::read_only(),
+                PermissionProfile::workspace_write(),
             ] {
-                super::run_windows_sandbox_legacy_preflight(
+                let error = super::run_windows_sandbox_legacy_preflight(
                     &permission_profile,
-                    &[],
-                    Path::new("."),
-                    Path::new("."),
-                    &HashMap::new(),
+                    &workspace_roots,
+                    &codex_home,
+                    &workspace,
+                    &env_map,
                 )
-                .expect("unsupported profiles do not need ACL preflight");
+                .expect_err("same-user legacy backend must be disabled");
+
+                assert_eq!(error.to_string(), LEGACY_BACKEND_DISABLED);
+                assert!(!codex_home.exists(), "Codex home must not be created");
+                assert_eq!(env_map, original_env, "environment must remain unchanged");
+                assert_eq!(dacl_snapshot(&workspace), workspace_dacl);
+                assert_eq!(dacl_snapshot(&temp_root), temp_dacl);
             }
         }
     }

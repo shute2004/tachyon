@@ -82,6 +82,7 @@ use core_test_support::test_path_buf;
 use insta::Settings;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1027,6 +1028,16 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
     ];
 
     let entries = collect_guardian_transcript_entries(&items);
+    assert_eq!(collect_guardian_transcript_entries(items.clone()), entries);
+    assert_eq!(
+        collect_guardian_transcript_entries(vec![
+            Cow::Borrowed(&items[0]),
+            Cow::Owned(items[1].clone()),
+            Cow::Owned(items[2].clone()),
+            Cow::Borrowed(&items[3]),
+        ]),
+        entries
+    );
 
     assert_eq!(entries.len(), 4);
     assert_eq!(

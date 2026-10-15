@@ -57,7 +57,7 @@ async fn terminal_color_probe_waits_for_startup_sandbox_choice() {
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(
         app_event_rx.try_recv(),
-        Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
+        Ok(AppEvent::Exit(ExitMode::ShutdownFirst))
     ));
     assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
 }

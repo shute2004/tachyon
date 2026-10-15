@@ -1614,6 +1614,14 @@ fn compaction_implementation_serializes_remote_v2() {
 }
 
 #[test]
+fn compaction_implementation_serializes_backend() {
+    let payload = serde_json::to_value(CompactionImplementation::Backend)
+        .expect("serialize compaction implementation");
+
+    assert_eq!(payload, json!("backend"));
+}
+
+#[test]
 fn app_used_dedupe_is_keyed_by_turn_and_connector() {
     let (sender, _receiver) = mpsc::channel(1);
     let queue = AnalyticsEventsQueue {

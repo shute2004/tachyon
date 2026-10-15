@@ -165,7 +165,8 @@ async fn build_uploaded_argument_value(
         sess.granted_session_permissions(&turn_environment.selection.environment_id)
             .await
             .as_ref(),
-        sess.granted_turn_permissions(&turn_environment.selection.environment_id)
+        turn_context
+            .granted_permissions_for_environment(&turn_environment.selection.environment_id)
             .await
             .as_ref(),
     );

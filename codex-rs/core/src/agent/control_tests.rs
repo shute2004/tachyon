@@ -71,6 +71,8 @@ use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
+use std::borrow::Borrow;
+use std::borrow::Cow;
 use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
@@ -283,11 +285,13 @@ async fn persisted_originator(thread: &CodexThread) -> String {
         .expect("session metadata should be persisted")
 }
 
-fn has_subagent_notification<'a>(
-    history_items: impl IntoIterator<Item = &'a ResponseItem>,
-) -> bool {
+fn has_subagent_notification<I>(history_items: I) -> bool
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     history_items.into_iter().any(|item| {
-        let ResponseItem::Message { role, content, .. } = item else {
+        let ResponseItem::Message { role, content, .. } = item.borrow() else {
             return false;
         };
         if role != "user" {
@@ -303,12 +307,13 @@ fn has_subagent_notification<'a>(
 }
 
 /// Returns true when any message item contains `needle` in a text span.
-fn history_contains_text<'a>(
-    history_items: impl IntoIterator<Item = &'a ResponseItem>,
-    needle: &str,
-) -> bool {
+fn history_contains_text<I>(history_items: I, needle: &str) -> bool
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     history_items.into_iter().any(|item| {
-        let ResponseItem::Message { content, .. } = item else {
+        let ResponseItem::Message { content, .. } = item.borrow() else {
             return false;
         };
         content.iter().any(|content_item| match content_item {
@@ -343,12 +348,16 @@ async fn wait_for_recorded_user_message(thread: &CodexThread, needle: &str) {
     .expect("timed out waiting for user message recording");
 }
 
-fn history_contains_assistant_inter_agent_communication<'a>(
-    history_items: impl IntoIterator<Item = &'a ResponseItem>,
+fn history_contains_assistant_inter_agent_communication<I>(
+    history_items: I,
     expected: &InterAgentCommunication,
-) -> bool {
+) -> bool
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     history_items.into_iter().any(|item| {
-        let ResponseItem::Message { role, content, .. } = item else {
+        let ResponseItem::Message { role, content, .. } = item.borrow() else {
             return false;
         };
         if role != "assistant" {
@@ -1498,7 +1507,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .raw_items()
         .next()
-        .cloned()
+        .map(Cow::into_owned)
         .expect("parent seed should be recorded");
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-history".to_string();
@@ -1621,8 +1630,13 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .clone_history()
         .await
         .raw_items()
-        .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
-        .cloned()
+        .find(|item| {
+            matches!(
+                item.as_ref(),
+                ResponseItem::FunctionCallOutput { call_id: None, .. }
+            )
+        })
+        .map(Cow::into_owned)
         .expect("standalone output should be recorded");
     let parent_reference_context_item = turn_context.to_turn_context_item();
     parent_thread
@@ -1673,7 +1687,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         ThreadHistoryMode::Legacy
     );
     let history = child_thread.session.clone_history().await;
-    let history_items = history.raw_items().cloned().collect::<Vec<_>>();
+    let history_items = history.raw_items().map(Cow::into_owned).collect::<Vec<_>>();
     let expected_final_answer = parent_thread
         .session
         .clone_history()
@@ -1681,7 +1695,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .raw_items()
         .find(|item| {
             matches!(
-                item,
+                item.as_ref(),
                 ResponseItem::Message {
                     role,
                     phase: Some(MessagePhase::FinalAnswer),
@@ -1689,7 +1703,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 } if role == "assistant"
             )
         })
-        .cloned()
+        .map(Cow::into_owned)
         .expect("parent final answer should be recorded");
     let mut expected_developer_message = ResponseItem::Message {
         id: None,
@@ -1985,7 +1999,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     assert!(
         !history
             .raw_items()
-            .any(|item| matches!(item, ResponseItem::AgentMessage { .. })),
+            .any(|item| matches!(item.as_ref(), ResponseItem::AgentMessage { .. })),
         "forked child history should not inherit compacted parent agent messages"
     );
     assert!(
@@ -2336,7 +2350,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         let mut instruction_count = 0;
         let mut managed_instructions = Vec::new();
         for item in history.raw_items() {
-            let ResponseItem::Message { role, content, .. } = item else {
+            let ResponseItem::Message { role, content, .. } = item.as_ref() else {
                 continue;
             };
             if role != "developer" {
@@ -2346,14 +2360,14 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 if let ContentItem::InputText { text } = content_item {
                     instruction_count += usize::from(text == "Child developer instructions.");
                     if ManagedDeveloperInstructions::matches_text(text) {
-                        managed_instructions.push(text.as_str());
+                        managed_instructions.push(text.clone());
                     }
                 }
             }
         }
         assert_eq!(
             (instruction_count, managed_instructions),
-            (1, vec![current_managed_fragment.as_str()]),
+            (1, vec![current_managed_fragment.clone()]),
             "{case}: canonical context reconstruction must keep only the current child and managed developer instructions"
         );
 

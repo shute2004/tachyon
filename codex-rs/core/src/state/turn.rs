@@ -14,7 +14,6 @@ use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
@@ -23,7 +22,6 @@ use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::session::TurnInputQueue;
 use crate::session::turn_context::TurnContext;
 use crate::tasks::AnySessionTask;
-use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TokenUsage;
@@ -95,8 +93,6 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
-    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
-    strict_auto_review_enabled: bool,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
@@ -106,6 +102,7 @@ pub(crate) struct PendingRequestPermissions {
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
     pub(crate) environment: TurnEnvironmentSelection,
+    pub(crate) origin_turn: Arc<TurnContext>,
 }
 
 impl TurnState {
@@ -225,38 +222,5 @@ impl TurnState {
 
     pub(crate) fn set_mailbox_delivery_phase(&mut self, phase: MailboxDeliveryPhase) {
         self.mailbox_delivery_phase = phase;
-    }
-
-    pub(crate) fn record_granted_permissions(
-        &mut self,
-        environment_id: &str,
-        permissions: AdditionalPermissionProfile,
-    ) {
-        let granted_permissions = merge_permission_profiles(
-            self.granted_permissions_by_environment_id
-                .get(environment_id),
-            Some(&permissions),
-        );
-        if let Some(granted_permissions) = granted_permissions {
-            self.granted_permissions_by_environment_id
-                .insert(environment_id.to_string(), granted_permissions);
-        }
-    }
-
-    pub(crate) fn granted_permissions(
-        &self,
-        environment_id: &str,
-    ) -> Option<AdditionalPermissionProfile> {
-        self.granted_permissions_by_environment_id
-            .get(environment_id)
-            .cloned()
-    }
-
-    pub(crate) fn enable_strict_auto_review(&mut self) {
-        self.strict_auto_review_enabled = true;
-    }
-
-    pub(crate) fn strict_auto_review_enabled(&self) -> bool {
-        self.strict_auto_review_enabled
     }
 }

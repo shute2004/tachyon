@@ -46,7 +46,127 @@ The first IR slice intentionally covers only concepts whose harness meaning is a
 - text, tool-input, and reasoning deltas;
 - request completion and provider-reported token usage.
 
-The Rust definitions live in `codex-rs/core/src/model_runtime/ir.rs` during extraction.
+The Rust definitions live in the `tachyon-model` crate at
+`codex-rs/tachyon-model/src/lib.rs`. This crate uses `serde`, `serde_json`, and `schemars`
+for lossless request-item serialization and schema generation, without depending on Core,
+provider protocols, authentication, or UI crates. Request-side enums use externally tagged
+snake-case variants; JSON stays distinct from text, and byte-backed media stays distinct from
+URI-backed media. Arbitrary-precision JSON values retain their numeric representation.
+This codec is a prerequisite for durable canonical history, not a completed migration of the
+rollout, replay, or model-request paths described below. Core's
+`codex-rs/core/src/model_runtime/ir.rs` re-exports those same types for existing callers;
+there is no second IR definition or conversion between the two import paths.
+
+`codex-history` now depends on `tachyon-model` and keeps its existing `History*` item names as
+aliases to the canonical request-side item types. Core's C2 request ingress uses a borrowed
+Responses-item projection for shared semantics instead of maintaining a second general conversion.
+Its narrow compatibility fallback remains for C2-accepted encrypted reasoning/function arguments,
+empty correlation IDs, and completed client tool-search outputs; it also keeps the existing
+`InputText`/`OutputText`-by-role validation before projection. The owned history projection still
+returns the original Responses envelope unchanged beside any semantic projection, preserving IDs,
+metadata, and private continuation fields.
+
+This alias retains the existing `Json` variant and adds the canonical `DiscoveredTools` variant to
+`HistoryToolResultContent`; downstream exhaustive Rust matches over that enum must account for
+the added variant. The change does not alter rollout serialization or make live/persisted history fully
+provider-neutral: `ResponseItem` envelopes remain the compatibility and persistence representation
+for now.
+
+`codex-history::HistoryTimeline<T>` now owns the primary chronological `Arc<Vec<T>>` storage and
+its history-generation and user-message revisions. Core's `ContextManager` stores its existing
+Responses envelopes in this timeline, and shared conversation snapshots clone that same timeline
+so items and revision counters remain a single copy-on-write history. Core still classifies user
+input through its existing authorization-message predicate after the existing item filtering;
+`HistoryAppendKind::UserInput` is descriptive revision bookkeeping, not trusted admission or a
+security boundary. Compaction advances only the history generation, while reset and rollback
+advance both counters. Existing normalization and removal paths use the explicit mutable-items
+lane, which does not change revisions automatically.
+
+This extracts storage ownership only. The actual stored values and rollout persistence remain
+Responses-shaped `ResponseItemEnvelope`s; storing the canonical item vocabulary in the generic
+timeline is possible, but the live Core history and durable payload migration remain pending.
+
+The existing provider, protocol, transport, and route identities likewise belong to
+`tachyon-model::route`; Core retains `model_runtime::route` as a compatibility re-export.
+Endpoint resolution, authentication, and concrete transport execution remain adapter-owned.
+
+The existing twelve IR semantics tests live with the owning crate. Core separately checks
+cross-path type identity and its adapter conversions. This ownership move does not yet make
+the complete model runtime or agent loop independent of Codex.
+
+## Executable backend boundary
+
+`tachyon-model::backend` defines a session-scoped `ModelBackend` factory, a fresh
+provider-bound `ModelTurnBackend` for each harness turn, and an ordered canonical event
+source. A selected model ID is passed separately from the provider identity. Backends own
+their endpoint, authentication, transport, and reusable private resources; these do not
+cross the canonical contract.
+
+A host selects this runtime with `ModelRuntime::from_backend` and
+`StartThreadOptions::with_model_runtime`. Session startup snapshots that selection, rather
+than looking it up from mutable extension data on every turn. The normal sampling path
+keeps one backend handle across tool follow-ups and checks its provider identity before
+each request. Fatal or unsupported requests are not retried; retryable backend failures
+use the existing bounded stream retry policy.
+
+Canonical output reaches the existing history and tool handlers through a transitional
+projection, without invented Codex event context or response IDs. Raw Responses telemetry
+remains exclusive to the Codex path. The Codex adapter retains its lossless legacy fallback;
+a canonical backend instead rejects prompts containing unsupported history or tool declarations.
+Function tool declarations retain their optional JSON output schemas. Explicit namespace
+groups preserve descriptions, empty groups, duplicate group boundaries and declaration order;
+their children do not declare another namespace. The Codex adapter rejects nested groups and
+discovery children instead of inventing conflict-resolution semantics. Legacy flat namespaced
+declarations retain their existing grouping behavior, separately from explicit groups.
+Hosted WebSearch remains unsupported by this canonical sampling slice. Client-discovery output
+retains its existing flat vocabulary and rejects explicit groups or output-schema declarations;
+this request-side extension does not silently expand the discovery protocol.
+
+Delegated ThreadSpawn children with a registered matching parent use the parent's selected
+runtime to request an independent `ModelBackend::new_child_session` factory. Session-affinity
+and preparation state remain independent, while backend-private reusable transport/auth resources
+may be shared. An explicitly supplied child runtime wins without calling the parent factory.
+Unsupported child creation is a non-retryable error, not permission to fall back to Codex or
+share the parent factory. Already-running resumes return their existing session first. Codex
+parents retain the existing fresh-client path; Internal/Guardian sessions and general public
+forks are unchanged. Forked history does not copy provider-private continuation state.
+
+Local compaction consumes canonical completed items and usage through the selected runtime,
+using the existing history-replacement logic. It ignores noncompletion stream structure,
+including reasoning-content section starts, as the Codex compaction path already does.
+Retryable failures reuse the compaction turn handle; nonretryable errors and premature
+canonical EOF terminate without a legacy fallback. Codex rate-limit/server-reasoning
+notifications and response IDs retain their existing adapter-specific behavior.
+Both manual and automatic model compaction gate Codex remote dispatch on the selected
+runtime, not provider identity alone. Canonical backends without their own compaction capability
+remain on local compaction even with OpenAI remote V2 capability; the earlier TokenBudget path
+and Codex remote V1/V2 selection are unchanged.
+
+Canonical backends may opt into backend-managed compaction. Manual compaction creates a fresh
+provider-bound turn handle; inline compaction reuses the current sampling handle. The backend
+receives the exact normalized request snapshot and returns retained input positions or fresh
+canonical items. Retained items preserve their original IDs and sidecar metadata. Source/attached
+notice groups remain intact, and only explicitly marked, unassociated, non-client context is
+removed for reinjection by the full-context producer. Invalid references, ambiguous tool pairs,
+unrepresentable items, and overflowing usage fail before replacing history or advancing the
+window. Fresh items are also limited to 10,000 estimated tokens using the existing history
+estimator; oversized output fails without truncating retained history. This is a heuristic
+budget, not an exact provider-tokenizer guarantee. Backend errors do not authorize a fallback
+to Codex or local sampling.
+
+This path still installs through a temporary Responses-shaped history projection, not a fully
+neutral durable-history implementation. Fresh tool calls use request declarations at the Codex
+adapter boundary; fresh results use their actual retained or projected counterpart. JSON tool
+results, byte-backed media, and unsupported discovery declarations remain explicit errors rather
+than being stringified or losing identity. Removing these compatibility limits is unfinished
+extraction work, not a new product feature.
+
+Regular sampling now preserves canonical
+reasoning-content section starts as transient host events; local compaction continues to ignore
+noncompletion stream structure, including these section starts.
+Realtime and delegated WebSocket
+capability checks still retain the legacy client. The complete agent loop is not yet a
+standalone provider-neutral crate.
 
 Tool runtimes use a separate result-side vocabulary for client discovery: `ToolResultContent::DiscoveredTools`
 contains result-specific semantic function/free-form declarations with namespace, schema or grammar,

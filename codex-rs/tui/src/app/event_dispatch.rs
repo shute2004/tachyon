@@ -20,6 +20,8 @@ use codex_app_server_protocol::ThreadGoalStatus;
 use codex_config::types::WindowsSandboxModeToml;
 
 const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
+const WINDOWS_LEGACY_SANDBOX_DISABLED_MESSAGE: &str =
+    "Legacy Windows sandbox is disabled; set up the elevated sandbox instead.";
 
 impl App {
     pub(super) async fn handle_event(
@@ -1783,82 +1785,12 @@ impl App {
                     let _ = (preset, profile_selection);
                 }
             }
-            AppEvent::BeginWindowsSandboxLegacySetup {
-                preset,
-                profile_selection,
-            } => {
-                #[cfg(any(target_os = "windows", test))]
-                if !self.chat_widget.windows_sandbox_mode_allowed(
-                    codex_config::types::WindowsSandboxModeToml::Unelevated,
-                ) {
-                    tracing::warn!(
-                        "refusing to set up unelevated Windows sandbox mode disallowed by requirements"
-                    );
-                    self.chat_widget.add_info_message(
-                        "That Windows sandbox option is disallowed by requirements.".to_string(),
-                        /*hint*/ None,
-                    );
-                    return Ok(AppRunControl::Continue);
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    let setup_permissions = match self
-                        .windows_setup_permissions(&preset, profile_selection.as_ref())
-                        .await
-                    {
-                        Ok(setup_permissions) => setup_permissions,
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "failed to resolve permission profile for legacy Windows sandbox setup"
-                            );
-                            self.chat_widget.add_error_message(format!(
-                                "Failed to prepare Windows sandbox for the selected permission profile: {err}"
-                            ));
-                            return Ok(AppRunControl::Continue);
-                        }
-                    };
-                    let permission_profile = setup_permissions.permission_profile;
-                    let workspace_roots = setup_permissions.workspace_roots;
-                    let command_cwd = self.config.cwd.clone();
-                    let env_map: std::collections::HashMap<String, String> =
-                        std::env::vars().collect();
-                    let codex_home = self.config.codex_home.clone();
-                    let tx = self.app_event_tx.clone();
-                    let session_telemetry = self.session_telemetry.clone();
-
-                    self.chat_widget.show_windows_sandbox_setup_status();
-                    tokio::task::spawn_blocking(move || {
-                        if let Err(err) =
-                            codex_windows_sandbox::run_windows_sandbox_legacy_preflight(
-                                &permission_profile,
-                                workspace_roots.as_slice(),
-                                codex_home.as_path(),
-                                command_cwd.as_path(),
-                                &env_map,
-                            )
-                        {
-                            session_telemetry.counter(
-                                "codex.windows_sandbox.legacy_setup_preflight_failed",
-                                /*inc*/ 1,
-                                &[],
-                            );
-                            tracing::warn!(
-                                error = %err,
-                                "failed to preflight non-admin Windows sandbox setup"
-                            );
-                        }
-                        tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
-                            preset,
-                            mode: WindowsSandboxEnableMode::Legacy,
-                            profile_selection,
-                        });
-                    });
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = (preset, profile_selection);
-                }
+            AppEvent::BeginWindowsSandboxLegacySetup { .. } => {
+                self.chat_widget.clear_windows_sandbox_setup_status();
+                self.chat_widget.add_error_message(
+                    WINDOWS_LEGACY_SANDBOX_DISABLED_MESSAGE.to_string(),
+                );
+                return Ok(AppRunControl::Continue);
             }
             AppEvent::BeginWindowsSandboxGrantReadRoot { path } => {
                 #[cfg(target_os = "windows")]
@@ -1922,6 +1854,13 @@ impl App {
                 mode,
                 profile_selection,
             } => {
+                if matches!(mode, WindowsSandboxEnableMode::Legacy) {
+                    self.chat_widget.clear_windows_sandbox_setup_status();
+                    self.chat_widget.add_error_message(
+                        WINDOWS_LEGACY_SANDBOX_DISABLED_MESSAGE.to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                }
                 #[cfg(target_os = "windows")]
                 {
                     self.chat_widget.clear_windows_sandbox_setup_status();

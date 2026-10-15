@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -112,6 +113,7 @@ impl McpServerContributor<Config> for SelectedPluginMcpServer {
                 plugin_id: "selected-plugin@test".to_string(),
                 plugin_display_name: "selected-plugin".to_string(),
                 selection_order: 0,
+                source_environment_id: self.environment_id.clone(),
                 config: Box::new(config),
             }]
         })
@@ -127,7 +129,11 @@ impl ToolLifecycleContributor for ConversationHistoryRecorder {
                 .push(RecordedHistory {
                     call_id: input.call_id.to_owned(),
                     arguments: input.payload.log_payload().into_owned(),
-                    items: input.conversation_history.items().cloned().collect(),
+                    items: input
+                        .conversation_history
+                        .items()
+                        .map(Cow::into_owned)
+                        .collect(),
                     mcp_tool: input
                         .mcp_tool
                         .map(|tool| (tool.tool_info().clone(), tool.source().clone())),

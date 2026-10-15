@@ -21,13 +21,16 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
+use codex_history::InputSource;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelsResponse;
@@ -524,6 +527,40 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         guardian_review["client_metadata"]["thread_id"].as_str(),
         Some(guardian_thread_id)
     );
+    let guardian_original_prompt = guardian_review["input"]
+        .as_array()
+        .expect("guardian review input array")
+        .iter()
+        .find(|item| {
+            item["type"].as_str() == Some("message")
+                && item["role"].as_str() == Some("user")
+                && item["content"].to_string().contains("Retry reason:")
+                && item["content"].to_string().contains("Planned action JSON:")
+        })
+        .expect("guardian's original constructed review prompt");
+    let guardian_prompt_content: Vec<ContentItem> =
+        serde_json::from_value(guardian_original_prompt["content"].clone())?;
+    let forbidden_identity_fields = ["input_association", "input_identity"];
+    for (request_name, request_body) in
+        [("prewarm", guardian_prewarm), ("review", &guardian_review)]
+    {
+        let mut request_body_values = vec![request_body];
+        while let Some(value) = request_body_values.pop() {
+            match value {
+                Value::Object(object) => {
+                    for field in &forbidden_identity_fields {
+                        assert!(
+                            !object.contains_key(*field),
+                            "guardian {request_name} body leaked nested {field} history metadata"
+                        );
+                    }
+                    request_body_values.extend(object.values());
+                }
+                Value::Array(values) => request_body_values.extend(values),
+                _ => {}
+            }
+        }
+    }
     let guardian_review_text = guardian_review.to_string();
     assert!(guardian_review_text.contains("Retry reason:"));
     assert!(guardian_review_text.contains("Explicit policy approval required"));
@@ -568,6 +605,42 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         .lines()
         .map(codex_rollout::parse_rollout_line)
         .collect::<serde_json::Result<Vec<_>>>()?;
+    let mut guardian_prompt_record_count = 0;
+    let mut guardian_associated_record_count = 0;
+    let mut guardian_prompt_associations = Vec::new();
+    for line in &guardian_rollout {
+        let RolloutItem::ResponseItem(envelope) = &line.item else {
+            continue;
+        };
+        let is_guardian_prompt = matches!(
+            &envelope.item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user" && content == &guardian_prompt_content
+        );
+        if is_guardian_prompt {
+            guardian_prompt_record_count += 1;
+        }
+        if let Some(association) = envelope
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.input_association)
+        {
+            guardian_associated_record_count += 1;
+            assert!(
+                is_guardian_prompt,
+                "only the original Guardian review prompt may have an input association"
+            );
+            guardian_prompt_associations.push(association);
+        }
+    }
+    assert_eq!(guardian_prompt_record_count, 1);
+    assert_eq!(guardian_associated_record_count, 1);
+    let association = guardian_prompt_associations
+        .pop()
+        .expect("Guardian original prompt input association");
+    assert_eq!(association.source, InputSource::Synthetic);
+    assert_eq!(association.identity.thread_id, guardian_thread_id);
+    assert!(association.identity.sequence.get() > 0);
     assert_eq!(
         guardian_rollout.iter().find_map(|line| match &line.item {
             RolloutItem::SessionMeta(meta) => meta.meta.thread_source.as_ref(),

@@ -37,6 +37,7 @@ use codex_http_client::HttpClientBuilder;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_SANDBOX_STATE_META_CAPABILITY;
+use codex_mcp::McpProtocolMode;
 use codex_mcp::SandboxState;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_utils_path_uri::LegacyAppPathString;
@@ -115,6 +116,9 @@ use tokio::process::Command;
 use tokio::time::Instant;
 use tokio::time::sleep;
 use wiremock::MockServer;
+
+#[path = "mcp_sandbox_tests.rs"]
+mod sandbox_tests;
 
 static OPENAI_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD0AAAA9CAYAAAAeYmHpAAAE6klEQVR4Aeyau44UVxCGx1fZsmRLlm3Zoe0XcGQ5cUiCCIgJeS9CHgAhMkISQnIuGQgJEkBcxLW+nqnZ6uqqc+nuWRC7q/P3qetf9e+MtOwyX25O4Nep6JPyop++0qev9HrfgZ+F6r2DuB/vHOrt/UIkqdDHYvujOW6fO7h/CNEI+a5jc+pBR8uy0jVFsziYu5HtfSUk+Io34q921hLNctFSX0gwww+S8wce8K1LfCU+cYW4888aov8NxqvQILUPPReLOrm6zyLxa4i+6VZuFbJo8d1MOHZm+7VUtB/aIvhPWc/3SWg49JcwFLlHxuXKjtyloo+YNhuW3VS+WPBuUEMvCFKjEDVgFBQHXrnazpqiSxNZCkQ1kYiozsbm9Oz7l4i2Il7vGccGNWAc3XosDrZe/9P3ZnMmzHNEQw4smf8RQ87XEAMsC7Az0Au+dgXerfH4+sHvEc0SYGic8WBBUGqFH2gN7yDrazy7m2pbRTeRmU3+MjZmr1h6LJgPbGy23SI6GlYT0brQ71IY8Us4PNQCm+zepSbaD2BY9xCaAsD9IIj/IzFmKMSdHHonwdZATbTnYREf6/VZGER98N9yCWIvXQwXDoDdhZJoT8jwLnJXDB9w4Sb3e6nK5ndzlkTLnP3JBu4LKkbrYrU69gCVceV0JvpyuW1xlsUVngzhwMetn/XamtTORF9IO5YnWNiyeF9zCAfqR3fUW+vZZKLtgP+ts8BmQRBREAdRDhH3o8QuRh/YucNFz2BEjxbRN6LGzphfKmvP6v6QhqIQyZ8XNJ0W0X83MR1PEcJBNO2KC2Z1TW/v244scp9FwRViZxIOBF0Lctk7ZVSavdLvRlV1hz/ysUi9sr8CIcB3nvWBwA93ykTz18eAYxQ6N/K2DkPA1lv3iXCwmDUT7YkjIby9siXueIJj9H+pzSqJ9oIuJWTUgSSt4WO7o/9GGg0viR4VinNRUDoIj34xoCd6pxD3aK3zfdbnx5v1J3ZNNEJsE0sBG7N27ReDrJc4sFxz7dI/ZAbOmmiKvHBitQXpAdR6+F7v+/ol/tOouUV01EeMZQF2BoQDn6dP4XNr+j9GZEtEK1/L8pFw7bd3a53tsTa7WD+054jOFmPg1XBKPQgnqFfmFcy32ZRvjmiIIQTYFvyDxQ8nH8WIwwGwlyDjDznnilYyFr6njrlZwsKkBpO59A7OwgdzPEWRm+G+oeb7IfyNuzjEEVLrOVxJsxvxwF8kmCM6I2QYmJunz4u4TrADpfl7mlbRTWQ7VmrBzh3+C9f6Grc3YoGN9dg/SXFthpRsT6vobfXRs2VBlgBHXVMLHjDNbIZv1sZ9+X3hB09cXdH1JKViyG0+W9bWZDa/r2f9zAFR71sTzGpMSWz2iI4YssWjWo3REy1MDGjdwe5e0dFSiAC1JakBvu4/CUS8Eh6dqHdU0Or0ioY3W5ClSqDXAy7/6SRfgw8vt4I+tbvvNtFT2kVDhY5+IGb1rCqYaXNF08vSALsXCPmt0kQNqJT1p5eI1mkIV/BxCY1z85lOzeFbPBQHURkkPTlwTYK9gTVE25l84IbFFN+YJDHjdpn0gq6mrHht0dkcjbM4UL9283O5p77GN+SPW/QwVB4IUYg7Or+Kp7naR6qktP98LNF2UxWo9yObPIT9KYg+hK4i56no4rfnM0qeyFf6AwAAAP//trwR3wAAAAZJREFUAwBZ0sR75itw5gAAAABJRU5ErkJggg==";
 
@@ -1156,9 +1160,12 @@ server_names = ["history", "notes"]
     Ok(())
 }
 
+#[test_case(McpProtocolMode::Legacy; "legacy")]
+#[test_case(McpProtocolMode::V20260728; "modern")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_cursors()
--> anyhow::Result<()> {
+async fn mcp_pagination_preserves_valid_tools_and_rejects_oversized_cursors(
+    protocol_mode: McpProtocolMode,
+) -> anyhow::Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -1166,43 +1173,45 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
+    let call_id = "call-second-page-tool";
     let response = mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_function_call_with_namespace(call_id, "mcp__paginated", "sync", "{}"),
             responses::ev_completed("resp-1"),
         ]),
     )
     .await;
+    let final_mock = mount_sse_once(&server, responses::sse_completed("resp-2")).await;
     let command = remote_aware_stdio_server_bin()?;
     let fixture = test_codex()
         .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
         .with_config(move |config| {
             config
                 .features
-                .enable(Feature::Mcp20260728)
-                .expect("test config should allow modern MCP");
+                .set_enabled(
+                    Feature::Mcp20260728,
+                    protocol_mode == McpProtocolMode::V20260728,
+                )
+                .expect("test config should allow MCP protocol selection");
             for (server_name, pagination) in
                 [("paginated", "two-pages"), ("rejected", "oversized-cursor")]
             {
+                let mut env = HashMap::from([(
+                    "MCP_TEST_TOOL_PAGINATION".to_string(),
+                    pagination.to_string(),
+                )]);
+                if protocol_mode == McpProtocolMode::V20260728 {
+                    env.insert(
+                        "CODEX_MCP_PROTOCOL_VERSION".to_string(),
+                        "2026-07-28".to_string(),
+                    );
+                }
                 insert_mcp_server(
                     config,
                     server_name,
-                    stdio_transport(
-                        command.clone(),
-                        Some(HashMap::from([
-                            (
-                                "CODEX_MCP_PROTOCOL_VERSION".to_string(),
-                                "2026-07-28".to_string(),
-                            ),
-                            (
-                                "MCP_TEST_TOOL_PAGINATION".to_string(),
-                                pagination.to_string(),
-                            ),
-                        ])),
-                        Vec::new(),
-                    ),
+                    stdio_transport(command.clone(), Some(env), Vec::new()),
                     TestMcpServerOptions {
                         environment_id: remote_aware_environment_id(),
                         ..Default::default()
@@ -1235,9 +1244,9 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
 
     fixture
         .codex
-        .start_or_steer_turn(read_only_user_turn(
+        .start_or_steer_turn(auto_approved_user_turn(
             &fixture,
-            "show the paginated MCP tools",
+            "call the paginated sync tool",
         ))
         .await?;
     wait_for_event(&fixture.codex, |event| {
@@ -1256,6 +1265,12 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
         responses::namespace_child_tool(&body, "mcp__rejected", "echo").is_none(),
         "a rejected MCP catalog must not reach the model"
     );
+    let output = final_mock.single_request().function_call_output(call_id);
+    let output_text = output["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected successful MCP tool output, got {output}"));
+    let output_json: Value = serde_json::from_str(split_wall_time_wrapped_output(output_text))?;
+    assert_eq!(output_json, json!({"result": "ok"}));
     Ok(())
 }
 

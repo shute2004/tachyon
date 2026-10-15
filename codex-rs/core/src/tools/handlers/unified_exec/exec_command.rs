@@ -311,6 +311,7 @@ impl ExecCommandHandler {
         };
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
+            context.step_context.turn.as_ref(),
             turn_environment,
             &cwd,
             sandbox_permissions,

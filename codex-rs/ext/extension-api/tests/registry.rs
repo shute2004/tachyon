@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used)]
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -245,7 +246,7 @@ impl ConversationHistorySnapshot for AllContributors {
         0
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+    fn items(&self) -> Box<dyn Iterator<Item = Cow<'_, ResponseItem>> + Send + '_> {
         Box::new(std::iter::empty())
     }
 }

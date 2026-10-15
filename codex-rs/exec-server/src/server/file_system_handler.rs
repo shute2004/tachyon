@@ -121,14 +121,12 @@ impl FileSystemHandler {
         params: FsOpenParams,
     ) -> Result<FsOpenResponse, JSONRPCErrorError> {
         validate_file_read_handle_id(&params.handle_id)?;
-        let file = self
+        let open_file = self
             .file_system
-            .open_file_for_read(&params.path, params.sandbox.as_ref())
-            .await
-            .map_err(map_fs_error)?;
+            .open_file_for_read(&params.path, params.sandbox.as_ref());
         let handle_id = self
             .file_reads
-            .open(params.handle_id, file)
+            .open(params.handle_id, open_file)
             .await
             .map_err(map_fs_error)?;
         Ok(FsOpenResponse { handle_id })
