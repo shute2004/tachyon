@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use codex_protocol::mcp::is_node_repl_backed_tool;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::plaintext_agent_message_content;
 use codex_protocol::protocol::GuardianRiskLevel;
@@ -532,8 +533,9 @@ where
     let non_empty_entry = |kind, text: String| {
         (!text.trim().is_empty()).then_some(GuardianTranscriptEntry { kind, text })
     };
-    let content_entry =
-        |kind, content| content_items_to_text(content).and_then(|text| non_empty_entry(kind, text));
+    let content_entry = |kind, content: &[ContentItem]| {
+        content_items_to_text(content).and_then(|text| non_empty_entry(kind, text))
+    };
     let serialized_entry =
         |kind, serialized: Option<String>| serialized.and_then(|text| non_empty_entry(kind, text));
 
