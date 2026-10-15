@@ -516,7 +516,7 @@ fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add),
         expected_tokens
     );
@@ -529,7 +529,7 @@ fn items_after_last_model_generated_tokens_are_zero_without_model_generated_item
     assert_eq!(
         history
             .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
+            .map(|item| estimate_item_token_count(item.as_ref()))
             .fold(0i64, i64::saturating_add),
         0
     );
