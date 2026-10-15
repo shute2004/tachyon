@@ -296,10 +296,11 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
     .await
     .expect("cancelled delegate spawn should not hang");
 
-    assert!(matches!(
-        result,
-        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted)
-    ));
+    let error = result.err().expect("cancelled delegate spawn should fail");
+    assert!(
+        matches!(error.details(), CodexErrorDetails::TurnAborted),
+        "unexpected cancelled delegate spawn error: {error}"
+    );
 }
 
 #[tokio::test]
