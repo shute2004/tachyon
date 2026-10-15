@@ -6,6 +6,7 @@ use crate::RolloutItem;
 use crate::RolloutLine;
 use crate::config::RolloutConfig;
 use chrono::TimeZone;
+use codex_protocol::ResponseItemId;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -488,6 +489,80 @@ async fn load_rollout_items_preserves_security_risk_scores() -> std::io::Result<
         panic!("expected security risk score rollout item");
     };
     assert_eq!(persisted_security_risk, &security_risk);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorder_preserves_additional_tools_in_both_history_modes() -> std::io::Result<()> {
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let session_id = SessionId::default();
+        let thread_id = ThreadId::new();
+        let additional_tools =
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(ResponseItem::AdditionalTools {
+                id: Some(ResponseItemId::with_suffix("at", "persisted")),
+                role: "developer".to_string(),
+                tools: vec![serde_json::json!({
+                    "type": "namespace",
+                    "name": "workspace",
+                    "description": "Workspace tools",
+                    "tools": [{
+                        "type": "function",
+                        "name": "read_file",
+                        "description": "Read a workspace file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"]
+                        }
+                    }]
+                })],
+            }));
+        let original_json =
+            serde_json::to_value(&additional_tools).expect("serialize additional tools item");
+        let persisted_items =
+            crate::persisted_rollout_items(std::slice::from_ref(&additional_tools), history_mode);
+
+        assert_eq!(persisted_items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&persisted_items[0]).expect("serialize persisted item"),
+            original_json
+        );
+
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                thread_id,
+                /*forked_from_id*/ None,
+                /*parent_thread_id*/ None,
+                SessionSource::Exec,
+                /*thread_source*/ None,
+                "test_originator".to_string(),
+                BaseInstructions::default(),
+                Vec::new(),
+            )
+            .with_session_id(session_id)
+            .with_history_mode(history_mode),
+        )
+        .await?;
+        let rollout_path = recorder.rollout_path().to_path_buf();
+        recorder.record_canonical_items(&persisted_items).await?;
+        recorder.flush().await?;
+
+        let (loaded_items, loaded_thread_id, parse_errors) =
+            RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+        assert_eq!(loaded_thread_id, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        assert_eq!(loaded_items.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&loaded_items[1]).expect("serialize loaded item"),
+            original_json
+        );
+        recorder.shutdown().await?;
+    }
 
     Ok(())
 }

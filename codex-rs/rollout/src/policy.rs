@@ -184,10 +184,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
-        | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::Other => false,
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::AdditionalTools { .. } => true,
+        ResponseItem::CompactionTrigger { .. } | ResponseItem::Other => false,
     }
 }
 
