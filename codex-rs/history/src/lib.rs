@@ -34,6 +34,7 @@ mod input_association;
 mod input_identity;
 mod item;
 mod response_projection;
+mod responses_record;
 mod rollout_payload;
 mod timeline;
 
@@ -59,6 +60,7 @@ pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
 pub use response_projection::project_response_item_semantics;
+pub use responses_record::ResponsesHistoryRecord;
 pub use timeline::HistoryAppendKind;
 pub use timeline::HistoryReplacement;
 pub use timeline::HistoryTimeline;

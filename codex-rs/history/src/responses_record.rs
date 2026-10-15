@@ -6,13 +6,13 @@
 
 use std::borrow::Cow;
 
-use codex_history::CodexHarnessMetadata;
-use codex_history::HistoryItem;
-use codex_history::HistoryMessageContent;
-use codex_history::HistoryMessagePhase;
-use codex_history::HistoryToolResultContent;
-use codex_history::ResponseItemEnvelope;
-use codex_history::project_response_item_semantics;
+use crate::CodexHarnessMetadata;
+use crate::HistoryItem;
+use crate::HistoryMessageContent;
+use crate::HistoryMessagePhase;
+use crate::HistoryToolResultContent;
+use crate::ResponseItemEnvelope;
+use crate::project_response_item_semantics;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -25,12 +25,15 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 
 #[cfg(test)]
-#[path = "history_record_tests.rs"]
+#[path = "responses_record_tests.rs"]
 mod tests;
 
-/// One primary-history record. The Responses sidecar is deliberately kept outside the payload.
+/// Transitional adapter for Core's current Responses-shaped history records.
+///
+/// This preserves the existing Codex/Responses projection and is not a provider-neutral wire
+/// format or stable generic history representation.
 #[derive(Debug, Clone)]
-pub(super) struct StoredHistoryRecord {
+pub struct ResponsesHistoryRecord {
     payload: StoredPayload,
     metadata: Option<CodexHarnessMetadata>,
 }
@@ -100,8 +103,9 @@ enum ToolOutputBodyKind {
     ContentItems,
 }
 
-impl StoredHistoryRecord {
-    pub(super) fn from_response_envelope(envelope: ResponseItemEnvelope) -> Self {
+impl ResponsesHistoryRecord {
+    /// Store a Responses envelope in the compact history representation.
+    pub fn from_response_envelope(envelope: ResponseItemEnvelope) -> Self {
         let payload = match canonical_payload(&envelope.item) {
             Some((item, decoration)) => StoredPayload::Canonical { item, decoration },
             None => StoredPayload::Legacy(envelope.item),
@@ -112,7 +116,8 @@ impl StoredHistoryRecord {
         }
     }
 
-    pub(super) fn response_item(&self) -> Cow<'_, ResponseItem> {
+    /// Borrow or reconstruct the Responses item represented by this record.
+    pub fn response_item(&self) -> Cow<'_, ResponseItem> {
         match &self.payload {
             StoredPayload::Legacy(item) => Cow::Borrowed(item),
             StoredPayload::Canonical { item, decoration } => {
@@ -121,7 +126,8 @@ impl StoredHistoryRecord {
         }
     }
 
-    pub(super) fn into_response_envelope(self) -> ResponseItemEnvelope {
+    /// Consume this record into its Responses envelope.
+    pub fn into_response_envelope(self) -> ResponseItemEnvelope {
         let item = match self.payload {
             StoredPayload::Legacy(item) => item,
             StoredPayload::Canonical { item, decoration } => {
@@ -134,7 +140,8 @@ impl StoredHistoryRecord {
         }
     }
 
-    pub(super) fn response_envelope(&self) -> ResponseItemEnvelope {
+    /// Clone this record into its Responses envelope.
+    pub fn response_envelope(&self) -> ResponseItemEnvelope {
         ResponseItemEnvelope {
             item: self.response_item().into_owned(),
             metadata: self.metadata.clone(),
@@ -299,10 +306,10 @@ fn reconstruct_response_item(item: &HistoryItem, decoration: &ResponsesDecoratio
             ResponseItem::Message {
                 id: id.clone(),
                 role: match message.role {
-                    codex_history::HistoryMessageRole::System => "system",
-                    codex_history::HistoryMessageRole::Developer => "developer",
-                    codex_history::HistoryMessageRole::User => "user",
-                    codex_history::HistoryMessageRole::Assistant => "assistant",
+                    crate::HistoryMessageRole::System => "system",
+                    crate::HistoryMessageRole::Developer => "developer",
+                    crate::HistoryMessageRole::User => "user",
+                    crate::HistoryMessageRole::Assistant => "assistant",
                 }
                 .to_string(),
                 content,
@@ -346,7 +353,7 @@ fn reconstruct_response_item(item: &HistoryItem, decoration: &ResponsesDecoratio
             internal_chat_message_metadata_passthrough: passthrough.clone(),
         },
         (HistoryItem::ToolCall(call), ResponsesDecoration::FunctionCall { id, passthrough }) => {
-            let codex_history::HistoryToolInput::Json(arguments) = &call.input else {
+            let crate::HistoryToolInput::Json(arguments) = &call.input else {
                 unreachable!("function call canonical input is JSON")
             };
             ResponseItem::FunctionCall {
@@ -368,7 +375,7 @@ fn reconstruct_response_item(item: &HistoryItem, decoration: &ResponsesDecoratio
                 passthrough,
             },
         ) => {
-            let codex_history::HistoryToolInput::Text(input) = &call.input else {
+            let crate::HistoryToolInput::Text(input) = &call.input else {
                 unreachable!("custom tool call canonical input is text")
             };
             ResponseItem::CustomToolCall {
@@ -417,28 +424,26 @@ fn reconstruct_response_item(item: &HistoryItem, decoration: &ResponsesDecoratio
     }
 }
 
-fn uri_source(source: &codex_history::HistoryMediaSource) -> String {
+fn uri_source(source: &crate::HistoryMediaSource) -> String {
     match source {
-        codex_history::HistoryMediaSource::Uri(uri) => uri.clone(),
-        codex_history::HistoryMediaSource::Bytes { .. } => {
+        crate::HistoryMediaSource::Uri(uri) => uri.clone(),
+        crate::HistoryMediaSource::Bytes { .. } => {
             unreachable!("Responses URI projection never stores inline bytes")
         }
     }
 }
 
-fn image_detail(detail: codex_history::HistoryImageDetail) -> codex_protocol::models::ImageDetail {
+fn image_detail(detail: crate::HistoryImageDetail) -> codex_protocol::models::ImageDetail {
     match detail {
-        codex_history::HistoryImageDetail::Auto => codex_protocol::models::ImageDetail::Auto,
-        codex_history::HistoryImageDetail::Low => codex_protocol::models::ImageDetail::Low,
-        codex_history::HistoryImageDetail::High => codex_protocol::models::ImageDetail::High,
-        codex_history::HistoryImageDetail::Original => {
-            codex_protocol::models::ImageDetail::Original
-        }
+        crate::HistoryImageDetail::Auto => codex_protocol::models::ImageDetail::Auto,
+        crate::HistoryImageDetail::Low => codex_protocol::models::ImageDetail::Low,
+        crate::HistoryImageDetail::High => codex_protocol::models::ImageDetail::High,
+        crate::HistoryImageDetail::Original => codex_protocol::models::ImageDetail::Original,
     }
 }
 
 fn tool_output(
-    result: &codex_history::HistoryToolResult,
+    result: &crate::HistoryToolResult,
     body_kind: ToolOutputBodyKind,
 ) -> FunctionCallOutputPayload {
     let body = match body_kind {

@@ -1,13 +1,13 @@
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 
-use codex_history::CodexHarnessMetadata;
-use codex_history::HistoryItem;
-use codex_history::InputAssociation;
-use codex_history::InputIdentity;
-use codex_history::InputSource;
-use codex_history::ResponseItemEnvelope;
-use codex_history::RolloutItem;
+use crate::CodexHarnessMetadata;
+use crate::HistoryItem;
+use crate::InputAssociation;
+use crate::InputIdentity;
+use crate::InputSource;
+use crate::ResponseItemEnvelope;
+use crate::RolloutItem;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -23,7 +23,7 @@ use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
-use super::StoredHistoryRecord;
+use super::ResponsesHistoryRecord;
 use super::StoredPayload;
 
 fn metadata() -> CodexHarnessMetadata {
@@ -34,7 +34,7 @@ fn metadata() -> CodexHarnessMetadata {
         input_association: Some(InputAssociation {
             identity: InputIdentity {
                 thread_id: ThreadId::new(),
-                incarnation: codex_history::InputStreamIncarnation::new(),
+                incarnation: crate::InputStreamIncarnation::new(),
                 sequence: NonZeroU64::new(4).expect("non-zero sequence"),
             },
             source: InputSource::Synthetic,
@@ -58,7 +58,7 @@ fn assert_roundtrip(item: ResponseItem, canonical: bool) {
     };
     let serialized = serde_json::to_vec(&RolloutItem::ResponseItem(envelope.clone()))
         .expect("source rollout item serializes");
-    let stored = StoredHistoryRecord::from_response_envelope(envelope.clone());
+    let stored = ResponsesHistoryRecord::from_response_envelope(envelope.clone());
 
     assert_eq!(
         matches!(&stored.payload, StoredPayload::Canonical { .. }),
@@ -111,7 +111,7 @@ fn canonical_message_keeps_text_tags_media_uris_identity_and_metadata() {
         item: item.clone(),
         metadata: Some(fixture_metadata.clone()),
     };
-    let stored = StoredHistoryRecord::from_response_envelope(envelope.clone());
+    let stored = ResponsesHistoryRecord::from_response_envelope(envelope.clone());
 
     let StoredPayload::Canonical {
         item: HistoryItem::Message(message),
@@ -121,10 +121,7 @@ fn canonical_message_keeps_text_tags_media_uris_identity_and_metadata() {
         panic!("known-role message should be represented canonically");
     };
     assert_eq!(message.content.len(), 4);
-    assert_eq!(
-        message.phase,
-        Some(codex_history::HistoryMessagePhase::Final)
-    );
+    assert_eq!(message.phase, Some(crate::HistoryMessagePhase::Final));
     assert_eq!(stored.response_item(), Cow::Owned(item.clone()));
     assert_eq!(stored.response_envelope().item, item);
     assert!(matches!(
@@ -146,11 +143,11 @@ fn canonical_message_phase_uses_shared_history_semantics() {
     for (phase, expected) in [
         (
             Some(MessagePhase::Commentary),
-            Some(codex_history::HistoryMessagePhase::Commentary),
+            Some(crate::HistoryMessagePhase::Commentary),
         ),
         (
             Some(MessagePhase::FinalAnswer),
-            Some(codex_history::HistoryMessagePhase::Final),
+            Some(crate::HistoryMessagePhase::Final),
         ),
         (None, None),
     ] {
@@ -163,7 +160,7 @@ fn canonical_message_phase_uses_shared_history_semantics() {
             phase,
             internal_chat_message_metadata_passthrough: None,
         };
-        let stored = StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope {
+        let stored = ResponsesHistoryRecord::from_response_envelope(ResponseItemEnvelope {
             item: item.clone(),
             metadata: None,
         });
