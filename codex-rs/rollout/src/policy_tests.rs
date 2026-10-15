@@ -120,12 +120,7 @@ fn mcp_tool_result_item(result: Option<CallToolResult>) -> RolloutItem {
 #[test]
 fn oversized_command_output_fields_are_projected_independently_without_mutating_input() {
     let short = Some("short output".to_string());
-    let original_outputs = [
-        Some("original stdout".to_string()),
-        short.clone(),
-        None,
-        None,
-    ];
+    let original_outputs = [Some("original stdout".to_string()), short, None, None];
     let oversized = format!(
         "prefix:{}:suffix",
         "💥".repeat(PERSISTED_COMMAND_OUTPUT_MAX_BYTES)
@@ -234,7 +229,7 @@ fn oversized_mcp_results_are_projected_with_a_serialized_result_cap_and_preserve
         CallToolResult {
             content: vec![serde_json::json!({
                 "type": "text",
-                "text": escaped_non_ascii.clone(),
+                "text": escaped_non_ascii,
             })],
             structured_content: Some(serde_json::json!({"retained": "only before projection"})),
             is_error: Some(true),
@@ -242,7 +237,7 @@ fn oversized_mcp_results_are_projected_with_a_serialized_result_cap_and_preserve
         },
         CallToolResult {
             content: small_content.clone(),
-            structured_content: Some(serde_json::json!({"payload": escaped_non_ascii.clone()})),
+            structured_content: Some(serde_json::json!({"payload": escaped_non_ascii})),
             is_error: Some(false),
             meta: Some(serde_json::json!({"retained": "only before projection"})),
         },
