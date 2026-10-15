@@ -1,6 +1,7 @@
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord as StoredHistoryRecord;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -21,27 +22,34 @@ use tracing::info;
 // Changing this value would change model-visible IDs and invalidate prompt caches.
 const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
 
-pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>) {
+pub(crate) fn ensure_call_outputs_present(items: &mut Vec<StoredHistoryRecord>) {
     let output_keys = items
         .iter()
-        .filter_map(|envelope| {
-            let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Output)
-                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
+        .filter_map(|record| {
+            let item = record.response_item();
+            let correlation = tool_correlation(item.as_ref())?;
+            (correlation.side == HistoryToolSide::Output).then_some((
+                correlation.compatibility_pairing_class,
+                correlation.call_id.to_string(),
+            ))
         })
         .collect::<HashSet<_>>();
 
     // Collect synthetic outputs to insert immediately after their calls.
     // Store the insertion position (index of call) alongside the item so
     // we can insert in reverse order and avoid index shifting.
-    let mut missing_outputs_to_insert: Vec<(usize, ResponseItemEnvelope)> = Vec::new();
+    let mut missing_outputs_to_insert: Vec<(usize, StoredHistoryRecord)> = Vec::new();
 
-    for (idx, envelope) in items.iter().enumerate() {
-        let Some(correlation) = tool_correlation(&envelope.item) else {
+    for (idx, record) in items.iter().enumerate() {
+        let item = record.response_item();
+        let Some(correlation) = tool_correlation(item.as_ref()) else {
             continue;
         };
         if correlation.side != HistoryToolSide::Call
-            || output_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
+            || output_keys.contains(&(
+                correlation.compatibility_pairing_class,
+                correlation.call_id.to_string(),
+            ))
         {
             continue;
         }
@@ -49,19 +57,21 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
         // Construction remains in the Responses compatibility layer for now. Matching above uses
         // generic call/result correlation facts plus an explicitly compatibility-only Responses
         // pairing class, so the latter cannot be mistaken for the future canonical history taxonomy.
-        match &envelope.item {
+        match item.as_ref() {
             ResponseItem::FunctionCall { id, call_id, .. } => {
                 info!("Function call output is missing for call id: {call_id}");
                 missing_outputs_to_insert.push((
                     idx,
-                    ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
-                        id: synthetic_output_id("fco", id.as_deref()),
-                        call_id: Some(call_id.clone()),
-                        name: None,
-                        namespace: None,
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        internal_chat_message_metadata_passthrough: None,
-                    }),
+                    StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                        ResponseItem::FunctionCallOutput {
+                            id: synthetic_output_id("fco", id.as_deref()),
+                            call_id: Some(call_id.clone()),
+                            name: None,
+                            namespace: None,
+                            output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                    )),
                 ));
             }
             ResponseItem::ToolSearchCall {
@@ -72,14 +82,16 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                 info!("Tool search output is missing for call id: {call_id}");
                 missing_outputs_to_insert.push((
                     idx,
-                    ResponseItemEnvelope::new(ResponseItem::ToolSearchOutput {
-                        id: synthetic_output_id("tso", id.as_deref()),
-                        call_id: Some(call_id.clone()),
-                        status: "completed".to_string(),
-                        execution: "client".to_string(),
-                        tools: Vec::new(),
-                        internal_chat_message_metadata_passthrough: None,
-                    }),
+                    StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                        ResponseItem::ToolSearchOutput {
+                            id: synthetic_output_id("tso", id.as_deref()),
+                            call_id: Some(call_id.clone()),
+                            status: "completed".to_string(),
+                            execution: "client".to_string(),
+                            tools: Vec::new(),
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                    )),
                 ));
             }
             ResponseItem::CustomToolCall { id, call_id, .. } => {
@@ -88,13 +100,15 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                 ));
                 missing_outputs_to_insert.push((
                     idx,
-                    ResponseItemEnvelope::new(ResponseItem::CustomToolCallOutput {
-                        id: synthetic_output_id("ctco", id.as_deref()),
-                        call_id: call_id.clone(),
-                        name: None,
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        internal_chat_message_metadata_passthrough: None,
-                    }),
+                    StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                        ResponseItem::CustomToolCallOutput {
+                            id: synthetic_output_id("ctco", id.as_deref()),
+                            call_id: call_id.clone(),
+                            name: None,
+                            output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                    )),
                 ));
             }
             // LocalShellCall is represented in upstream streams by a FunctionCallOutput.
@@ -108,14 +122,16 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>)
                 ));
                 missing_outputs_to_insert.push((
                     idx,
-                    ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
-                        id: synthetic_output_id("fco", id.as_deref()),
-                        call_id: Some(call_id.clone()),
-                        name: None,
-                        namespace: None,
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        internal_chat_message_metadata_passthrough: None,
-                    }),
+                    StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                        ResponseItem::FunctionCallOutput {
+                            id: synthetic_output_id("fco", id.as_deref()),
+                            call_id: Some(call_id.clone()),
+                            name: None,
+                            namespace: None,
+                            output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                    )),
                 ));
             }
             _ => {}
@@ -144,24 +160,31 @@ fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseIt
     ))
 }
 
-pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
+pub(crate) fn remove_orphan_outputs(items: &mut Vec<StoredHistoryRecord>) {
     let call_keys = items
         .iter()
-        .filter_map(|envelope| {
-            let correlation = tool_correlation(&envelope.item)?;
-            (correlation.side == HistoryToolSide::Call)
-                .then_some((correlation.compatibility_pairing_class, correlation.call_id))
+        .filter_map(|record| {
+            let item = record.response_item();
+            let correlation = tool_correlation(item.as_ref())?;
+            (correlation.side == HistoryToolSide::Call).then_some((
+                correlation.compatibility_pairing_class,
+                correlation.call_id.to_string(),
+            ))
         })
         .collect::<HashSet<_>>();
 
     let mut orphan_positions = Vec::new();
-    for (position, envelope) in items.iter().enumerate() {
-        let Some(correlation) = tool_correlation(&envelope.item) else {
+    for (position, record) in items.iter().enumerate() {
+        let item = record.response_item();
+        let Some(correlation) = tool_correlation(item.as_ref()) else {
             continue;
         };
         if correlation.side != HistoryToolSide::Output
             || !correlation.local_counterpart_required
-            || call_keys.contains(&(correlation.compatibility_pairing_class, correlation.call_id))
+            || call_keys.contains(&(
+                correlation.compatibility_pairing_class,
+                correlation.call_id.to_string(),
+            ))
         {
             continue;
         }
@@ -198,7 +221,7 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
     }
 }
 
-pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, item: &ResponseItem) {
+pub(crate) fn remove_corresponding_for(items: &mut Vec<StoredHistoryRecord>, item: &ResponseItem) {
     let Some(correlation) = tool_correlation(item) else {
         return;
     };
@@ -215,22 +238,25 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
         ..
     } = item
     {
-        if let Some(pos) = items.iter().position(|envelope| {
-            matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
+        if let Some(pos) = items.iter().position(|record| {
+            let candidate = record.response_item();
+            matches!(candidate.as_ref(), ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
         }) {
             items.remove(pos);
             return;
         }
-        if let Some(pos) = items.iter().position(|envelope| {
-            matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
+        if let Some(pos) = items.iter().position(|record| {
+            let candidate = record.response_item();
+            matches!(candidate.as_ref(), ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
         }) {
             items.remove(pos);
         }
         return;
     }
 
-    if let Some(pos) = items.iter().position(|envelope| {
-        tool_correlation(&envelope.item).is_some_and(|candidate| {
+    if let Some(pos) = items.iter().position(|record| {
+        let item = record.response_item();
+        tool_correlation(item.as_ref()).is_some_and(|candidate| {
             candidate.compatibility_pairing_class == correlation.compatibility_pairing_class
                 && candidate.side == counterpart_side
                 && candidate.call_id == correlation.call_id
@@ -244,17 +270,51 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
 /// When `input_modalities` contains `InputModality::Image`, no stripping is performed.
 pub(crate) fn strip_images_when_unsupported(
     input_modalities: &[InputModality],
-    items: &mut [ResponseItemEnvelope],
+    items: &mut [StoredHistoryRecord],
 ) {
     let supports_images = input_modalities.contains(&InputModality::Image);
     if supports_images {
         return;
     }
 
-    for envelope in items.iter_mut() {
-        match &mut envelope.item {
+    for record in items.iter_mut() {
+        let mut item = record.response_item();
+        let needs_image_normalization = match item.as_ref() {
+            ResponseItem::Message {
+                content,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } => {
+                let content_kinds = internal_chat_message_metadata_passthrough
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_item_kinds.as_ref());
+                content
+                    .iter()
+                    .any(|content_item| matches!(content_item, ContentItem::InputImage { .. }))
+                    || content_kinds.is_none_or(|kinds| kinds.len() != content.len())
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                output.content_items().is_some_and(|content_items| {
+                    content_items.iter().any(|content_item| {
+                        matches!(
+                            content_item,
+                            FunctionCallOutputContentItem::InputImage { .. }
+                        )
+                    })
+                })
+            }
+            ResponseItem::ImageGenerationCall { result, .. } => !result.is_empty(),
+            _ => false,
+        };
+        if !needs_image_normalization {
+            continue;
+        }
+
+        let response_item = item.to_mut();
+        match response_item {
             ResponseItem::Message { .. } => {
-                let Some(mut content) = to_annotated_content(&mut envelope.item) else {
+                let Some(mut content) = to_annotated_content(response_item) else {
                     continue;
                 };
                 for content_item in &mut content {
@@ -262,7 +322,7 @@ pub(crate) fn strip_images_when_unsupported(
                         *content_item = UnsupportedMedia::IMAGE.render_fragment().into_parts().1;
                     }
                 }
-                let _ = set_annotated_content(&mut envelope.item, content);
+                let _ = set_annotated_content(response_item, content);
             }
             ResponseItem::FunctionCallOutput { output, .. }
             | ResponseItem::CustomToolCallOutput { output, .. } => {
@@ -286,8 +346,10 @@ pub(crate) fn strip_images_when_unsupported(
             ResponseItem::ImageGenerationCall { result, .. } => {
                 result.clear();
             }
-            _ => {}
+            _ => continue,
         }
+        let item = item.into_owned();
+        record.replace_response_item(item);
     }
 }
 
@@ -295,16 +357,49 @@ pub(crate) fn strip_images_when_unsupported(
 /// When `input_modalities` contains `InputModality::Audio`, no stripping is performed.
 pub(crate) fn strip_audio_when_unsupported(
     input_modalities: &[InputModality],
-    items: &mut [ResponseItemEnvelope],
+    items: &mut [StoredHistoryRecord],
 ) {
     if input_modalities.contains(&InputModality::Audio) {
         return;
     }
 
-    for envelope in items.iter_mut() {
-        match &mut envelope.item {
+    for record in items.iter_mut() {
+        let mut item = record.response_item();
+        let needs_audio_normalization = match item.as_ref() {
+            ResponseItem::Message {
+                content,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } => {
+                let content_kinds = internal_chat_message_metadata_passthrough
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_item_kinds.as_ref());
+                content
+                    .iter()
+                    .any(|content_item| matches!(content_item, ContentItem::InputAudio { .. }))
+                    || content_kinds.is_none_or(|kinds| kinds.len() != content.len())
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                output.content_items().is_some_and(|content_items| {
+                    content_items.iter().any(|content_item| {
+                        matches!(
+                            content_item,
+                            FunctionCallOutputContentItem::InputAudio { .. }
+                        )
+                    })
+                })
+            }
+            _ => false,
+        };
+        if !needs_audio_normalization {
+            continue;
+        }
+
+        let response_item = item.to_mut();
+        match response_item {
             ResponseItem::Message { .. } => {
-                let Some(mut content) = to_annotated_content(&mut envelope.item) else {
+                let Some(mut content) = to_annotated_content(response_item) else {
                     continue;
                 };
                 for content_item in &mut content {
@@ -312,7 +407,7 @@ pub(crate) fn strip_audio_when_unsupported(
                         *content_item = UnsupportedMedia::AUDIO.render_fragment().into_parts().1;
                     }
                 }
-                let _ = set_annotated_content(&mut envelope.item, content);
+                let _ = set_annotated_content(response_item, content);
             }
             ResponseItem::FunctionCallOutput { output, .. }
             | ResponseItem::CustomToolCallOutput { output, .. } => {
@@ -329,8 +424,10 @@ pub(crate) fn strip_audio_when_unsupported(
                     }
                 }
             }
-            _ => {}
+            _ => continue,
         }
+        let item = item.into_owned();
+        record.replace_response_item(item);
     }
 }
 
@@ -345,28 +442,32 @@ mod tests {
     fn function_output_removal_prefers_function_call_over_local_shell_call() {
         let call_id = "shared-call";
         let mut items = vec![
-            ResponseItemEnvelope::new(ResponseItem::LocalShellCall {
-                id: None,
-                call_id: Some(call_id.to_string()),
-                status: LocalShellStatus::Completed,
-                action: LocalShellAction::Exec(LocalShellExecAction {
-                    command: vec!["echo".to_string(), "local".to_string()],
-                    timeout_ms: None,
-                    working_directory: None,
-                    env: None,
-                    user: None,
-                }),
-                internal_chat_message_metadata_passthrough: None,
-            }),
-            ResponseItemEnvelope::new(ResponseItem::FunctionCall {
-                id: None,
-                name: "do_it".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: call_id.to_string(),
-                encrypted_function_args: None,
-                internal_chat_message_metadata_passthrough: None,
-            }),
+            StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                ResponseItem::LocalShellCall {
+                    id: None,
+                    call_id: Some(call_id.to_string()),
+                    status: LocalShellStatus::Completed,
+                    action: LocalShellAction::Exec(LocalShellExecAction {
+                        command: vec!["echo".to_string(), "local".to_string()],
+                        timeout_ms: None,
+                        working_directory: None,
+                        env: None,
+                        user: None,
+                    }),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            )),
+            StoredHistoryRecord::from_response_envelope(ResponseItemEnvelope::new(
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "do_it".to_string(),
+                    namespace: None,
+                    arguments: "{}".to_string(),
+                    call_id: call_id.to_string(),
+                    encrypted_function_args: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            )),
         ];
         let output = ResponseItem::FunctionCallOutput {
             id: None,
@@ -380,8 +481,9 @@ mod tests {
         remove_corresponding_for(&mut items, &output);
 
         assert_eq!(items.len(), 1);
+        let remaining = items[0].response_item();
         assert!(matches!(
-            &items[0].item,
+            remaining.as_ref(),
             ResponseItem::LocalShellCall {
                 call_id: Some(remaining_call_id),
                 ..

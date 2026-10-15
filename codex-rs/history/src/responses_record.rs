@@ -126,6 +126,16 @@ impl ResponsesHistoryRecord {
         }
     }
 
+    /// Replace the Responses payload while preserving this record's metadata.
+    ///
+    /// The replacement follows the same canonical-versus-legacy rules as initial storage.
+    pub fn replace_response_item(&mut self, item: ResponseItem) {
+        self.payload = match canonical_payload(&item) {
+            Some((item, decoration)) => StoredPayload::Canonical { item, decoration },
+            None => StoredPayload::Legacy(item),
+        };
+    }
+
     /// Consume this record into its Responses envelope.
     pub fn into_response_envelope(self) -> ResponseItemEnvelope {
         let item = match self.payload {

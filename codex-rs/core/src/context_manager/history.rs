@@ -315,18 +315,15 @@ impl ContextManager {
         if !self.history.items().is_empty() {
             // Remove the oldest item (front of the list). Items are ordered from
             // oldest → newest, so index 0 is the first entry recorded.
-            let mut items = self.annotated_items();
-            let removed = items.remove(0);
-            // If the removed item participates in a call/output pair, also remove
-            // its corresponding counterpart to keep the invariants intact without
-            // running a full normalization pass.
-            normalize::remove_corresponding_for(&mut items, &removed.item);
-            self.history.update_items(
-                items
-                    .into_iter()
-                    .map(StoredHistoryRecord::from_response_envelope)
-                    .collect(),
-            );
+            {
+                let items = self.history.items_mut();
+                let removed = items.remove(0);
+                // If the removed item participates in a call/output pair, also remove
+                // its corresponding counterpart to keep the invariants intact without
+                // running a full normalization pass.
+                let removed_item = removed.response_item();
+                normalize::remove_corresponding_for(items, removed_item.as_ref());
+            }
             self.world_state_baseline = None;
         }
     }
@@ -521,26 +518,19 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry or names an external tool event
     /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
-        let mut items = self.annotated_items();
+        let items = self.history.items_mut();
 
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(&mut items);
+        normalize::ensure_call_outputs_present(items);
 
         // Paired outputs must have a corresponding call; named external outputs stand alone.
-        normalize::remove_orphan_outputs(&mut items);
+        normalize::remove_orphan_outputs(items);
 
         // strip images when model does not support them
-        normalize::strip_images_when_unsupported(input_modalities, &mut items);
+        normalize::strip_images_when_unsupported(input_modalities, items);
 
         // strip audio when model does not support it
-        normalize::strip_audio_when_unsupported(input_modalities, &mut items);
-
-        self.history.update_items(
-            items
-                .into_iter()
-                .map(StoredHistoryRecord::from_response_envelope)
-                .collect(),
-        );
+        normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.

@@ -1231,6 +1231,184 @@ fn remove_first_item_removes_matching_output_for_function_call() {
 }
 
 #[test]
+fn normalization_and_remove_first_preserve_cow_history_records_and_metadata() {
+    let with_budget = |item, fallback_token_limit_override| ResponseItemEnvelope {
+        item,
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(fallback_token_limit_override),
+            ..Default::default()
+        }),
+    };
+    let call = with_budget(
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "do_it".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-cow".to_string(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        11,
+    );
+    let output = with_budget(
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-cow".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        22,
+    );
+    let image = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "look".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "https://example.test/cow.png".to_string(),
+                    detail: Some(DEFAULT_IMAGE_DETAIL),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-image".to_string()),
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        33,
+    );
+    let plain_message = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-plain")),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "plain message".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        34,
+    );
+    let opaque_reasoning = with_budget(
+        ResponseItem::Reasoning {
+            id: Some(ResponseItemId::with_suffix("rs", "cow-opaque")),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("opaque reasoning".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        44,
+    );
+    let original = vec![
+        call.clone(),
+        output.clone(),
+        image,
+        plain_message,
+        opaque_reasoning.clone(),
+    ];
+    let mut history = ContextManager::new();
+    history.replace_annotated(original.clone());
+    let frozen = history.clone();
+    let revisions = (
+        history.history.history_version(),
+        history.history.user_message_revision(),
+    );
+
+    history.normalize_history(&[InputModality::Text]);
+
+    let normalized_image = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "look".to_string(),
+                },
+                ContentItem::InputText {
+                    text: "image content omitted because you do not support image input"
+                        .to_string(),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-image".to_string()),
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("images.unsupported".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        33,
+    );
+    let normalized_plain_message = with_budget(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "cow-plain")),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "plain message".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        },
+        34,
+    );
+    let expected_normalized = vec![
+        call,
+        output,
+        normalized_image.clone(),
+        normalized_plain_message.clone(),
+        opaque_reasoning.clone(),
+    ];
+    assert_eq!(history.annotated_items(), expected_normalized);
+    assert!(!std::ptr::eq(
+        history.history.items().as_ptr(),
+        frozen.history.items().as_ptr()
+    ));
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision(),
+        ),
+        revisions
+    );
+
+    history.remove_first_item();
+
+    assert_eq!(
+        history.annotated_items(),
+        vec![normalized_image, normalized_plain_message, opaque_reasoning]
+    );
+    assert_eq!(frozen.annotated_items(), original);
+    assert_eq!(
+        (
+            history.history.history_version(),
+            history.history.user_message_revision(),
+        ),
+        revisions
+    );
+}
+
+#[test]
 fn remove_first_item_removes_matching_call_for_output() {
     let items = vec![
         ResponseItem::FunctionCallOutput {

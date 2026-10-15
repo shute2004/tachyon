@@ -284,6 +284,52 @@ fn canonical_calls_and_outputs_keep_response_only_shape() {
 }
 
 #[test]
+fn replacing_response_item_preserves_metadata_across_canonical_and_legacy_payloads() {
+    let canonical_item = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "replace")),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "canonical before mutation".to_string(),
+        }],
+        phase: Some(MessagePhase::FinalAnswer),
+        internal_chat_message_metadata_passthrough: passthrough(),
+    };
+    let fixture_metadata = metadata();
+    let mut stored = ResponsesHistoryRecord::from_response_envelope(ResponseItemEnvelope {
+        item: canonical_item.clone(),
+        metadata: Some(fixture_metadata.clone()),
+    });
+    assert!(matches!(&stored.payload, StoredPayload::Canonical { .. }));
+
+    let mut legacy_item = canonical_item.clone();
+    let ResponseItem::Message { role, .. } = &mut legacy_item else {
+        panic!("fixture remains a message");
+    };
+    *role = "future_role".to_string();
+    stored.replace_response_item(legacy_item.clone());
+
+    assert!(matches!(&stored.payload, StoredPayload::Legacy(_)));
+    assert_eq!(
+        stored.response_envelope(),
+        ResponseItemEnvelope {
+            item: legacy_item,
+            metadata: Some(fixture_metadata.clone()),
+        }
+    );
+
+    stored.replace_response_item(canonical_item.clone());
+
+    assert!(matches!(&stored.payload, StoredPayload::Canonical { .. }));
+    assert_eq!(
+        stored.into_response_envelope(),
+        ResponseItemEnvelope {
+            item: canonical_item,
+            metadata: Some(fixture_metadata),
+        }
+    );
+}
+
+#[test]
 fn lossy_or_host_specific_items_stay_exact_legacy_records() {
     let cases = vec![
         ResponseItem::Message {
