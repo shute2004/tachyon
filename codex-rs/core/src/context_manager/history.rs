@@ -233,11 +233,22 @@ impl ContextManager {
 
     /// Returns normalized history envelopes for internal consumers that must retain metadata.
     pub(crate) fn for_prompt_annotated(
-        mut self,
+        self,
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
+        self.for_prompt_records(input_modalities)
+            .into_iter()
+            .map(StoredHistoryRecord::into_response_envelope)
+            .collect()
+    }
+
+    /// Returns normalized primary history records for direct model-request consumers.
+    pub(crate) fn for_prompt_records(
+        mut self,
+        input_modalities: &[InputModality],
+    ) -> Vec<StoredHistoryRecord> {
         self.normalize_history(input_modalities);
-        self.into_annotated_items()
+        self.history.into_items()
     }
 
     /// Iterates over raw response items without exposing their history envelopes.

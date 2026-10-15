@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use codex_history::HistoryProjectionFallback;
+use codex_history::ResponsesHistoryRecord;
 use codex_history::project_response_item_semantics;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
@@ -74,6 +75,42 @@ pub(super) fn try_model_request_from_prompt(prompt: &Prompt) -> Option<ModelRequ
         .iter()
         .map(model_input_item_from_response)
         .collect::<Option<Vec<_>>>()?;
+    try_model_request_from_input(prompt, input)
+}
+
+/// Builds a request from the canonical primary-history payloads while retaining the current
+/// Responses prompt as a compatibility and lossless-round-trip template.
+pub(super) fn try_model_request_from_history(
+    prompt: &Prompt,
+    records: &[ResponsesHistoryRecord],
+) -> Option<ModelRequest> {
+    if prompt.cyber_access_program.is_some() || prompt.input.len() != records.len() {
+        return None;
+    }
+
+    let input = records
+        .iter()
+        .zip(&prompt.input)
+        .map(|(record, response_item)| {
+            if !response_message_text_variants_match_role(response_item) {
+                return None;
+            }
+            match record.canonical_item() {
+                Some(item) => Some(item.clone()),
+                None => {
+                    let response_item = record.response_item();
+                    model_input_item_from_response(response_item.as_ref())
+                }
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    try_model_request_from_input(prompt, input)
+}
+
+fn try_model_request_from_input(
+    prompt: &Prompt,
+    input: Vec<ModelInputItem>,
+) -> Option<ModelRequest> {
     let tools = model_tools_from_codex(prompt.tools.as_ref())?;
     let output = match &prompt.output_schema {
         Some(schema) => ModelOutputConfig {
@@ -168,13 +205,7 @@ pub(super) fn prompt_from_model_request(
 }
 
 fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem> {
-    if let ResponseItem::Message { role, content, .. } = item
-        && content.iter().any(|content| match content {
-            ContentItem::InputText { .. } => role == "assistant",
-            ContentItem::OutputText { .. } => role != "assistant",
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
-        })
-    {
+    if !response_message_text_variants_match_role(item) {
         // The shared history vocabulary intentionally erases the wire-level input/output text
         // variant. C2 must still reject role/content mismatches before using that projection.
         return None;
@@ -184,6 +215,17 @@ fn model_input_item_from_response(item: &ResponseItem) -> Option<ModelInputItem>
         Ok(item) => Some(item),
         Err(reason) => model_input_item_from_codex_fallback(item, reason),
     }
+}
+
+fn response_message_text_variants_match_role(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return true;
+    };
+    !content.iter().any(|content| match content {
+        ContentItem::InputText { .. } => role == "assistant",
+        ContentItem::OutputText { .. } => role != "assistant",
+        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+    })
 }
 
 /// Retain the small set of C2-accepted Responses shapes the shared history projection rejects.

@@ -84,6 +84,7 @@ use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_history::ResponsesHistoryRecord;
 use codex_login::CodexAuth;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
@@ -377,10 +378,10 @@ pub(crate) async fn run_turn(
                 .await?;
 
             // Construct the input that we will send to the model.
-            let sampling_request_input: Vec<ResponseItem> = async {
+            let sampling_request_input: Vec<ResponsesHistoryRecord> = async {
                 sess.clone_history()
                     .await
-                    .for_prompt(&step_context.settings.model_info.input_modalities)
+                    .for_prompt_records(&step_context.settings.model_info.input_modalities)
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
@@ -1399,7 +1400,7 @@ async fn run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     turn_runtime: &mut ModelTurnRuntime,
     responses_metadata: &CodexResponsesMetadata,
-    input: Vec<ResponseItem>,
+    input: Vec<ResponsesHistoryRecord>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1422,14 +1423,17 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let input_records = if let Some(input) = initial_input.take() {
             input
         } else {
             sess.clone_history()
                 .await
-                .for_prompt(&step_context.settings.model_info.input_modalities)
+                .for_prompt_records(&step_context.settings.model_info.input_modalities)
         };
-        let mut prompt_input = prompt_input;
+        let mut prompt_input = input_records
+            .iter()
+            .map(|record| record.response_item().into_owned())
+            .collect::<Vec<_>>();
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
             && executed_tool_calls
                 .attach_pending_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output)
@@ -1441,7 +1445,8 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
-        let model_request = crate::model_runtime::try_model_request_from_prompt(&prompt);
+        let model_request =
+            crate::model_runtime::try_model_request_from_history(&prompt, &input_records);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),

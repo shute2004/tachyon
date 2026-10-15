@@ -3,7 +3,10 @@ use super::*;
 use crate::model_runtime::ir::ModelMessage;
 use crate::model_runtime::response_item_from_new_model_input;
 use crate::model_runtime::response_item_from_new_model_tool_result;
+use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_protocol::ResponseItemId;
+use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_tools::JsonSchema;
 use pretty_assertions::assert_eq;
@@ -27,6 +30,20 @@ fn prompt_with(input: Vec<ResponseItem>, tools: Vec<ToolSpec>) -> Prompt {
         output_schema_strict: true,
         cyber_access_program: None,
     }
+}
+
+fn records_from_prompt(prompt: &Prompt) -> Vec<ResponsesHistoryRecord> {
+    prompt
+        .input
+        .iter()
+        .cloned()
+        .map(|item| {
+            ResponsesHistoryRecord::from_response_envelope(ResponseItemEnvelope {
+                item,
+                metadata: None,
+            })
+        })
+        .collect()
 }
 
 fn assert_prompt_request_semantics_round_trip(prompt: &Prompt) -> ModelRequest {
@@ -200,6 +217,155 @@ fn shared_history_input_projection_preserves_c2_text_variant_role_checks() {
             .expect("valid C2 text semantics also project through history");
         assert_eq!(model_input_item_from_response(&item), Some(shared));
     }
+}
+
+#[test]
+fn stored_history_request_matches_prompt_for_canonical_and_legacy_records() {
+    let prompt = prompt_with(
+        vec![
+            ResponseItem::Message {
+                id: Some(ResponseItemId::with_suffix("msg", "stored-request")),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "canonical message".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: Some(ResponseItemId::with_suffix("fc", "stored-request")),
+                name: "read_file".to_string(),
+                namespace: Some("filesystem".to_string()),
+                arguments: r#"{"path":"a.txt"}"#.to_string(),
+                encrypted_function_args: None,
+                call_id: "call-stored".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Reasoning {
+                id: Some(ResponseItemId::with_suffix("rs", "stored-request")),
+                summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: "legacy reasoning summary".to_string(),
+                }],
+                content: Some(vec![ReasoningItemContent::ReasoningText {
+                    text: "legacy reasoning content".to_string(),
+                }]),
+                encrypted_content: Some("opaque continuation".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::ToolSearchCall {
+                id: Some(ResponseItemId::with_suffix("tsc", "stored-request")),
+                call_id: Some("call-search".to_string()),
+                status: Some("completed".to_string()),
+                execution: TOOL_SEARCH_CLIENT_EXECUTION.to_string(),
+                arguments: json!({"query": "available tools"}),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        Vec::new(),
+    );
+    let records = records_from_prompt(&prompt);
+    assert!(records[0].canonical_item().is_some());
+    assert!(records[1].canonical_item().is_some());
+    assert!(records[2].canonical_item().is_none());
+    assert!(records[3].canonical_item().is_none());
+
+    let prompt_request =
+        try_model_request_from_prompt(&prompt).expect("existing prompt path is representable");
+    let history_request = try_model_request_from_history(&prompt, &records)
+        .expect("stored-history path should preserve the same request");
+    assert_eq!(history_request, prompt_request);
+    let rebuilt = prompt_from_model_request(&history_request, &prompt).expect("round trip");
+    assert_eq!(rebuilt.input, prompt.input);
+}
+
+#[test]
+fn stored_history_request_preserves_trace_metadata_only_in_prompt_template() {
+    let mut prompt = prompt_with(
+        vec![ResponseItem::FunctionCallOutput {
+            id: Some(ResponseItemId::with_suffix("fco", "stored-trace")),
+            call_id: Some("call-traced".to_string()),
+            name: Some("shell".to_string()),
+            namespace: None,
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("completed".to_string()),
+                success: Some(true),
+            },
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("turn-traced".to_string()),
+                    ..Default::default()
+                },
+            ),
+        }],
+        Vec::new(),
+    );
+    let records = records_from_prompt(&prompt);
+    prompt.input[0].append_executed_tool_calls(vec![ExecutedToolCall::new(
+        "shell".to_string(),
+        json!({"command": "echo done"}),
+    )]);
+
+    let prompt_request =
+        try_model_request_from_prompt(&prompt).expect("trace metadata is model-invisible");
+    let history_request = try_model_request_from_history(&prompt, &records)
+        .expect("stored history remains aligned with the metadata-only edit");
+    assert_eq!(history_request, prompt_request);
+    let rebuilt = prompt_from_model_request(&history_request, &prompt).expect("round trip");
+    assert_eq!(rebuilt.input, prompt.input);
+}
+
+#[test]
+fn stored_history_request_rejects_misalignment_and_invalid_text_roles() {
+    let stored_prompt = prompt_with(
+        vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "stored text".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        Vec::new(),
+    );
+    let records = records_from_prompt(&stored_prompt);
+    let mismatched_prompt = prompt_with(
+        vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "different template text".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        Vec::new(),
+    );
+    assert_eq!(
+        try_model_request_from_history(&mismatched_prompt, &records),
+        None
+    );
+    assert_eq!(try_model_request_from_history(&stored_prompt, &[]), None);
+
+    let invalid_role_prompt = prompt_with(
+        vec![ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "old C2 rejects this".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        Vec::new(),
+    );
+    let invalid_role_records = records_from_prompt(&invalid_role_prompt);
+    assert!(invalid_role_records[0].canonical_item().is_some());
+    assert_eq!(try_model_request_from_prompt(&invalid_role_prompt), None);
+    assert_eq!(
+        try_model_request_from_history(&invalid_role_prompt, &invalid_role_records),
+        None
+    );
 }
 
 #[test]

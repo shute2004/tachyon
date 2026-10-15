@@ -101,6 +101,14 @@ pub(crate) fn try_model_request_from_prompt(prompt: &Prompt) -> Option<ModelRequ
     codex_request::try_model_request_from_prompt(prompt)
 }
 
+/// Transitional bridge building request semantics from primary history records directly.
+pub(crate) fn try_model_request_from_history(
+    prompt: &Prompt,
+    records: &[codex_history::ResponsesHistoryRecord],
+) -> Option<ModelRequest> {
+    codex_request::try_model_request_from_history(prompt, records)
+}
+
 /// Rebuilds one fresh Codex item from canonical compaction output when the conversion is lossless.
 pub(crate) fn response_item_from_new_model_input(
     item: &ModelInputItem,

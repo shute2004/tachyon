@@ -126,6 +126,14 @@ impl ResponsesHistoryRecord {
         }
     }
 
+    /// Borrow canonical model semantics when this record has a canonical payload.
+    pub fn canonical_item(&self) -> Option<&HistoryItem> {
+        match &self.payload {
+            StoredPayload::Canonical { item, .. } => Some(item),
+            StoredPayload::Legacy(_) => None,
+        }
+    }
+
     /// Replace the Responses payload while preserving this record's metadata.
     ///
     /// The replacement follows the same canonical-versus-legacy rules as initial storage.

@@ -82,6 +82,33 @@ fn assert_roundtrip(item: ResponseItem, canonical: bool) {
 }
 
 #[test]
+fn canonical_item_borrows_semantics_and_returns_none_for_legacy() {
+    let canonical = ResponsesHistoryRecord::from_response_envelope(ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "canonical history".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: None,
+    });
+    let canonical_item = canonical.canonical_item().expect("message is canonical");
+    let StoredPayload::Canonical { item, .. } = &canonical.payload else {
+        panic!("known-role message should be stored canonically");
+    };
+    assert!(std::ptr::eq(canonical_item, item));
+
+    let legacy = ResponsesHistoryRecord::from_response_envelope(ResponseItemEnvelope {
+        item: ResponseItem::Other,
+        metadata: None,
+    });
+    assert!(legacy.canonical_item().is_none());
+}
+
+#[test]
 fn canonical_message_keeps_text_tags_media_uris_identity_and_metadata() {
     let image_uri = "data:image/png;base64,AAECAw==".to_string();
     let audio_uri = "https://example.test/audio.wav".to_string();

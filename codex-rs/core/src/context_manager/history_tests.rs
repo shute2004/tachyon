@@ -804,6 +804,75 @@ fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
 }
 
 #[test]
+fn for_prompt_records_matches_annotated_projection_and_preserves_cow_snapshot() {
+    let first = ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "records-image")),
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "keep".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: Some(DEFAULT_IMAGE_DETAIL),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.text".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
+        },
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(17),
+            ..Default::default()
+        }),
+    };
+    let second = ResponseItemEnvelope {
+        item: ResponseItem::Reasoning {
+            id: Some(ResponseItemId::with_suffix("rs", "records-opaque")),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some("opaque continuation".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(29),
+            ..Default::default()
+        }),
+    };
+    let original = vec![first.clone(), second.clone()];
+    let mut history = ContextManager::new();
+    history.replace_annotated(original.clone());
+    let snapshot = history.clone();
+    let original_items = history.history.items().as_ptr();
+
+    let records = history.clone().for_prompt_records(&[InputModality::Text]);
+    let projected_records = records
+        .iter()
+        .map(StoredHistoryRecord::response_envelope)
+        .collect::<Vec<_>>();
+    let projected_annotated = history.clone().for_prompt_annotated(&[InputModality::Text]);
+
+    assert_eq!(projected_records, projected_annotated);
+    assert_eq!(projected_records.len(), 2);
+    assert_ne!(projected_records[0].item, first.item);
+    assert_eq!(projected_records[0].metadata, first.metadata);
+    assert_eq!(projected_records[1], second);
+    assert!(std::ptr::eq(
+        history.history.items().as_ptr(),
+        original_items
+    ));
+    assert_eq!(snapshot.annotated_items(), original);
+}
+
+#[test]
 fn drop_last_n_user_turns_treats_inter_agent_assistant_messages_as_instruction_turns() {
     let first_turn = user_input_text_msg("first");
     let first_reply = assistant_msg("done");
