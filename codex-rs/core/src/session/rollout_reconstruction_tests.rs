@@ -8,6 +8,7 @@ use crate::context::ContextualUserFragment;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -58,6 +59,13 @@ fn assistant_message(text: &str) -> ResponseItem {
 
 fn annotated(items: Vec<ResponseItem>) -> Vec<ResponseItemEnvelope> {
     items.into_iter().map(ResponseItemEnvelope::new).collect()
+}
+
+fn response_envelopes(items: &[ResponsesHistoryRecord]) -> Vec<ResponseItemEnvelope> {
+    items
+        .iter()
+        .map(ResponsesHistoryRecord::response_envelope)
+        .collect()
 }
 
 fn inter_agent_assistant_message(text: &str) -> ResponseItem {
@@ -467,7 +475,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
         .await;
 
     assert_eq!(
-        reconstructed.history,
+        response_envelopes(&reconstructed.history),
         annotated(vec![turn_one_user, turn_one_assistant])
     );
     assert_eq!(
@@ -573,7 +581,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_inc
         .await;
 
     assert_eq!(
-        reconstructed.history,
+        response_envelopes(&reconstructed.history),
         annotated(vec![turn_one_user, turn_one_assistant])
     );
     assert_eq!(
@@ -710,7 +718,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
         .await;
 
     assert_eq!(
-        reconstructed.history,
+        response_envelopes(&reconstructed.history),
         annotated(vec![turn_one_user, turn_one_assistant])
     );
     assert_eq!(
@@ -817,7 +825,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
         .await;
 
     assert_eq!(
-        reconstructed.history,
+        response_envelopes(&reconstructed.history),
         annotated(vec![
             user_message("turn 1 user"),
             assistant_message("turn 1 assistant")
@@ -893,7 +901,7 @@ async fn reconstruct_history_rollback_clears_history_and_metadata_when_exceeding
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
 
-    assert_eq!(reconstructed.history, Vec::new());
+    assert!(reconstructed.history.is_empty());
     assert_eq!(reconstructed.previous_turn_settings, None);
     assert!(reconstructed.reference_context_item.is_none());
 }
@@ -1302,7 +1310,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         .await;
 
     assert_eq!(
-        reconstructed.history,
+        response_envelopes(&reconstructed.history),
         annotated(vec![
             user_message("before compact"),
             ContextualUserFragment::into(CompactionSummary::new("legacy summary")),

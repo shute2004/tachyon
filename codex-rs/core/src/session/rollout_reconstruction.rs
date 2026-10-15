@@ -2,6 +2,7 @@ use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
@@ -9,7 +10,7 @@ use uuid::Uuid;
 // the resume/fork hydration metadata derived from the same replay.
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
-    pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) history: Vec<ResponsesHistoryRecord>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
     pub(super) world_state_baseline: Option<WorldStateSnapshot>,
@@ -429,7 +430,7 @@ impl Session {
             id: None,
         });
         RolloutReconstruction {
-            history: history.into_annotated_items(),
+            history: history.into_records(),
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,

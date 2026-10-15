@@ -1552,11 +1552,11 @@ impl Session {
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
         // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
-        // the prior batch behavior and carry history-only metadata in a positional sidecar.
-        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
-            .into_iter()
-            .map(|envelope| (envelope.item, envelope.metadata))
-            .unzip();
+        // the prior batch behavior while leaving unchanged primary records and metadata intact.
+        let mut prepared_history = history
+            .iter()
+            .map(|record| record.response_item().into_owned())
+            .collect::<Vec<_>>();
         let _ = prepare_image_response_items(
             &mut prepared_history,
             ImagePreparationMode::DetailBased,
@@ -1565,17 +1565,17 @@ impl Session {
         prepare_audio_response_items(&mut prepared_history);
         assert_eq!(
             prepared_history.len(),
-            metadata.len(),
+            history.len(),
             "replay media preparation must remain one-to-one when resize notices are disabled"
         );
-        history = prepared_history
-            .into_iter()
-            .zip(metadata)
-            .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
-            .collect();
+        for (record, prepared_item) in history.iter_mut().zip(prepared_history) {
+            if record.response_item().as_ref() != &prepared_item {
+                record.replace_response_item(prepared_item);
+            }
+        }
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(
+            state.replace_history_records(
                 history,
                 reference_context_item,
                 HistoryReplacement::Reset,

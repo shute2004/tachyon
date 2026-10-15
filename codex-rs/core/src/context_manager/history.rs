@@ -280,11 +280,15 @@ impl ContextManager {
 
     /// Returns annotated history items and consumes the snapshot.
     pub(crate) fn into_annotated_items(self) -> Vec<ResponseItemEnvelope> {
-        self.history
-            .into_items()
+        self.into_records()
             .into_iter()
             .map(StoredHistoryRecord::into_response_envelope)
             .collect()
+    }
+
+    /// Returns primary history records and consumes the snapshot.
+    pub(crate) fn into_records(self) -> Vec<StoredHistoryRecord> {
+        self.history.into_items()
     }
 
     pub(crate) fn history_version(&self) -> u64 {
@@ -345,25 +349,34 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.history.replace(
+        self.replace_records(
             items
                 .into_iter()
                 .map(StoredHistoryRecord::from_response_envelope)
                 .collect(),
             HistoryReplacement::Reset,
         );
-        self.world_state_baseline = None;
     }
 
     /// Compaction changes the model's history without changing the user's authorization.
+    #[cfg(test)]
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
-        self.history.replace(
+        self.replace_records(
             items
                 .into_iter()
                 .map(StoredHistoryRecord::from_response_envelope)
                 .collect(),
             HistoryReplacement::Compaction,
         );
+    }
+
+    /// Replaces the primary history records while preserving replacement revision semantics.
+    pub(crate) fn replace_records(
+        &mut self,
+        items: Vec<StoredHistoryRecord>,
+        replacement: HistoryReplacement,
+    ) {
+        self.history.replace(items, replacement);
         self.world_state_baseline = None;
     }
 

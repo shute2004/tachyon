@@ -119,6 +119,7 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
+use codex_history::ResponsesHistoryRecord;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_network_proxy::NetworkProxyConfig;
@@ -718,8 +719,11 @@ pub(super) fn raw_history_items(history: &ContextManager) -> Vec<ResponseItem> {
     history.raw_items().map(Cow::into_owned).collect()
 }
 
-fn raw_envelopes(items: &[ResponseItemEnvelope]) -> Vec<ResponseItem> {
-    items.iter().map(|envelope| envelope.item.clone()).collect()
+fn raw_records(records: &[ResponsesHistoryRecord]) -> Vec<ResponseItem> {
+    records
+        .iter()
+        .map(|record| record.response_item().into_owned())
+        .collect()
 }
 
 fn developer_input_texts(items: &[ResponseItem]) -> Vec<&str> {
@@ -2140,7 +2144,7 @@ async fn reconstruct_history_matches_live_compactions() {
         .reconstruct_history_from_rollout(reconstruction_turn.as_ref(), &rollout_items)
         .await;
 
-    assert_eq!(expected, raw_envelopes(&reconstructed.history));
+    assert_eq!(expected, raw_records(&reconstructed.history));
     assert_eq!(2, reconstructed.window_number);
     assert_eq!(
         reconstructed
@@ -2197,7 +2201,21 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
 
-    assert_eq!(reconstructed.history, replacement_history);
+    assert_eq!(
+        reconstructed
+            .history
+            .iter()
+            .map(ResponsesHistoryRecord::response_envelope)
+            .collect::<Vec<_>>(),
+        replacement_history
+    );
+    session
+        .apply_rollout_reconstruction(&turn_context, &rollout_items)
+        .await;
+    assert_eq!(
+        session.clone_history().await.annotated_items(),
+        replacement_history
+    );
     assert_eq!(42, reconstructed.window_number);
     assert_eq!(Some(first_window_id), reconstructed.first_window_id);
     assert_eq!(Some(previous_window_id), reconstructed.previous_window_id);
