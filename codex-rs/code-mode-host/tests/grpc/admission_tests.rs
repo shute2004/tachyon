@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn session_admission_retries_only_transient_failures_and_is_bounded() -> Result<()> {
