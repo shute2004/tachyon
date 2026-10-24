@@ -57,10 +57,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
+use tracing::Subscriber;
+use tracing::span::Attributes;
+use tracing::span::Id;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context as LayerContext;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
 use wiremock::Mock;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
@@ -234,6 +243,39 @@ fn completed_response_sequence(count: usize) -> Vec<String> {
             ])
         })
         .collect()
+}
+
+#[derive(Clone, Default)]
+struct McpCacheCounters {
+    completed_runtime_refreshes: Arc<AtomicUsize>,
+    search_index_builds: Arc<AtomicUsize>,
+}
+
+impl<S> Layer<S> for McpCacheCounters
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(&self, attributes: &Attributes<'_>, _id: &Id, _context: LayerContext<'_, S>) {
+        let metadata = attributes.metadata();
+        if metadata.target() == "codex_core::tools::handlers::tool_search"
+            && metadata.name() == "new"
+        {
+            self.search_index_builds.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn on_close(&self, id: Id, context: LayerContext<'_, S>) {
+        let Some(span) = context.span(&id) else {
+            return;
+        };
+        let metadata = span.metadata();
+        if metadata.target() == "codex_core::session::mcp_runtime"
+            && metadata.name() == "mcp.runtime.refresh"
+        {
+            self.completed_runtime_refreshes
+                .fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl ThreadLifecycleContributor<Config> for McpResourceAccessCapture {
@@ -922,9 +964,17 @@ async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespaces() -> Result<()> {
     skip_if_no_network!(Ok(()));
+
+    let counters = McpCacheCounters::default();
+    // Keep concurrent tests without a subscriber from caching these callsites as disabled.
+    let _interest_cache_guard =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _tracing = tracing_subscriber::registry()
+        .with(counters.clone())
+        .set_default();
 
     let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount_searchable(&server).await?;
@@ -936,7 +986,24 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
 
     test.submit_turn("inspect initially available deferred tools")
         .await?;
+    let initial_completed_refreshes = counters.completed_runtime_refreshes.load(Ordering::SeqCst);
+    let initial_search_index_builds = counters.search_index_builds.load(Ordering::SeqCst);
+    assert!(
+        initial_search_index_builds > 0,
+        "the initial turn must build the tool-search index"
+    );
+
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("inspect unchanged deferred tools").await?;
+    assert!(
+        counters.completed_runtime_refreshes.load(Ordering::SeqCst) > initial_completed_refreshes,
+        "the unchanged follow-up must use a newly published MCP runtime"
+    );
+    assert_eq!(
+        counters.search_index_builds.load(Ordering::SeqCst),
+        initial_search_index_builds,
+        "equivalent MCP metadata must preserve handlers and reuse the search index"
+    );
 
     let mut refresh_config = test.config.clone();
     let user_config_path = refresh_config.codex_home.join("config.toml");
@@ -955,6 +1022,18 @@ enabled = false
 
     let requests = response.requests();
     assert_eq!(requests.len(), 3);
+    let final_body_json = requests[2].body_json();
+    let final_tools = final_body_json["tools"]
+        .as_array()
+        .expect("final model request must contain a tools array");
+    assert!(
+        !final_tools.is_empty(),
+        "the final model request should retain its non-MCP tools"
+    );
+    assert!(
+        final_tools.iter().all(|tool| tool["type"] != "tool_search"),
+        "removing all deferred tools must stop advertising the cached search tool"
+    );
     let tools_states = requests
         .iter()
         .map(tools_state_sections)
@@ -975,6 +1054,7 @@ enabled = false
         )
     );
 
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
