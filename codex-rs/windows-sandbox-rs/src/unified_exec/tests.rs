@@ -269,8 +269,7 @@ fn legacy_launch_apis_reject_before_launch_or_mutation() {
                     /*stdin_open*/ false,
                     /*use_private_desktop*/ false,
                 ))
-                .err()
-                .expect("direct legacy session API should reject before spawning");
+                .expect_err("direct legacy session API should reject before spawning");
             assert_legacy_backend_rejected(&api, error, &launch_marker, &outside_file, &codex_home);
         }
 
@@ -299,8 +298,7 @@ fn legacy_launch_apis_reject_before_launch_or_mutation() {
                     use_private_desktop: false,
                 },
             ))
-            .err()
-            .expect("RestrictedToken level should reject before spawning");
+            .expect_err("RestrictedToken level should reject before spawning");
         assert_legacy_backend_rejected(&api, error, &launch_marker, &outside_file, &codex_home);
 
         let api = format!("{profile_name} legacy capture");
@@ -358,8 +356,7 @@ fn legacy_launch_apis_reject_before_launch_or_mutation() {
                 request,
                 |_, _| observer_called.set(true),
             ))
-            .err()
-            .expect("observer legacy API should reject before launching");
+            .expect_err("observer legacy API should reject before launching");
         assert!(
             !observer_called.get(),
             "{api}: launch observer must not run"
