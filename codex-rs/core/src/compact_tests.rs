@@ -757,8 +757,14 @@ async fn process_compacted_history_reinjects_model_switch_message() {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }];
+    let (_, turn_context) = crate::session::tests::make_session_and_context().await;
+    let mut previous_context_item = turn_context.to_turn_context_item();
+    previous_context_item.model = "previous-regular-model".to_string();
     let previous_turn_settings = PreviousTurnSettings {
-        model: "previous-regular-model".to_string(),
+        model_selection:
+            crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                &previous_context_item,
+            ),
         comp_hash: None,
         realtime_active: None,
     };

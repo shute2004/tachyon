@@ -28,6 +28,8 @@ use crate::model_runtime::CodexModelEventContext;
 use crate::model_runtime::CodexModelRuntimeSideEvent;
 use crate::model_runtime::ModelRuntimeEvent;
 use crate::model_runtime::ModelTurnRuntime;
+use crate::model_runtime::codex_turn_context_for_historical_selection;
+use crate::model_runtime::historical_model_selection_from_codex_turn_context;
 use crate::model_runtime::ir::ModelEvent;
 use crate::model_runtime::ir::ModelReasoningDeltaKind;
 use crate::model_runtime::retry::ModelStreamRequest;
@@ -273,7 +275,7 @@ pub(crate) async fn run_turn(
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info().slug.clone(),
+        model_selection: historical_model_selection_from_codex_turn_context(&turn_context),
         comp_hash: turn_context.model_info().comp_hash.clone(),
         realtime_active: Some(turn_context.realtime_active),
     }))
@@ -1105,11 +1107,17 @@ async fn maybe_run_previous_model_inline_compact(
         previous_turn_settings.comp_hash.as_deref(),
         turn_context.model_info().comp_hash.as_deref(),
     );
-    let previous_model = previous_turn_settings.model;
+    let previous_model = previous_turn_settings
+        .model_selection
+        .model_id()
+        .to_string();
     let previous_model_turn_context = Arc::new(
-        turn_context
-            .with_model(previous_model.clone(), &sess.services.models_manager)
-            .await,
+        codex_turn_context_for_historical_selection(
+            turn_context,
+            &previous_turn_settings.model_selection,
+            &sess.services.models_manager,
+        )
+        .await,
     );
 
     if should_compact_for_comp_hash_change {

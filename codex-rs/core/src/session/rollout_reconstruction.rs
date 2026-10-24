@@ -231,7 +231,7 @@ impl Session {
                         ctx.turn_id.as_deref(),
                     ) {
                         active_segment.previous_turn_settings = Some(PreviousTurnSettings {
-                            model: ctx.model.clone(),
+                            model_selection: crate::model_runtime::historical_model_selection_from_codex_turn_context_item(ctx),
                             comp_hash: ctx.comp_hash.clone(),
                             realtime_active: ctx.realtime_active,
                         });

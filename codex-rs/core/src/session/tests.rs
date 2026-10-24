@@ -3669,7 +3669,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         multi_agent_version: None,
         multi_agent_mode: None,
         realtime_active: Some(turn_context.realtime_active),
-        cyber_access_program: None,
+        cyber_access_program: Some(codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue),
         effort: turn_context.reasoning_effort().cloned(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
@@ -3719,7 +3719,10 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     assert_eq!(
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
-            model: previous_model.to_string(),
+            model_selection:
+                crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                    &previous_context_item,
+                ),
             comp_hash: None,
             realtime_active: Some(turn_context.realtime_active),
         })
@@ -3762,8 +3765,13 @@ async fn thread_rollback_drops_last_turn_from_history() {
         .map(RolloutItem::ResponseItem)
         .collect();
     sess.persist_rollout_items(&rollout_items).await;
+    let mut stale_context_item = tc.to_turn_context_item();
+    stale_context_item.model = "stale-model".to_string();
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: "stale-model".to_string(),
+        model_selection:
+            crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                &stale_context_item,
+            ),
         comp_hash: None,
         realtime_active: Some(tc.realtime_active),
     }))
@@ -3954,8 +3962,13 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         Some(first_context_item.clone()),
     )
     .await;
+    let mut stale_context_item = tc.to_turn_context_item();
+    stale_context_item.model = "stale-model".to_string();
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: "stale-model".to_string(),
+        model_selection:
+            crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                &stale_context_item,
+            ),
         comp_hash: None,
         realtime_active: None,
     }))
@@ -3972,7 +3985,10 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
     assert_eq!(
         sess.previous_turn_settings().await,
         Some(PreviousTurnSettings {
-            model: tc.model_info().slug.clone(),
+            model_selection:
+                crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                    &first_context_item,
+                ),
             comp_hash: None,
             realtime_active: Some(tc.realtime_active),
         })
@@ -9985,7 +10001,9 @@ async fn build_initial_context_restates_realtime_start_when_reference_context_is
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.realtime_active = true;
     let previous_turn_settings = PreviousTurnSettings {
-        model: turn_context.model_info().slug.clone(),
+        model_selection: crate::model_runtime::historical_model_selection_from_codex_turn_context(
+            &turn_context,
+        ),
         comp_hash: None,
         realtime_active: Some(true),
     };
@@ -10310,8 +10328,13 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
 #[tokio::test]
 async fn build_initial_context_prepends_model_switch_message() {
     let (session, turn_context) = make_session_and_context().await;
+    let mut previous_context_item = turn_context.to_turn_context_item();
+    previous_context_item.model = "previous-regular-model".to_string();
     let previous_turn_settings = PreviousTurnSettings {
-        model: "previous-regular-model".to_string(),
+        model_selection:
+            crate::model_runtime::historical_model_selection_from_codex_turn_context_item(
+                &previous_context_item,
+            ),
         comp_hash: None,
         realtime_active: None,
     };
@@ -10365,7 +10388,10 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
 
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
-            model: previous_context.model_info().slug.clone(),
+            model_selection:
+                crate::model_runtime::historical_model_selection_from_codex_turn_context(
+                    &previous_context,
+                ),
             comp_hash: None,
             realtime_active: Some(previous_context.realtime_active),
         }))

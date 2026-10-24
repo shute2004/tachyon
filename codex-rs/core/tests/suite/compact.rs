@@ -5433,3 +5433,6 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
 
     Ok(())
 }
+
+#[path = "compact_program_tests.rs"]
+mod program_tests;

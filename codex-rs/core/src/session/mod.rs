@@ -275,7 +275,7 @@ mod rollout_reconstruction_tests;
 /// `realtime_active -> false` transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreviousTurnSettings {
-    pub(crate) model: String,
+    pub(crate) model_selection: crate::model_runtime::HistoricalModelSelection,
     pub(crate) comp_hash: Option<String>,
     pub(crate) realtime_active: Option<bool>,
 }
@@ -1389,7 +1389,7 @@ impl Session {
                 let curr: &str = turn_context.model_info().slug.as_str();
                 if let Some(prev) = previous_turn_settings
                     .as_ref()
-                    .map(|settings| settings.model.as_str())
+                    .map(|settings| settings.model_selection.model_id())
                     .filter(|model| *model != curr)
                 {
                     warn!("resuming session with different model: previous={prev}, current={curr}");
