@@ -41,6 +41,7 @@ use crate::network_policy_decisions::network_policy_decider;
 use crate::process::ExecProcessEventLog;
 use crate::process::sandbox_type_from_protocol;
 use crate::process_sandbox::prepare_exec_request;
+use crate::protocol::ByteChunk;
 use crate::protocol::EXEC_CLOSED_METHOD;
 use crate::protocol::ExecClosedNotification;
 use crate::protocol::ExecEnvPolicy;
@@ -87,19 +88,12 @@ const EXITED_PROCESS_RETENTION: Duration = Duration::from_millis(25);
 #[cfg(not(test))]
 const EXITED_PROCESS_RETENTION: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
-struct RetainedOutputChunk {
-    seq: u64,
-    stream: ExecOutputStream,
-    chunk: Vec<u8>,
-}
-
 struct RunningProcess {
     session: ExecCommandSession,
     tty: bool,
     pipe_stdin: bool,
     accepted_stdin_write_ids: Arc<Mutex<AcceptedStdinWriteIds>>,
-    output: VecDeque<RetainedOutputChunk>,
+    output: VecDeque<ProcessOutputChunk>,
     retained_bytes: usize,
     next_seq: u64,
     exit_code: Option<i32>,
@@ -523,16 +517,12 @@ impl LocalProcess {
                 let mut total_bytes = 0;
                 let mut next_seq = process.next_seq;
                 for retained in process.output.iter().filter(|chunk| chunk.seq > after_seq) {
-                    let chunk_len = retained.chunk.len();
+                    let chunk_len = retained.chunk.0.len();
                     if !chunks.is_empty() && total_bytes + chunk_len > max_bytes {
                         break;
                     }
                     total_bytes += chunk_len;
-                    chunks.push(ProcessOutputChunk {
-                        seq: retained.seq,
-                        stream: retained.stream,
-                        chunk: retained.chunk.clone().into(),
-                    });
+                    chunks.push(retained.clone());
                     next_seq = retained.seq + 1;
                     if total_bytes >= max_bytes {
                         break;
@@ -894,6 +884,7 @@ async fn stream_output(
 ) {
     while let Some(chunk) = receiver.recv().await {
         let _chunk_len = chunk.len();
+        let chunk = ByteChunk::from(chunk);
         let notification = {
             let mut processes = inner.processes.lock().await;
             let Some(entry) = processes.get_mut(&process_id) else {
@@ -904,26 +895,19 @@ async fn stream_output(
             };
             let seq = process.next_seq;
             process.next_seq += 1;
-            process.retained_bytes += chunk.len();
-            process.output.push_back(RetainedOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.clone(),
-            });
+            process.retained_bytes += chunk.0.len();
+            let output = ProcessOutputChunk { seq, stream, chunk };
+            process.output.push_back(output.clone());
             while process.retained_bytes > RETAINED_OUTPUT_BYTES_PER_PROCESS
                 || process.output.len() > RETAINED_OUTPUT_CHUNKS_PER_PROCESS
             {
                 let Some(evicted) = process.output.pop_front() else {
                     break;
                 };
-                process.retained_bytes = process.retained_bytes.saturating_sub(evicted.chunk.len());
+                process.retained_bytes =
+                    process.retained_bytes.saturating_sub(evicted.chunk.0.len());
             }
             let _ = process.wake_tx.send(seq);
-            let output = ProcessOutputChunk {
-                seq,
-                stream,
-                chunk: chunk.into(),
-            };
             process
                 .events
                 .publish(ExecProcessEvent::Output(output.clone()));
@@ -987,11 +971,11 @@ async fn watch_exit(
                 for chunk in &process.output {
                     match chunk.stream {
                         ExecOutputStream::Stdout | ExecOutputStream::Pty => {
-                            stdout.extend_from_slice(&chunk.chunk);
+                            stdout.extend_from_slice(&chunk.chunk.0);
                         }
-                        ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk),
+                        ExecOutputStream::Stderr => stderr.extend_from_slice(&chunk.chunk.0),
                     }
-                    aggregated.extend_from_slice(&chunk.chunk);
+                    aggregated.extend_from_slice(&chunk.chunk.0);
                 }
                 let exec_output = ExecToolCallOutput {
                     exit_code,
@@ -1593,6 +1577,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_reads_and_pushed_events_share_output_storage_and_paging() {
+        let backend = LocalProcess::default();
+        let mut process = spawn_test_process(&backend, "proc-shared-output").await;
+        let expected = [
+            (ExecOutputStream::Stdout, b"stdout".as_slice()),
+            (ExecOutputStream::Stderr, b"stderr".as_slice()),
+        ];
+        let mut live_events = {
+            let processes = backend.inner.processes.lock().await;
+            let Some(ProcessEntry::Running(running)) = processes.get(&process.process_id) else {
+                panic!("test process should be running");
+            };
+            running.events.subscribe()
+        };
+        let mut live = Vec::new();
+        for ((_, bytes), sender) in expected
+            .iter()
+            .zip([&process.stdout_tx, &process.stderr_tx])
+        {
+            sender.send(bytes.to_vec()).await.expect("send output");
+            let event = timeout(Duration::from_secs(1), live_events.recv())
+                .await
+                .expect("live event should arrive")
+                .expect("live event should be available");
+            let ExecProcessEvent::Output(chunk) = event else {
+                panic!("expected live output");
+            };
+            live.push(chunk);
+        }
+
+        let retained = read_process_until_change(&backend, &process.process_id, None).await;
+        let mut replay_events = {
+            let processes = backend.inner.processes.lock().await;
+            let Some(ProcessEntry::Running(running)) = processes.get(&process.process_id) else {
+                panic!("test process should be running");
+            };
+            running.events.subscribe()
+        };
+        let mut replayed = Vec::new();
+        for _ in 0..expected.len() {
+            let event = timeout(Duration::from_secs(1), replay_events.recv())
+                .await
+                .expect("replayed event should arrive")
+                .expect("replayed event should be available");
+            let ExecProcessEvent::Output(chunk) = event else {
+                panic!("expected replayed output");
+            };
+            replayed.push(chunk);
+        }
+        assert_eq!(retained.next_seq, 3);
+        assert_eq!(retained.chunks.len(), expected.len());
+        assert_eq!(live.len(), expected.len());
+        assert_eq!(replayed.len(), expected.len());
+        for (index, ((stream, bytes), (stored, (live, replay)))) in expected
+            .iter()
+            .zip(retained.chunks.iter().zip(live.iter().zip(&replayed)))
+            .enumerate()
+        {
+            let expected = (index as u64 + 1, *stream, *bytes);
+            assert_eq!((stored.seq, stored.stream, stored.chunk.as_ref()), expected);
+            assert_eq!(live, stored);
+            assert_eq!(replay, stored);
+            assert!(Arc::ptr_eq(&stored.chunk.0, &live.chunk.0));
+            assert!(Arc::ptr_eq(&stored.chunk.0, &replay.chunk.0));
+        }
+
+        let first_page = backend
+            .exec_read(ReadParams {
+                process_id: process.process_id.clone(),
+                after_seq: None,
+                max_bytes: Some(1),
+                wait_ms: Some(0),
+            })
+            .await
+            .expect("read first output page");
+        assert_eq!(first_page.chunks.len(), 1);
+        assert_eq!((first_page.chunks[0].seq, first_page.next_seq), (1, 2));
+        assert_eq!(first_page.chunks[0].chunk.as_ref(), b"stdout");
+        let second_page = backend
+            .exec_read(ReadParams {
+                process_id: process.process_id.clone(),
+                after_seq: Some(1),
+                max_bytes: Some(1),
+                wait_ms: Some(0),
+            })
+            .await
+            .expect("read output after cursor");
+        assert_eq!(second_page.chunks.len(), 1);
+        assert_eq!((second_page.chunks[0].seq, second_page.next_seq), (2, 3));
+        assert_eq!(second_page.chunks[0].chunk.as_ref(), b"stderr");
+
+        process.exit(/*exit_code*/ 0);
+        drop(process.stdout_tx);
+        drop(process.stderr_tx);
+        let _closed_response = read_process_until_closed(&backend, &process.process_id).await;
+        backend.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn process_read_replay_is_bounded_by_retained_bytes() {
+        let backend = LocalProcess::default();
+        let process = spawn_test_process(&backend, "proc-byte-cap").await;
+        let mut events = {
+            let processes = backend.inner.processes.lock().await;
+            let Some(ProcessEntry::Running(running)) = processes.get(&process.process_id) else {
+                panic!("test process should be running");
+            };
+            running.events.subscribe()
+        };
+        {
+            let mut processes = backend.inner.processes.lock().await;
+            let Some(ProcessEntry::Running(running)) = processes.get_mut(&process.process_id)
+            else {
+                panic!("test process should be running");
+            };
+            running.output.push_back(ProcessOutputChunk {
+                seq: 1,
+                stream: ExecOutputStream::Stdout,
+                chunk: vec![b'x'; RETAINED_OUTPUT_BYTES_PER_PROCESS].into(),
+            });
+            running.retained_bytes = RETAINED_OUTPUT_BYTES_PER_PROCESS;
+            running.next_seq = 2;
+        }
+        process
+            .stdout_tx
+            .send(b"y".to_vec())
+            .await
+            .expect("send output");
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("live event should arrive")
+            .expect("live event should be available");
+        let ExecProcessEvent::Output(event) = event else {
+            panic!("expected live output");
+        };
+        let response = read_process_until_change(&backend, &process.process_id, None).await;
+        assert_eq!(response.chunks, vec![event.clone()]);
+        assert!(Arc::ptr_eq(&response.chunks[0].chunk.0, &event.chunk.0));
+        backend.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn process_read_replay_is_bounded_by_chunk_count() {
         let backend = LocalProcess::default();
         let process = spawn_test_process(&backend, "proc-chunk-count").await;
@@ -1605,10 +1731,10 @@ mod tests {
                 panic!("process should be running");
             };
             running.output = (1..=retained_chunk_count)
-                .map(|seq| RetainedOutputChunk {
+                .map(|seq| ProcessOutputChunk {
                     seq,
                     stream: ExecOutputStream::Stdout,
-                    chunk: vec![b'x'],
+                    chunk: vec![b'x'].into(),
                 })
                 .collect();
             running.retained_bytes = RETAINED_OUTPUT_CHUNKS_PER_PROCESS;
