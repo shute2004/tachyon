@@ -32,6 +32,8 @@ use serde::de::Error as _;
 mod envelope;
 mod item;
 mod response_projection;
+mod response_retention;
+mod retained_history;
 mod rollout_payload;
 
 pub use envelope::HistoryEnvelope;
@@ -51,6 +53,22 @@ pub use item::HistoryToolResultContent;
 pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
+pub use response_retention::PreparedResponseItemRetention;
+pub use response_retention::ResponseItemRetentionRejection;
+pub use response_retention::prepare_response_item_retention;
+pub use retained_history::RetainedHistory;
+pub use retained_history::RetainedHistoryAppendOutcome;
+pub use retained_history::RetainedHistoryBudget;
+pub use retained_history::RetainedHistoryClass;
+pub use retained_history::RetainedHistoryClassBudget;
+pub use retained_history::RetainedHistoryClassUsage;
+pub use retained_history::RetainedHistoryEntry;
+pub use retained_history::RetainedHistoryRejection;
+pub use retained_history::RetainedHistoryResetOutcome;
+pub use retained_history::RetainedHistoryResetRejectionCounts;
+pub use retained_history::RetainedHistorySnapshot;
+pub use retained_history::RetainedHistoryTruncateOutcome;
+pub use retained_history::RetainedHistoryUsage;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
@@ -420,3 +438,11 @@ mod tests;
 #[cfg(test)]
 #[path = "response_projection_tests.rs"]
 mod response_projection_tests;
+
+#[cfg(test)]
+#[path = "response_retention_tests.rs"]
+mod response_retention_tests;
+
+#[cfg(test)]
+#[path = "retained_history_tests.rs"]
+mod retained_history_tests;
