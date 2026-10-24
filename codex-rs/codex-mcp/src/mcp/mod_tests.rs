@@ -1,6 +1,7 @@
 use super::*;
 use crate::McpPluginAttribution;
 use crate::McpServerRegistration;
+use crate::server::McpCredentialPolicy;
 use codex_config::Constrained;
 use codex_config::types::AppToolApproval;
 use codex_config::types::AuthKeyringBackendKind;
@@ -89,6 +90,7 @@ fn mcp_server_permissions_handle_unattached_and_threadless_servers() {
         "selected".to_string(),
         McpPluginAttribution::new("selected@test".to_string(), "Selected".to_string()),
         /*selection_order*/ 0,
+        "unattached",
         selected_server,
     ));
     config.mcp_server_catalog = catalog.build();
@@ -266,6 +268,7 @@ fn selected_mcp_attribution_does_not_join_an_unrelated_local_summary() {
             "Executor GitHub".to_string(),
         ),
         /*selection_order*/ 0,
+        codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
         codex_apps_mcp_server_config(
             "https://github.example",
             /*apps_mcp_product_sku*/ None,
@@ -433,12 +436,109 @@ fn effective_mcp_servers_preserve_chatgpt_auth_for_staging() {
         let server = codex_apps_mcp_server_config(
             url, /*apps_mcp_product_sku*/ None, /*originator*/ None,
         );
-        let configured = HashMap::from([("staging".to_string(), server)]);
+        let mut catalog = ResolvedMcpCatalog::builder();
+        catalog.register(McpServerRegistration::from_config(
+            "staging".to_string(),
+            server,
+        ));
+        config.mcp_server_catalog = catalog.build();
+        let configured = configured_mcp_servers(&config);
         let effective =
             effective_mcp_servers_from_configured(configured, &config, /*auth*/ None);
 
         assert_eq!(effective["staging"].config().auth, McpServerAuth::ChatGpt);
     }
+}
+
+#[test]
+fn effective_mcp_servers_preserve_credential_policy_from_catalog() {
+    let mut config = test_mcp_config(PathBuf::new());
+    assert_eq!(
+        EffectiveMcpServer::configured(codex_apps_mcp_server_config(
+            "https://host-default.example/mcp",
+            /*apps_mcp_product_sku*/ None,
+            /*originator*/ None,
+        ))
+        .credential_policy(),
+        McpCredentialPolicy::HostFallbackAllowed
+    );
+    let selected_server = codex_apps_mcp_server_config(
+        "https://selected.example/mcp",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    let mut host_remote_server = codex_apps_mcp_server_config(
+        "https://host-owned.example/mcp",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    host_remote_server.environment_id = "customer-executor".to_string();
+    let mut catalog = ResolvedMcpCatalog::builder();
+    catalog.register(McpServerRegistration::from_selected_plugin(
+        "selected".to_string(),
+        McpPluginAttribution::new("selected@test".to_string(), "Selected".to_string()),
+        /*selection_order*/ 0,
+        "selected-executor",
+        selected_server,
+    ));
+    catalog.register(McpServerRegistration::from_config(
+        "host-owned".to_string(),
+        host_remote_server,
+    ));
+    let mut executor_discovered_server = codex_apps_mcp_server_config(
+        "https://executor-discovered.example/mcp",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    executor_discovered_server.environment_id = "selected-executor".to_string();
+    catalog.register(McpServerRegistration::from_executor_config(
+        "executor-discovered".to_string(),
+        executor_discovered_server,
+    ));
+    let catalog = catalog.build();
+    let mut materialized = catalog.configured_servers();
+    materialized
+        .get_mut("executor-discovered")
+        .expect("executor-discovered server")
+        .environment_id = codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string();
+    config.mcp_server_catalog = catalog.with_materialized_servers(materialized);
+
+    let effective = effective_mcp_servers_from_configured(
+        configured_mcp_servers(&config),
+        &config,
+        /*auth*/ None,
+    );
+
+    assert_eq!(
+        effective["selected"].credential_policy(),
+        McpCredentialPolicy::ExecutorOnly
+    );
+    assert_eq!(
+        effective["host-owned"].credential_policy(),
+        McpCredentialPolicy::HostFallbackAllowed
+    );
+    assert_eq!(
+        effective["executor-discovered"].credential_policy(),
+        McpCredentialPolicy::ExecutorOnly
+    );
+}
+
+#[test]
+#[should_panic(expected = "materialized MCP server must have a catalog registration")]
+fn effective_mcp_servers_fail_for_unknown_server_names() {
+    let config = test_mcp_config(PathBuf::new());
+    effective_mcp_servers_from_configured(
+        HashMap::from([(
+            "unknown".to_string(),
+            codex_apps_mcp_server_config(
+                "https://unknown.example/mcp",
+                /*apps_mcp_product_sku*/ None,
+                /*originator*/ None,
+            ),
+        )]),
+        &config,
+        /*auth*/ None,
+    );
 }
 
 #[tokio::test]

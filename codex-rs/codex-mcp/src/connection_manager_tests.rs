@@ -3859,7 +3859,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             .expect("valid actor authorization header"),
     );
     let hosted_auth = CodexAuth::Headers(AuthHeaders::new(actor_headers));
-    let runtime_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut runtime_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
     let cases = [
         ("missing", None, None, None, false),
         ("empty", Some(("Authorization", "")), None, None, false),
@@ -3930,6 +3930,12 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             server_json["env_http_headers"] = serde_json::json!({ name: value });
         }
         let server_config = serde_json::from_value::<McpServerConfig>(server_json)?;
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_config(
+            "fake-first-party".to_string(),
+            server_config.clone(),
+        ));
+        runtime_config.mcp_server_catalog = catalog.build();
         let mcp_servers = crate::effective_mcp_servers_from_configured(
             HashMap::from([("fake-first-party".to_string(), server_config)]),
             &runtime_config,
@@ -4898,7 +4904,15 @@ async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::
     )?;
     let runtime_context = McpRuntimeContext::new(environment_manager, PathBuf::from("/tmp"));
     let codex_home = tempdir()?;
-    let mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    let mut host_owned_config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
+    host_owned_config.environment_id = "customer-executor".to_string();
+    catalog.register(crate::McpServerRegistration::from_config(
+        "docs".to_string(),
+        host_owned_config,
+    ));
+    mcp_config.mcp_server_catalog = catalog.build();
     let [config, refreshed_config] = [McpServerAuth::OAuth, McpServerAuth::ChatGpt].map(|auth| {
         let mut config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
         config.environment_id = "customer-executor".to_string();

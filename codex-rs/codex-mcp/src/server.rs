@@ -20,19 +20,42 @@ use codex_rmcp_client::StoredOAuthTokens;
 use rmcp::model::ElicitationCapability;
 use tracing::warn;
 
+/// Authority to resolve environment-variable credentials for an MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpCredentialPolicy {
+    /// Host-owned declarations may use credentials available to the host process.
+    HostFallbackAllowed,
+    /// Executor-owned declarations do not inherit host environment credentials.
+    ExecutorOnly,
+}
+
 /// MCP server after runtime additions have been applied.
 #[derive(Debug, Clone)]
 pub struct EffectiveMcpServer {
     config: McpServerConfig,
+    credential_policy: McpCredentialPolicy,
     agent_plugin: bool,
 }
 
 impl EffectiveMcpServer {
+    /// Constructs an effective server from host-owned configuration.
     pub fn configured(config: McpServerConfig) -> Self {
+        Self::from_config_with_policy(config, McpCredentialPolicy::HostFallbackAllowed)
+    }
+
+    pub(crate) fn from_config_with_policy(
+        config: McpServerConfig,
+        credential_policy: McpCredentialPolicy,
+    ) -> Self {
         Self {
             config,
+            credential_policy,
             agent_plugin: false,
         }
+    }
+
+    pub(crate) fn credential_policy(&self) -> McpCredentialPolicy {
+        self.credential_policy
     }
 
     pub fn with_agent_plugin(mut self, agent_plugin: bool) -> Self {
@@ -93,6 +116,7 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 /// those belong to a publication and can change without reconnecting.
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
+    pub(crate) credential_policy: McpCredentialPolicy,
     auth: McpServerAuth,
     transport: McpServerTransportConfig,
     environment_id: String,
@@ -146,14 +170,16 @@ impl McpServerConnectionIdentity {
                     headers.iter().any(|(name, value)| {
                         name.eq_ignore_ascii_case("authorization") && valid_http_header_value(value)
                     })
-                }) && !env_http_headers.as_ref().is_some_and(|headers| {
-                    headers.iter().any(|(name, env_var)| {
-                        name.eq_ignore_ascii_case("authorization")
-                            && std::env::var(env_var).is_ok_and(|value| {
-                                !value.trim().is_empty() && valid_http_header_value(&value)
-                            })
-                    })
-                }) =>
+                }) && !(server.credential_policy()
+                    == McpCredentialPolicy::HostFallbackAllowed
+                    && env_http_headers.as_ref().is_some_and(|headers| {
+                        headers.iter().any(|(name, env_var)| {
+                            name.eq_ignore_ascii_case("authorization")
+                                && std::env::var(env_var).is_ok_and(|value| {
+                                    !value.trim().is_empty() && valid_http_header_value(&value)
+                                })
+                        })
+                    })) =>
                 {
                     Some(url)
                 }
@@ -197,7 +223,10 @@ impl McpServerConnectionIdentity {
                     }
             ))
         .then(|| runtime_context.local_process_cwd());
-        let referenced_environment_variables = referenced_environment_variables(config);
+        let referenced_environment_variables = match server.credential_policy() {
+            McpCredentialPolicy::HostFallbackAllowed => referenced_environment_variables(config),
+            McpCredentialPolicy::ExecutorOnly => Vec::new(),
+        };
         let runtime_auth = runtime_auth_provider.and(auth).cloned();
         let runtime_auth_token = runtime_auth.as_ref().and_then(|auth| auth.get_token().ok());
         let oauth_store_was_contended = oauth_credentials
@@ -207,6 +236,7 @@ impl McpServerConnectionIdentity {
             .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
 
         Self {
+            credential_policy: server.credential_policy(),
             auth: config.auth.clone(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
@@ -242,6 +272,7 @@ impl McpServerConnectionIdentity {
             (Some(_), None) | (None, Some(_)) => false,
         };
         self.auth == other.auth
+            && self.credential_policy == other.credential_policy
             && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.oauth_store == other.oauth_store

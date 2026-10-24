@@ -193,12 +193,14 @@ impl McpManager {
                         plugin_id,
                         plugin_display_name,
                         selection_order,
+                        source_environment_id,
                         config,
                     } => selected_plugin_registrations.push(
                         McpServerRegistration::from_selected_plugin(
                             name,
                             McpPluginAttribution::new(plugin_id, plugin_display_name),
                             selection_order,
+                            &source_environment_id,
                             *config,
                         ),
                     ),
