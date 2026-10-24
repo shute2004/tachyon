@@ -57,8 +57,11 @@ Codexを基に開発していたコーディングハーネスの最新作業を
 
 旧Tachyon自身をビルドする場合は、このリポジトリから始めます（上流Codexのインストーラーとは別です）。
 
+以下では、統合コードの保存点 `24215daf26f9cf8ba2924e8983d08733a6ead7a4` を明示してcheckoutします。後からmainやブランチが更新されても、同じソースを取得できます。
+
 ```sh
 git clone https://github.com/shute2004/tachyon.git legacy-tachyon
+git -C legacy-tachyon checkout --detach 24215daf26f9cf8ba2924e8983d08733a6ead7a4
 cd legacy-tachyon/codex-rs
 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
