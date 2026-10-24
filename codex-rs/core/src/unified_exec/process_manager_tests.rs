@@ -1,6 +1,7 @@
 use super::*;
 use crate::unified_exec::clamp_yield_time;
 use codex_network_proxy::ManagedNetworkSandboxContext;
+use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
 use tokio::sync::Notify;
 use tokio::time::Duration;
@@ -134,6 +135,13 @@ fn exec_env_policy_excludes_non_inheritable_and_runtime_variables() {
     );
 }
 
+fn assert_exec_server_process_id_has_uuid_v4_suffix(process_id: &str) {
+    assert_regex_match(
+        r"^123-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        process_id,
+    );
+}
+
 #[test]
 fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
     let cwd: codex_utils_absolute_path::AbsolutePathBuf = std::env::current_dir()
@@ -213,8 +221,11 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
         )
     };
     let params = params_for_request(&request);
+    let second_params = params_for_request(&request);
 
-    assert_eq!(params.process_id.as_str(), "123");
+    assert_exec_server_process_id_has_uuid_v4_suffix(params.process_id.as_str());
+    assert_exec_server_process_id_has_uuid_v4_suffix(second_params.process_id.as_str());
+    assert_ne!(params.process_id, second_params.process_id);
     assert_eq!(params.cwd, request.cwd);
     assert!(params.enforce_managed_network);
     assert_eq!(params.managed_network, Some(managed_network));
@@ -238,9 +249,17 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
             path: "/bin/bash".to_string(),
         },
     });
+    let snapshot_params = params_for_request(&request);
     let mut snapshot_env = params.env;
     snapshot_env.remove("PATH");
-    assert_eq!(params_for_request(&request).env, snapshot_env);
+    let second_snapshot_params = params_for_request(&request);
+    assert_exec_server_process_id_has_uuid_v4_suffix(snapshot_params.process_id.as_str());
+    assert_exec_server_process_id_has_uuid_v4_suffix(second_snapshot_params.process_id.as_str());
+    assert_ne!(
+        snapshot_params.process_id,
+        second_snapshot_params.process_id
+    );
+    assert_eq!(second_snapshot_params.env, snapshot_env);
     request.exec_server_shell_snapshot = None;
 
     request.exec_server_sandbox = Some(
@@ -248,6 +267,8 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
     );
     let first = params_for_request(&request);
     let second = params_for_request(&request);
+    assert_exec_server_process_id_has_uuid_v4_suffix(first.process_id.as_str());
+    assert_exec_server_process_id_has_uuid_v4_suffix(second.process_id.as_str());
     assert_eq!(
         first
             .sandbox
@@ -255,8 +276,6 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
             .and_then(|sandbox| sandbox.windows_sandbox_proxy_settings_mode),
         Some(codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve)
     );
-    assert!(first.process_id.as_str().starts_with("123-"));
-    assert!(second.process_id.as_str().starts_with("123-"));
     assert_ne!(first.process_id, second.process_id);
 }
 
