@@ -55,6 +55,9 @@ fn codex_linux_sandbox_exe() -> PathBuf {
     }
 }
 
+#[path = "root_metadata_tests.rs"]
+mod root_metadata_tests;
+
 #[expect(clippy::print_stdout)]
 async fn run_cmd(cmd: &[&str], writable_roots: &[PathBuf], timeout_ms: u64) {
     let output = run_cmd_output(cmd, writable_roots, timeout_ms).await;

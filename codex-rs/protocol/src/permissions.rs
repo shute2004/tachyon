@@ -235,6 +235,12 @@ enum WritableRootPathResolution {
     PreserveMutableComponents,
 }
 
+#[derive(Clone, Copy)]
+enum WritableRootMetadataMountMode {
+    Separate,
+    InheritWritableRoot,
+}
+
 impl WritableRootPathResolution {
     fn resolve(self, path: AbsolutePathBuf) -> AbsolutePathBuf {
         match self {
@@ -730,6 +736,66 @@ impl FileSystemSandboxPolicy {
                 self.entries.push(deny_entry.clone());
             }
         }
+    }
+
+    /// Grants filesystem-root and protected-root-metadata writes to an approved command while
+    /// retaining every explicit read denial that can be resolved from executor-owned facts.
+    ///
+    /// If a denial cannot be materialized safely, or it denies the filesystem root, the
+    /// original policy is returned unchanged. Existing read and write exceptions are discarded.
+    pub fn for_approved_command(&self, context: &FileSystemSandboxPolicyContext<'_>) -> Self {
+        if self.kind != FileSystemSandboxKind::Restricted {
+            return self.clone();
+        }
+
+        let mut approved = Self::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )]);
+        approved.glob_scan_max_depth = self.glob_scan_max_depth;
+        approved.entries.extend(
+            self.entries
+                .iter()
+                .filter(|entry| entry.access == FileSystemAccessMode::Deny)
+                .cloned(),
+        );
+
+        let Some(convention) = validate_approved_command_context(&approved, context) else {
+            return self.clone();
+        };
+        if !materialize_approved_command_workspace_denials(&mut approved, context, convention) {
+            return self.clone();
+        }
+
+        let Some(root) = file_system_root(context) else {
+            return self.clone();
+        };
+        let prepared = match approved
+            .prepare_deny_read_matcher(context, InvalidDenyReadGlobBehavior::ReturnError)
+        {
+            Ok(prepared) => prepared,
+            Err(_) => return self.clone(),
+        };
+        if !approved.resolve_access(&root, context).can_write()
+            || Self::matches_prepared_read_deny(&root, context, &prepared)
+        {
+            return self.clone();
+        }
+
+        for name in PROTECTED_METADATA_PATH_NAMES {
+            let Ok(path) = root.join_descendant(name) else {
+                return self.clone();
+            };
+            if !Self::matches_prepared_read_deny(&path, context, &prepared) {
+                approved.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path },
+                    FileSystemAccessMode::Write,
+                ));
+            }
+        }
+        approved
     }
 
     /// Returns true when a restricted policy contains any entry that really
@@ -1427,7 +1493,28 @@ impl FileSystemSandboxPolicy {
     /// Returns the writable roots together with read-only carveouts resolved
     /// against the provided cwd.
     pub fn get_writable_roots_with_cwd(&self, cwd: &Path) -> Vec<WritableRoot> {
-        self.get_writable_roots_with_cwd_impl(cwd, WritableRootPathResolution::Effective)
+        self.get_writable_roots_with_cwd_impl(
+            cwd,
+            WritableRootPathResolution::Effective,
+            WritableRootMetadataMountMode::Separate,
+        )
+    }
+
+    /// Returns writable roots for a mount layout where a writable filesystem
+    /// root already carries its protected metadata paths.
+    ///
+    /// Unlike [`Self::get_writable_roots_with_cwd`], this omits separate
+    /// writable roots for `.git`, `.agents`, and `.codex` when they are
+    /// immediate children of an explicitly writable filesystem root.
+    pub fn get_writable_roots_with_cwd_inheriting_root_metadata(
+        &self,
+        cwd: &Path,
+    ) -> Vec<WritableRoot> {
+        self.get_writable_roots_with_cwd_impl(
+            cwd,
+            WritableRootPathResolution::Effective,
+            WritableRootMetadataMountMode::InheritWritableRoot,
+        )
     }
 
     /// Returns whether any effective writable root exists without materializing its carveouts.
@@ -1455,6 +1542,7 @@ impl FileSystemSandboxPolicy {
         self.get_writable_roots_with_cwd_impl(
             cwd,
             WritableRootPathResolution::PreserveMutableComponents,
+            WritableRootMetadataMountMode::Separate,
         )
     }
 
@@ -1462,6 +1550,7 @@ impl FileSystemSandboxPolicy {
         &self,
         cwd: &Path,
         path_resolution: WritableRootPathResolution,
+        metadata_mount_mode: WritableRootMetadataMountMode,
     ) -> Vec<WritableRoot> {
         if self.has_full_disk_write_access() {
             return Vec::new();
@@ -1475,9 +1564,28 @@ impl FileSystemSandboxPolicy {
             .map(|entry| entry.path.clone())
             .collect();
 
-        dedup_absolute_paths(
+        let file_system_root = match metadata_mount_mode {
+            WritableRootMetadataMountMode::Separate => None,
+            WritableRootMetadataMountMode::InheritWritableRoot => {
+                AbsolutePathBuf::from_absolute_path(cwd)
+                    .ok()
+                    .map(|cwd| absolute_root_path_for_cwd(&cwd))
+            }
+        };
+        let inherits_writable_root = file_system_root.as_ref().is_some_and(|file_system_root| {
             writable_entries
                 .iter()
+                .any(|writable_entry| writable_entry == file_system_root)
+        });
+        let writable_roots_to_emit = writable_entries.iter().filter(|writable_entry| {
+            !inherits_writable_root
+                || !file_system_root.as_ref().is_some_and(|file_system_root| {
+                    is_immediate_protected_metadata_path(writable_entry, file_system_root)
+                })
+        });
+
+        dedup_absolute_paths(
+            writable_roots_to_emit
                 .cloned()
                 .map(|root| path_resolution.resolve(root))
                 .collect(),
@@ -1603,6 +1711,33 @@ impl FileSystemSandboxPolicy {
                 .collect(),
             /*normalize_effective_paths*/ true,
         )
+    }
+
+    /// Returns unreadable roots while retaining both resolved targets and
+    /// literal denied paths needed to mask writable symlink paths.
+    pub fn get_unreadable_roots_with_cwd_preserving_symlinks(
+        &self,
+        cwd: &Path,
+    ) -> Vec<AbsolutePathBuf> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+
+        let mut unreadable_roots = self.get_unreadable_roots_with_cwd(cwd);
+        let file_system_root = AbsolutePathBuf::from_absolute_path(cwd)
+            .ok()
+            .map(|cwd| absolute_root_path_for_cwd(&cwd));
+
+        unreadable_roots.extend(
+            self.resolved_entries_with_cwd(cwd)
+                .into_iter()
+                .filter(|entry| entry.access == FileSystemAccessMode::Deny)
+                .filter(|entry| !self.can_read_path_with_cwd(entry.path.as_path(), cwd))
+                .filter(|entry| file_system_root.as_ref() != Some(&entry.path))
+                .map(|entry| entry.path),
+        );
+
+        dedup_absolute_paths(unreadable_roots, /*normalize_effective_paths*/ false)
     }
 
     /// Returns unreadable glob patterns resolved against the provided cwd.
@@ -1916,6 +2051,198 @@ fn resolve_scoped_workspace_path(root: &PathUri, subpath: &str) -> Option<PathUr
     }
     let path = root.join(subpath).ok()?;
     path.starts_with(root).then_some(path)
+}
+
+fn validate_approved_command_context(
+    policy: &FileSystemSandboxPolicy,
+    context: &FileSystemSandboxPolicyContext<'_>,
+) -> Option<PathConvention> {
+    let convention = context.cwd.infer_path_convention()?;
+    let valid_path = |path: &PathUri| {
+        path.infer_path_convention() == Some(convention) && path.lexical_depth().is_some()
+    };
+    if !valid_path(context.cwd) || context.workspace_roots.iter().any(|path| !valid_path(path)) {
+        return None;
+    }
+
+    for entry in policy
+        .entries
+        .iter()
+        .filter(|entry| entry.access == FileSystemAccessMode::Deny)
+    {
+        match &entry.path {
+            FileSystemPath::Path { path } => {
+                if !valid_path(path) {
+                    return None;
+                }
+            }
+            FileSystemPath::GlobPattern { pattern } => {
+                if let Some(subpath) = pattern.strip_prefix(PROJECT_ROOTS_GLOB_PATTERN_PREFIX) {
+                    if context.workspace_roots.is_empty()
+                        || is_home_relative_path(subpath, convention)
+                    {
+                        return None;
+                    }
+                    for root in context.workspace_roots {
+                        if !is_safe_approved_glob_directory(root, convention)
+                            || !resolve_scoped_workspace_path(root, subpath)
+                                .is_some_and(|path| valid_path(&path))
+                        {
+                            return None;
+                        }
+                    }
+                } else {
+                    let home_relative = pattern.strip_prefix("~/").or_else(|| {
+                        (convention == PathConvention::Windows)
+                            .then(|| pattern.strip_prefix("~\\"))
+                            .flatten()
+                    });
+                    let base = if home_relative.is_some() {
+                        context.user_home_dir?
+                    } else if let Ok(absolute_pattern) =
+                        LegacyAppPathString::from_string(pattern.clone()).to_path_uri(convention)
+                    {
+                        if !valid_path(&absolute_pattern) {
+                            return None;
+                        }
+                        continue;
+                    } else {
+                        context.cwd
+                    };
+                    if !is_safe_approved_glob_directory(base, convention) {
+                        return None;
+                    }
+                }
+            }
+            FileSystemPath::Special { value } => match value {
+                FileSystemSpecialPath::Root => {}
+                FileSystemSpecialPath::ProjectRoots { subpath } => {
+                    if context.workspace_roots.is_empty()
+                        || subpath
+                            .as_deref()
+                            .is_some_and(|subpath| is_home_relative_path(subpath, convention))
+                    {
+                        return None;
+                    }
+                    for root in context.workspace_roots {
+                        if subpath.as_deref().is_some_and(|subpath| {
+                            !resolve_scoped_workspace_path(root, subpath)
+                                .is_some_and(|path| valid_path(&path))
+                        }) {
+                            return None;
+                        }
+                    }
+                }
+                FileSystemSpecialPath::Tmpdir => {
+                    let directories = context.temporary_directories?;
+                    if directories.iter().any(|path| !valid_path(path)) {
+                        return None;
+                    }
+                }
+                FileSystemSpecialPath::SlashTmp => {
+                    if convention == PathConvention::Posix
+                        && !context.cwd.join("/tmp").is_ok_and(|path| valid_path(&path))
+                    {
+                        return None;
+                    }
+                }
+                FileSystemSpecialPath::Minimal | FileSystemSpecialPath::Unknown { .. } => {
+                    return None;
+                }
+            },
+        }
+    }
+    Some(convention)
+}
+
+fn materialize_approved_command_workspace_denials(
+    policy: &mut FileSystemSandboxPolicy,
+    context: &FileSystemSandboxPolicyContext<'_>,
+    convention: PathConvention,
+) -> bool {
+    let mut entries = Vec::with_capacity(policy.entries.len());
+    for entry in &policy.entries {
+        match &entry.path {
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::ProjectRoots { subpath },
+            } => {
+                for root in context.workspace_roots {
+                    let path = match subpath {
+                        Some(subpath) => match resolve_scoped_workspace_path(root, subpath) {
+                            Some(path) => path,
+                            None => return false,
+                        },
+                        None => root.clone(),
+                    };
+                    if path.infer_path_convention() != Some(convention)
+                        || path.lexical_depth().is_none()
+                    {
+                        return false;
+                    }
+                    entries.push(FileSystemSandboxEntry {
+                        path: FileSystemPath::Path { path },
+                        access: entry.access,
+                        missing_path_behavior: entry.missing_path_behavior,
+                    });
+                }
+            }
+            FileSystemPath::GlobPattern { pattern } => {
+                if let Some(subpath) = pattern.strip_prefix(PROJECT_ROOTS_GLOB_PATTERN_PREFIX) {
+                    for root in context.workspace_roots {
+                        if !is_safe_approved_glob_directory(root, convention) {
+                            return false;
+                        }
+                        let Some(path) = resolve_scoped_workspace_path(root, subpath) else {
+                            return false;
+                        };
+                        if path.infer_path_convention() != Some(convention)
+                            || path.lexical_depth().is_none()
+                        {
+                            return false;
+                        }
+                        entries.push(FileSystemSandboxEntry {
+                            path: FileSystemPath::GlobPattern {
+                                pattern: path.inferred_native_path_string(),
+                            },
+                            access: entry.access,
+                            missing_path_behavior: entry.missing_path_behavior,
+                        });
+                    }
+                } else {
+                    entries.push(entry.clone());
+                }
+            }
+            _ => entries.push(entry.clone()),
+        }
+    }
+    policy.entries = entries;
+    true
+}
+
+fn is_home_relative_path(path: &str, convention: PathConvention) -> bool {
+    path.strip_prefix('~').is_some_and(|suffix| {
+        suffix.is_empty()
+            || suffix.starts_with('/')
+            || convention == PathConvention::Windows && suffix.starts_with('\\')
+    })
+}
+
+fn is_safe_approved_glob_directory(path: &PathUri, convention: PathConvention) -> bool {
+    if path.infer_path_convention() != Some(convention) || path.lexical_depth().is_none() {
+        return false;
+    }
+    let Ok(rendered) = LegacyAppPathString::from_path_uri(path, convention) else {
+        return false;
+    };
+    let Ok(round_trip) = rendered.to_path_uri(convention) else {
+        return false;
+    };
+    &round_trip == path
+        && !rendered
+            .as_str()
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+        && (convention != PathConvention::Posix || !rendered.as_str().contains('\\'))
 }
 
 fn with_local_policy_context<T>(
@@ -2350,6 +2677,17 @@ fn protected_metadata_names_for_writable_root(
         }
     }
     protected_names
+}
+
+fn is_immediate_protected_metadata_path(
+    path: &AbsolutePathBuf,
+    file_system_root: &AbsolutePathBuf,
+) -> bool {
+    path.as_path().parent() == Some(file_system_root.as_path())
+        && path
+            .as_path()
+            .file_name()
+            .is_some_and(is_protected_metadata_name)
 }
 
 fn protected_metadata_names_need_direct_runtime_enforcement(
@@ -4493,3 +4831,11 @@ mod tests {
         assert!(!is_read_denied(&other, &policy, temp.path()));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "permissions_root_mount_tests.rs"]
+mod root_mount_tests;
+
+#[cfg(test)]
+#[path = "permissions_approved_command_tests.rs"]
+mod approved_command_tests;

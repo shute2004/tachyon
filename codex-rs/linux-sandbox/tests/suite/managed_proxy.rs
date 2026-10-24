@@ -8,6 +8,7 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -473,6 +474,84 @@ async fn managed_proxy_bridges_release_command_output_after_exit() {
 
     assert_eq!(output.status.success(), true);
     assert_eq!(output.stdout, b"bridge output closed\n");
+}
+
+#[tokio::test]
+async fn approved_command_with_denied_reads_preserves_standard_devices() {
+    if should_skip_bwrap_tests().await {
+        eprintln!(
+            "skipping approved-command device/deny test: bwrap or Linux namespace prerequisites are unavailable"
+        );
+        return;
+    }
+
+    let files = tempfile::tempdir().expect("create disposable sandbox files");
+    let denied = files.path().join("secret");
+    let output_file = files.path().join("output");
+    std::fs::write(&denied, "secret").expect("write denied fixture");
+
+    let mut filesystem = FileSystemSandboxPolicy::read_only();
+    filesystem.entries.push(FileSystemSandboxEntry::new(
+        AbsolutePathBuf::try_from(denied.clone())
+            .expect("denied fixture should be absolute")
+            .into(),
+        FileSystemAccessMode::Deny,
+    ));
+
+    let current_dir = std::env::current_dir().expect("current directory should exist");
+    let cwd_path: FileSystemPath = AbsolutePathBuf::try_from(current_dir)
+        .expect("current directory should be absolute")
+        .into();
+    let FileSystemPath::Path { path: cwd } = cwd_path else {
+        unreachable!("absolute paths convert to URI-backed filesystem paths");
+    };
+    let context = FileSystemSandboxPolicyContext {
+        cwd: &cwd,
+        workspace_roots: std::slice::from_ref(&cwd),
+        user_home_dir: None,
+        temporary_directories: Some(&[]),
+    };
+    let profile = PermissionProfile::from_runtime_permissions(
+        &filesystem.for_approved_command(&context),
+        NetworkSandboxPolicy::Restricted,
+    );
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert(
+        "CODEX_TEST_DENIED".into(),
+        denied.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "CODEX_TEST_OUTPUT".into(),
+        output_file.to_string_lossy().into_owned(),
+    );
+
+    let output = run_linux_sandbox_direct(
+        &[
+            "bash",
+            "-c",
+            concat!(
+                "set -e; printf test >/dev/null; ",
+                "head -c 1 /dev/zero >/dev/null; head -c 1 /dev/urandom >/dev/null; ",
+                "printf sink >\"$CODEX_TEST_OUTPUT\"; ",
+                "test \"$(cat \"$CODEX_TEST_OUTPUT\")\" = sink; ",
+                "if cat \"$CODEX_TEST_DENIED\" >\"$CODEX_TEST_OUTPUT\" 2>&1; then exit 1; fi; ",
+                "grep -q 'Permission denied' \"$CODEX_TEST_OUTPUT\"",
+            ),
+        ],
+        &profile,
+        /*allow_network_for_proxy*/ false,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "approved command should retain standard devices and denied reads; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
