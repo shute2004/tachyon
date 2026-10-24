@@ -1,5 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -45,6 +48,8 @@ struct Registry {
     target: Mutex<Target>,
     next_lookup: Mutex<Option<oneshot::Receiver<()>>>,
     lookup_started: Notify,
+    offline: AtomicBool,
+    calls: AtomicUsize,
 }
 
 impl Registry {
@@ -61,6 +66,14 @@ impl NoiseRendezvousConnectProvider for Registry {
         _: NoiseChannelPublicKey,
     ) -> BoxFuture<'_, Result<NoiseRendezvousConnectBundle, ExecServerError>> {
         Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.offline.load(Ordering::SeqCst) {
+                return Err(ExecServerError::EnvironmentRegistryHttp {
+                    status: http::StatusCode::CONFLICT,
+                    code: Some("environment_offline".to_owned()),
+                    message: "executor is still starting".to_owned(),
+                });
+            }
             let target = self.target.lock().unwrap().clone();
             let block = self.next_lookup.lock().unwrap().take();
             if let Some(block) = block {
@@ -147,6 +160,8 @@ impl Executor {
             target: Mutex::new(self.target.clone()),
             next_lookup: Mutex::new(None),
             lookup_started: Notify::new(),
+            offline: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
         });
         let client = LazyRemoteExecServerClient::new(
             ExecServerTransportParams::NoiseRendezvous {
@@ -407,6 +422,63 @@ async fn environment_refresh_preserves_environment_and_filesystem_handles() -> R
     ));
     assert!(Arc::ptr_eq(&filesystem, &environment.get_filesystem()));
     environment.info().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provisioned_environment_waits_for_offline_executor_on_the_same_handle() -> Result<()> {
+    let _clock = freeze_clock();
+    let executor = Executor::start(Validator::default()).await?;
+    let (_, registry) = executor.client()?;
+    registry.offline.store(true, Ordering::SeqCst);
+
+    let manager = crate::EnvironmentManager::from_snapshot(
+        crate::environment_provider::EnvironmentProviderSnapshot {
+            environments: Vec::new(),
+            default: crate::environment_provider::EnvironmentDefault::Disabled,
+            include_local: false,
+        },
+        /*local_runtime_paths*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )?;
+    let environment = manager
+        .report_environment_provisioning_status(
+            "environment".to_owned(),
+            Ok(crate::EnvironmentReadyInfo::default()),
+            registry.clone(),
+        )?
+        .expect("provisioned environment");
+    let ready = environment.wait_until_ready();
+    let info = environment.info();
+    tokio::pin!(ready);
+    tokio::pin!(info);
+
+    assert!(futures::poll!(ready.as_mut()).is_pending());
+    assert!(futures::poll!(info.as_mut()).is_pending());
+    assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+    for _ in 0..35 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(futures::poll!(ready.as_mut()).is_pending());
+        assert!(futures::poll!(info.as_mut()).is_pending());
+    }
+    assert!(registry.calls.load(Ordering::SeqCst) > 5);
+
+    let reported_environment = manager
+        .report_environment_provisioning_status(
+            "environment".to_owned(),
+            Ok(crate::EnvironmentReadyInfo::default()),
+            registry.clone(),
+        )?
+        .expect("same provisioned environment");
+    assert!(Arc::ptr_eq(&environment, &reported_environment));
+    assert!(futures::poll!(ready.as_mut()).is_pending());
+    assert!(futures::poll!(info.as_mut()).is_pending());
+
+    registry.offline.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(8)).await;
+    // Both futures pinned before startup completes must succeed on the same handle
+    // once the registered Noise executor becomes reachable.
+    let ((), _) = tokio::try_join!(ready, info)?;
     Ok(())
 }
 
