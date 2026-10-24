@@ -29,6 +29,9 @@ mod writer_lock;
 mod pending_thread_metadata_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+#[path = "timestamp_metadata_tests.rs"]
+mod timestamp_metadata_tests;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
