@@ -1,5 +1,7 @@
 # Tachyon
 
+> Historical design of **Legacy Tachyon**. The Codex-based project is being consolidated separately from the new Tachyon direction. This document preserves the original architecture and plans; it is not a requirement to continue the unfinished extraction. See [README.md](README.md) and [LEGACY_TACHYON.md](LEGACY_TACHYON.md) for the current scope and verified status.
+
 Tachyon is a model-agnostic, UI-independent kernel for building coding-agent harnesses.
 
 It is written in Rust and is being extracted from the OpenAI Codex codebase so that mature coding-agent runtime behavior can be preserved while product, UI, and provider-specific coupling is progressively removed.
