@@ -1,5 +1,6 @@
 use anyhow::Result;
 use codex_config::Constrained;
+use codex_config::types::AppToolApproval;
 use codex_core::EnvironmentConfig;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
@@ -22,15 +23,18 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use core_test_support::PathExt;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
+use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::apps_test_server::search_capable_apps_builder;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
@@ -47,6 +51,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
@@ -57,10 +62,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
+use tracing::Subscriber;
+use tracing::span::Attributes;
+use tracing::span::Id;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context as LayerContext;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
 use wiremock::Mock;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
@@ -234,6 +248,109 @@ fn completed_response_sequence(count: usize) -> Vec<String> {
             ])
         })
         .collect()
+}
+
+#[derive(Clone, Default)]
+struct McpCacheCounters {
+    completed_runtime_refreshes: Arc<AtomicUsize>,
+    search_index_builds: Arc<AtomicUsize>,
+}
+
+impl<S> Layer<S> for McpCacheCounters
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(&self, attributes: &Attributes<'_>, _id: &Id, _context: LayerContext<'_, S>) {
+        let metadata = attributes.metadata();
+        if metadata.target() == "codex_core::tools::handlers::tool_search"
+            && metadata.name() == "new"
+        {
+            self.search_index_builds.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn on_close(&self, id: Id, context: LayerContext<'_, S>) {
+        let Some(span) = context.span(&id) else {
+            return;
+        };
+        let metadata = span.metadata();
+        if metadata.target() == "codex_core::session::mcp_runtime"
+            && metadata.name() == "mcp.runtime.refresh"
+        {
+            self.completed_runtime_refreshes
+                .fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn set_calendar_approval_mode(config: &mut Config, approval_mode: AppToolApproval) {
+    let approval_mode = match approval_mode {
+        AppToolApproval::Auto => "auto",
+        AppToolApproval::Prompt => "prompt",
+        AppToolApproval::Writes => "writes",
+        AppToolApproval::Approve => "approve",
+    };
+    let user_config_path = config.codex_home.join("config.toml").abs();
+    let user_config = toml::from_str(&format!(
+        r#"
+[apps.calendar]
+default_tools_approval_mode = "{approval_mode}"
+"#
+    ))
+    .expect("apps config should parse");
+    config.config_layer_stack = config
+        .config_layer_stack
+        .with_user_config(&user_config_path, user_config)
+        .expect("apps user config should be valid");
+}
+
+#[derive(Default)]
+struct McpCallTurnObservation {
+    tool_call_ends: Vec<McpToolCallEndEvent>,
+    approval_prompt_events: Vec<&'static str>,
+}
+
+async fn submit_turn_and_collect_mcp_call_events(
+    test: &TestCodex,
+    prompt: &str,
+) -> Result<McpCallTurnObservation> {
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let mut observation = McpCallTurnObservation::default();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = test
+                .codex
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            match event.msg {
+                EventMsg::McpToolCallEnd(end) => observation.tool_call_ends.push(end),
+                EventMsg::ElicitationRequest(_) => observation
+                    .approval_prompt_events
+                    .push("ElicitationRequest"),
+                EventMsg::ExecApprovalRequest(_) => observation
+                    .approval_prompt_events
+                    .push("ExecApprovalRequest"),
+                EventMsg::RequestPermissions(_) => observation
+                    .approval_prompt_events
+                    .push("RequestPermissions"),
+                EventMsg::ApplyPatchApprovalRequest(_) => observation
+                    .approval_prompt_events
+                    .push("ApplyPatchApprovalRequest"),
+                EventMsg::TurnComplete(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await?;
+
+    Ok(observation)
 }
 
 impl ThreadLifecycleContributor<Config> for McpResourceAccessCapture {
@@ -880,6 +997,196 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_tool_dispatch_uses_refreshed_calendar_approval_config() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let counters = McpCacheCounters::default();
+    // Keep concurrent tests without a subscriber from caching these callsites as disabled.
+    let _interest_cache_guard =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _tracing = tracing_subscriber::registry()
+        .with(counters.clone())
+        .set_default();
+
+    let server = responses::start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&server).await?;
+    let first_call_id = "calendar-before-approval-refresh";
+    let second_call_id = "calendar-after-approval-refresh";
+    let calendar_args = json!({
+        "title": "Lunch",
+        "starts_at": "2026-03-10T12:00:00Z"
+    });
+    let calendar_arguments = serde_json::to_string(&calendar_args)?;
+    let response = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-denied-call"),
+                ev_function_call_with_namespace(
+                    first_call_id,
+                    SEARCH_CALENDAR_NAMESPACE,
+                    SEARCH_CALENDAR_CREATE_TOOL,
+                    &calendar_arguments,
+                ),
+                ev_completed("resp-denied-call"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-denied-completion"),
+                ev_assistant_message("msg-denied", "done"),
+                ev_completed("resp-denied-completion"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-approved-call"),
+                ev_function_call_with_namespace(
+                    second_call_id,
+                    SEARCH_CALENDAR_NAMESPACE,
+                    SEARCH_CALENDAR_CREATE_TOOL,
+                    &calendar_arguments,
+                ),
+                ev_completed("resp-approved-call"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-approved-completion"),
+                ev_assistant_message("msg-approved", "done"),
+                ev_completed("resp-approved-completion"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
+        .with_config(|config| {
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            // Never auto-approves MCP permission prompts with Disabled; read-only keeps the denial oracle.
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::read_only())
+                .expect("test config should allow read-only permissions");
+            config
+                .features
+                .enable(Feature::ToolCallMcpElicitation)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::CodeModeOnly)
+                .expect("test config should allow feature update");
+            config.code_mode.direct_only_tool_namespaces =
+                vec![SEARCH_CALENDAR_NAMESPACE.to_string()];
+            set_calendar_approval_mode(config, AppToolApproval::Prompt);
+        });
+    let test = builder.build(&server).await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME),
+    )
+    .await??;
+
+    let initial_turn =
+        submit_turn_and_collect_mcp_call_events(&test, "Create a calendar event for lunch.")
+            .await?;
+    assert_eq!(initial_turn.tool_call_ends.len(), 1);
+    assert!(
+        initial_turn.approval_prompt_events.is_empty(),
+        "AskForApproval::Never must deny the MCP call without emitting an approval prompt: {:?}",
+        initial_turn.approval_prompt_events
+    );
+    let initial_end = &initial_turn.tool_call_ends[0];
+    assert_eq!(initial_end.call_id, first_call_id);
+    assert!(!initial_end.is_success());
+    let denial = initial_end
+        .result
+        .as_ref()
+        .expect_err("MCP call requiring approval must be rejected");
+    assert!(
+        denial.contains("MCP tool call requires approval, but approval policy is never"),
+        "expected an explicit AskForApproval::Never denial, got: {denial}"
+    );
+    assert!(
+        recorded_apps_tool_calls(&server).await.is_empty(),
+        "the denied call must not issue an Apps tools/call request"
+    );
+
+    let refreshes_before = counters.completed_runtime_refreshes.load(Ordering::SeqCst);
+    let mut refreshed_config = test.config.clone();
+    set_calendar_approval_mode(&mut refreshed_config, AppToolApproval::Approve);
+    test.codex.refresh_runtime_config(refreshed_config).await;
+    test.codex.submit(Op::RefreshMcpServers).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while counters.completed_runtime_refreshes.load(Ordering::SeqCst) <= refreshes_before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("MCP runtime refresh should complete within 10 seconds");
+
+    let refreshed_turn =
+        submit_turn_and_collect_mcp_call_events(&test, "Create a calendar event for lunch.")
+            .await?;
+    assert_eq!(refreshed_turn.tool_call_ends.len(), 1);
+    assert!(
+        refreshed_turn.approval_prompt_events.is_empty(),
+        "AppToolApproval::Approve must dispatch without an approval prompt: {:?}",
+        refreshed_turn.approval_prompt_events
+    );
+    let refreshed_end = &refreshed_turn.tool_call_ends[0];
+    assert_eq!(refreshed_end.call_id, second_call_id);
+    assert!(
+        refreshed_end.is_success(),
+        "the refreshed approval config should allow the MCP tool call: {:?}",
+        refreshed_end.result
+    );
+
+    let apps_tool_calls = recorded_apps_tool_calls(&server).await;
+    assert_eq!(apps_tool_calls.len(), 1);
+    let apps_tool_call = &apps_tool_calls[0];
+    assert_eq!(
+        apps_tool_call.pointer("/params/name"),
+        Some(&json!("calendar_create_event"))
+    );
+    assert_eq!(
+        apps_tool_call.pointer("/params/arguments"),
+        Some(&calendar_args)
+    );
+    assert_eq!(
+        apps_tool_call.pointer("/params/_meta/_codex_apps/call_id"),
+        Some(&json!(second_call_id))
+    );
+
+    let requests = response.requests();
+    assert_eq!(requests.len(), 4);
+    let initial_request = requests[0].body_json();
+    let refreshed_request = requests[2].body_json();
+    let initial_calendar_tool = namespace_child_tool(
+        &initial_request,
+        SEARCH_CALENDAR_NAMESPACE,
+        SEARCH_CALENDAR_CREATE_TOOL,
+    )
+    .expect("initial model request should advertise Calendar create")
+    .clone();
+    let refreshed_calendar_tool = namespace_child_tool(
+        &refreshed_request,
+        SEARCH_CALENDAR_NAMESPACE,
+        SEARCH_CALENDAR_CREATE_TOOL,
+    )
+    .expect("refreshed model request should advertise Calendar create");
+    assert_eq!(
+        refreshed_calendar_tool, &initial_calendar_tool,
+        "the refreshed model request should preserve the same Calendar tool metadata"
+    );
+    for request in [&initial_request, &refreshed_request] {
+        assert!(
+            request["tools"]
+                .as_array()
+                .is_some_and(|tools| { tools.iter().all(|tool| tool["type"] != "tool_search") }),
+            "the direct Apps fixture must not advertise tool_search: {request}"
+        );
+    }
+
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -922,9 +1229,17 @@ async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespaces() -> Result<()> {
     skip_if_no_network!(Ok(()));
+
+    let counters = McpCacheCounters::default();
+    // Keep concurrent tests without a subscriber from caching these callsites as disabled.
+    let _interest_cache_guard =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _tracing = tracing_subscriber::registry()
+        .with(counters.clone())
+        .set_default();
 
     let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount_searchable(&server).await?;
@@ -936,7 +1251,24 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
 
     test.submit_turn("inspect initially available deferred tools")
         .await?;
+    let initial_completed_refreshes = counters.completed_runtime_refreshes.load(Ordering::SeqCst);
+    let initial_search_index_builds = counters.search_index_builds.load(Ordering::SeqCst);
+    assert!(
+        initial_search_index_builds > 0,
+        "the initial turn must build the tool-search index"
+    );
+
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("inspect unchanged deferred tools").await?;
+    assert!(
+        counters.completed_runtime_refreshes.load(Ordering::SeqCst) > initial_completed_refreshes,
+        "the unchanged follow-up must use a newly published MCP runtime"
+    );
+    assert_eq!(
+        counters.search_index_builds.load(Ordering::SeqCst),
+        initial_search_index_builds,
+        "equivalent MCP metadata must preserve handlers and reuse the search index"
+    );
 
     let mut refresh_config = test.config.clone();
     let user_config_path = refresh_config.codex_home.join("config.toml");
@@ -955,6 +1287,18 @@ enabled = false
 
     let requests = response.requests();
     assert_eq!(requests.len(), 3);
+    let final_body_json = requests[2].body_json();
+    let final_tools = final_body_json["tools"]
+        .as_array()
+        .expect("final model request must contain a tools array");
+    assert!(
+        !final_tools.is_empty(),
+        "the final model request should retain its non-MCP tools"
+    );
+    assert!(
+        final_tools.iter().all(|tool| tool["type"] != "tool_search"),
+        "removing all deferred tools must stop advertising the cached search tool"
+    );
     let tools_states = requests
         .iter()
         .map(tools_state_sections)
@@ -975,6 +1319,7 @@ enabled = false
         )
     );
 
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 

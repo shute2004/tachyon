@@ -9,15 +9,18 @@ use codex_mcp::ToolInfo;
 use codex_tools::ToolExposure;
 use codex_tools::ToolName;
 use pretty_assertions::assert_eq;
+use rmcp::model::Icon;
 use rmcp::model::JsonObject;
 use rmcp::model::MetaObject;
 use rmcp::model::Tool;
+use rmcp::model::ToolAnnotations;
 
 use super::*;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::config::test_config;
+use crate::tools::registry::CoreToolRuntime;
 use tempfile::tempdir;
 
 fn make_mcp_tool(
@@ -110,6 +113,312 @@ fn runtimes_by_name_with_catalog(
         .entries()
         .map(|tool| (tool.runtime.tool_name(), tool.exposure))
         .collect()
+}
+
+fn append_tool_and_capture_runtime(
+    tool: &ToolInfo,
+    config: &Config,
+    catalog: &ResolvedMcpCatalog,
+    handlers: &mut HashMap<ToolName, CachedMcpHandler>,
+) -> Arc<dyn CoreToolRuntime> {
+    let mut registry = ToolRegistry::default();
+    let registered = append_mcp_tools(
+        std::slice::from_ref(tool),
+        config,
+        /*apps_enabled*/ false,
+        catalog,
+        /*search_tool_enabled*/ false,
+        handlers,
+        &mut registry,
+    );
+    assert_eq!(registered, HashSet::from([tool.canonical_tool_name()]));
+    Arc::clone(
+        &registry
+            .entries()
+            .next()
+            .expect("the MCP tool should be registered")
+            .runtime,
+    )
+}
+
+#[tokio::test]
+async fn reuses_mcp_handler_for_equivalent_tool_metadata_across_appends() {
+    let config = test_config().await;
+    let catalog = ResolvedMcpCatalog::default();
+    let tool = make_mcp_tool(
+        "rmcp",
+        "read",
+        "mcp__rmcp",
+        "read",
+        /*connector_id*/ None,
+        /*connector_name*/ None,
+    );
+    let mut handlers = HashMap::new();
+
+    let first = append_tool_and_capture_runtime(&tool, &config, &catalog, &mut handlers);
+    let second = append_tool_and_capture_runtime(&tool, &config, &catalog, &mut handlers);
+
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn replaces_mcp_handler_when_any_tool_metadata_changes() {
+    let config = test_config().await;
+    let catalog = ResolvedMcpCatalog::default();
+    let mutations: [(&str, fn(&mut ToolInfo)); 18] = [
+        ("server name", |tool| {
+            tool.server_name = "other_server".to_owned()
+        }),
+        ("parallel support", |tool| {
+            tool.supports_parallel_tool_calls = true
+        }),
+        ("server origin", |tool| {
+            tool.server_origin = Some("https://example.test/mcp".to_owned())
+        }),
+        ("callable name", |tool| {
+            tool.callable_name = "renamed".to_owned()
+        }),
+        ("callable namespace", |tool| {
+            tool.callable_namespace = "mcp__renamed".to_owned()
+        }),
+        ("namespace description", |tool| {
+            tool.namespace_description = Some("updated namespace".to_owned())
+        }),
+        ("raw tool name", |tool| tool.tool.name = "renamed".into()),
+        ("tool title", |tool| {
+            tool.tool.title = Some("Updated title".to_owned())
+        }),
+        ("tool description", |tool| {
+            tool.tool.description = Some("Updated description".into())
+        }),
+        ("input schema", |tool| {
+            tool.tool.input_schema = Arc::new(
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "updated": { "type": "string" } }
+                })
+                .as_object()
+                .expect("input schema object")
+                .clone(),
+            )
+        }),
+        ("output schema", |tool| {
+            tool.tool.output_schema = Some(Arc::new(
+                serde_json::json!({ "type": "string" })
+                    .as_object()
+                    .expect("output schema object")
+                    .clone(),
+            ))
+        }),
+        ("tool annotations", |tool| {
+            tool.tool.annotations = Some(ToolAnnotations::new().read_only(true))
+        }),
+        ("tool icons", |tool| {
+            tool.tool.icons = Some(vec![Icon::new("https://example.test/icon.png")])
+        }),
+        ("tool metadata", |tool| {
+            tool.tool.meta = Some(MetaObject(
+                serde_json::json!({ "updated": true })
+                    .as_object()
+                    .expect("tool metadata object")
+                    .clone(),
+            ))
+        }),
+        ("optional file fields", |tool| {
+            tool.openai_file_input_optional_fields
+                .insert("file".to_owned(), vec!["optional".to_owned()]);
+        }),
+        ("connector id", |tool| {
+            tool.connector_id = Some("connector".to_owned())
+        }),
+        ("connector name", |tool| {
+            tool.connector_name = Some("Connector".to_owned())
+        }),
+        ("plugin display names", |tool| {
+            tool.plugin_display_names = vec!["Plugin".to_owned()]
+        }),
+    ];
+
+    for (field, mutate) in mutations {
+        let mut handlers = HashMap::new();
+        let original = make_mcp_tool(
+            "rmcp",
+            "read",
+            "mcp__rmcp",
+            "read",
+            /*connector_id*/ None,
+            /*connector_name*/ None,
+        );
+        let first = append_tool_and_capture_runtime(&original, &config, &catalog, &mut handlers);
+        let mut updated = original;
+        mutate(&mut updated);
+        let replacement =
+            append_tool_and_capture_runtime(&updated, &config, &catalog, &mut handlers);
+
+        assert!(
+            !Arc::ptr_eq(&first, &replacement),
+            "changing {field} must replace the cached handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_plugin_status_rebuilds_handler_and_preserves_original_metadata() {
+    let codex_home = tempdir().expect("create config directory");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[mcp_servers.agent]\ncommand = \"echo\"\n",
+    )
+    .expect("write config");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("config should build");
+    let mut agent_catalog = ResolvedMcpCatalog::builder();
+    agent_catalog.register(McpServerRegistration::from_plugin(
+        "agent".to_owned(),
+        McpPluginAttribution::agent_plugin("agent@test".to_owned(), "Agent".to_owned()),
+        /*plugin_order*/ 0,
+        config.mcp_servers.get()["agent"].clone(),
+    ));
+    let agent_catalog = agent_catalog.build();
+    let regular_catalog = ResolvedMcpCatalog::default();
+    let long_description = "n".repeat(1_500);
+    let mut tool = make_mcp_tool(
+        "agent",
+        "read",
+        "mcp__agent",
+        "read",
+        /*connector_id*/ None,
+        /*connector_name*/ None,
+    );
+    tool.namespace_description = Some(long_description.clone());
+    let name = tool.canonical_tool_name();
+    let mut handlers = HashMap::new();
+
+    let regular = append_tool_and_capture_runtime(&tool, &config, &regular_catalog, &mut handlers);
+    let agent = append_tool_and_capture_runtime(&tool, &config, &agent_catalog, &mut handlers);
+    assert!(!Arc::ptr_eq(&regular, &agent));
+    assert_eq!(
+        agent
+            .search_info()
+            .expect("agent handler search info")
+            .source_info
+            .expect("agent source info")
+            .description
+            .expect("agent namespace description")
+            .len(),
+        1_000,
+        "the agent handler should retain its namespace-description truncation"
+    );
+    assert_eq!(
+        handlers[&name].tool_info.namespace_description.as_deref(),
+        Some(long_description.as_str()),
+        "cache metadata must remain the original untruncated catalog value"
+    );
+
+    let agent_again =
+        append_tool_and_capture_runtime(&tool, &config, &agent_catalog, &mut handlers);
+    assert!(Arc::ptr_eq(&agent, &agent_again));
+    let regular_again =
+        append_tool_and_capture_runtime(&tool, &config, &regular_catalog, &mut handlers);
+    assert!(!Arc::ptr_eq(&agent_again, &regular_again));
+}
+
+#[tokio::test]
+async fn evicts_removed_mcp_tools_including_the_last_cached_handler() {
+    let config = test_config().await;
+    let catalog = ResolvedMcpCatalog::default();
+    let tools = numbered_mcp_tools(/*count*/ 2);
+    let mut handlers = HashMap::new();
+    let mut registry = ToolRegistry::default();
+    append_mcp_tools(
+        &tools,
+        &config,
+        /*apps_enabled*/ false,
+        &catalog,
+        /*search_tool_enabled*/ false,
+        &mut handlers,
+        &mut registry,
+    );
+    assert_eq!(handlers.len(), 2);
+
+    let remaining_tool = tools[1].clone();
+    let mut registry = ToolRegistry::default();
+    let registered = append_mcp_tools(
+        std::slice::from_ref(&remaining_tool),
+        &config,
+        /*apps_enabled*/ false,
+        &catalog,
+        /*search_tool_enabled*/ false,
+        &mut handlers,
+        &mut registry,
+    );
+    assert_eq!(
+        registered,
+        HashSet::from([remaining_tool.canonical_tool_name()])
+    );
+    assert_eq!(handlers.len(), 1);
+
+    let mut registry = ToolRegistry::default();
+    let registered = append_mcp_tools(
+        &[],
+        &config,
+        /*apps_enabled*/ false,
+        &catalog,
+        /*search_tool_enabled*/ false,
+        &mut handlers,
+        &mut registry,
+    );
+    assert!(registered.is_empty());
+    assert!(handlers.is_empty());
+}
+
+#[tokio::test]
+async fn failed_metadata_rebuild_evicts_the_previous_handler() {
+    let config = test_config().await;
+    let catalog = ResolvedMcpCatalog::default();
+    let valid = make_mcp_tool(
+        "rmcp",
+        "read",
+        "mcp__rmcp",
+        "read",
+        /*connector_id*/ None,
+        /*connector_name*/ None,
+    );
+    let name = valid.canonical_tool_name();
+    let mut handlers = HashMap::new();
+    let first = append_tool_and_capture_runtime(&valid, &config, &catalog, &mut handlers);
+
+    let mut invalid = valid.clone();
+    invalid.tool.input_schema = Arc::new(
+        serde_json::json!({ "type": "null" })
+            .as_object()
+            .expect("invalid schema remains a JSON object")
+            .clone(),
+    );
+    assert!(
+        McpHandler::new(invalid.clone()).is_err(),
+        "singleton-null input schemas must be a reproducible handler-build failure"
+    );
+
+    let mut registry = ToolRegistry::default();
+    let registered = append_mcp_tools(
+        std::slice::from_ref(&invalid),
+        &config,
+        /*apps_enabled*/ false,
+        &catalog,
+        /*search_tool_enabled*/ false,
+        &mut handlers,
+        &mut registry,
+    );
+    assert!(registered.is_empty());
+    assert!(registry.entries().next().is_none());
+    assert!(!handlers.contains_key(&name));
+
+    let rebuilt = append_tool_and_capture_runtime(&valid, &config, &catalog, &mut handlers);
+    assert!(!Arc::ptr_eq(&first, &rebuilt));
 }
 
 #[tokio::test]

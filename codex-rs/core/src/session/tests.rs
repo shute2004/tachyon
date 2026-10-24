@@ -8821,6 +8821,197 @@ async fn refreshed_mcp_binding_captures_current_approval_authority() {
 }
 
 #[tokio::test]
+async fn prepare_mcp_call_refreshes_authority_for_old_advertisement() {
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::Request;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    const SERVER_NAME: &str = "current-call-authority";
+    const TOOL_NAME: &str = "read_status";
+
+    let mcp_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body)
+                .expect("MCP request should be valid JSON-RPC");
+            let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            match body.get("method").and_then(serde_json::Value::as_str) {
+                Some("initialize") => ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": body["params"]["protocolVersion"],
+                        "capabilities": { "tools": {} },
+                        "serverInfo": {
+                            "name": SERVER_NAME,
+                            "version": "1.0.0"
+                        }
+                    }
+                })),
+                Some("notifications/initialized") => ResponseTemplate::new(202),
+                Some("tools/list") => ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "tools": [{
+                            "name": TOOL_NAME,
+                            "description": "Read the current status.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                            }
+                        }]
+                    }
+                })),
+                method => panic!("unexpected MCP fixture method: {method:?}"),
+            }
+        })
+        .mount(&mcp_server)
+        .await;
+
+    let codex_home = tempfile::tempdir().expect("create test Codex home");
+    let mcp_url = format!("{}/mcp", mcp_server.uri());
+    let (session, old_turn, _rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        codex_home.path(),
+        move |config| {
+            let servers = serde_json::from_value::<HashMap<String, McpServerConfig>>(json!({
+                "current-call-authority": {
+                    "url": mcp_url,
+                    "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+                    "required": true
+                }
+            }))
+            .expect("local HTTP MCP server config should deserialize");
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("local HTTP MCP server should be configurable");
+        },
+    )
+    .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        session.wait_for_mcp_server(SERVER_NAME),
+    )
+    .await
+    .expect("local MCP server startup should finish before the test deadline");
+    let old_step = tokio::time::timeout(
+        Duration::from_secs(10),
+        session.capture_step_context(Arc::clone(&old_turn), &CancellationToken::new()),
+    )
+    .await
+    .expect("capturing the initial MCP step should finish before the test deadline")
+    .expect("capture a step with the ready local MCP server");
+    let advertised_tool = old_step
+        .mcp
+        .tools()
+        .iter()
+        .find(|tool| tool.server_name == SERVER_NAME && tool.tool.name == TOOL_NAME)
+        .expect("the ready local MCP server should advertise its tool")
+        .clone();
+    let old_callable_namespace = advertised_tool.callable_namespace.clone();
+    let old_callable_name = advertised_tool.callable_name.clone();
+    let old_call = old_step
+        .mcp
+        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .expect("the captured MCP binding should prepare its advertised tool");
+
+    let old_approval_policy = old_call.config().approval_policy.value();
+    let old_reviewer = old_call.config().approvals_reviewer;
+    let old_global_permissions = old_call.config().permission_profile.clone();
+    let old_server_permissions = old_call.permission_profile().clone();
+    let old_turn_permissions = old_turn.permission_profile();
+    let old_turn_global_permissions = old_turn.config.permissions.effective_permission_profile();
+    assert_ne!(old_approval_policy, AskForApproval::Never);
+    assert_ne!(old_reviewer, ApprovalsReviewer::AutoReview);
+    assert_eq!(old_turn.approval_policy(), old_approval_policy);
+    assert_eq!(old_turn.config.approvals_reviewer, old_reviewer);
+
+    session
+        .update_settings(SessionSettingsUpdate {
+            step_settings: StepSettingsUpdate {
+                approval_policy: Some(AskForApproval::Never),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                ..Default::default()
+            },
+            permission_profile: Some(PermissionProfile::Disabled),
+            ..Default::default()
+        })
+        .await
+        .expect("approval settings should update");
+
+    // Do not refresh explicitly here: preparing the stale advertised identity must resolve
+    // against the current runtime and its current approval authority.
+    let current_call = tokio::time::timeout(
+        Duration::from_secs(10),
+        session.prepare_mcp_call(&advertised_tool),
+    )
+    .await
+    .expect("preparing the refreshed MCP call should finish before the test deadline")
+    .expect("the old advertised tool should prepare against the refreshed runtime");
+    assert_eq!(
+        current_call.config().approval_policy.value(),
+        AskForApproval::Never
+    );
+    assert_eq!(
+        current_call.config().approvals_reviewer,
+        ApprovalsReviewer::AutoReview
+    );
+    assert_eq!(
+        current_call.config().permission_profile,
+        PermissionProfile::Disabled
+    );
+
+    let current_runtime_config = session
+        .services
+        .mcp_runtime
+        .current_config()
+        .expect("the refreshed MCP runtime should have a config");
+    let current_server_permissions = current_runtime_config
+        .permission_profile_for_server(SERVER_NAME)
+        .expect("the current runtime should retain this server's permission authority");
+    assert_eq!(
+        current_call.permission_profile(),
+        current_server_permissions,
+        "the prepared call must use the current server-specific permission entry"
+    );
+    assert_eq!(
+        current_call.tool_info().callable_namespace,
+        old_callable_namespace,
+        "refreshing authority must preserve the advertised namespace"
+    );
+    assert_eq!(
+        current_call.tool_info().callable_name,
+        old_callable_name,
+        "refreshing authority must preserve the advertised callable name"
+    );
+
+    assert_eq!(
+        old_call.config().approval_policy.value(),
+        old_approval_policy
+    );
+    assert_eq!(old_call.config().approvals_reviewer, old_reviewer);
+    assert_eq!(old_call.config().permission_profile, old_global_permissions);
+    assert_eq!(old_call.permission_profile(), &old_server_permissions);
+    assert_eq!(old_turn.approval_policy(), old_approval_policy);
+    assert_eq!(old_turn.config.approvals_reviewer, old_reviewer);
+    assert_eq!(
+        old_turn.config.permissions.effective_permission_profile(),
+        old_turn_global_permissions
+    );
+    assert_eq!(old_turn.permission_profile(), old_turn_permissions);
+    session.services.mcp_runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn mcp_elicitation_reviewer_uses_latest_runtime_authority() {
     let guardian_server = start_mock_server().await;
     mount_sse_once(
