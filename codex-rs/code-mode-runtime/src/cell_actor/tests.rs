@@ -163,6 +163,33 @@ fn spawn_cell_actor_harness_with_host_and_failure_handler<H: CellHost>(
     }
 }
 
+async fn assert_termination_delivers_queued_output(
+    termination: CellEventFuture,
+    initial_event_rx: oneshot::Receiver<Result<CellEvent, CellError>>,
+    task: tokio::task::JoinHandle<()>,
+) {
+    let expected = Ok(CellEvent::Terminated {
+        content_items: vec![OutputItem::Text {
+            text: "queued output".to_string(),
+        }],
+    });
+    let (termination_result, observer_result) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let termination_result = termination.await;
+            let observer_result = initial_event_rx.await.expect("initial observer event");
+            (termination_result, observer_result)
+        })
+        .await
+        .expect("termination event timed out");
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("cell actor task timed out")
+        .expect("cell actor task");
+
+    assert_eq!(termination_result, expected.clone());
+    assert_eq!(observer_result, expected);
+}
+
 #[tokio::test]
 async fn unexpected_runtime_thread_exit_is_reported_to_the_session_owner() {
     let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
@@ -272,6 +299,99 @@ async fn queued_termination_preempts_unobserved_runtime_completion() {
     assert_eq!(termination.await, terminated.clone());
     assert_eq!(harness.initial_event_rx.await.unwrap(), terminated);
     harness.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_started_and_zero_yield_deadline() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::ZERO));
+    harness.event_tx.send(RuntimeEvent::Started).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_yield_requested() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::from_secs(60)));
+    harness.event_tx.send(RuntimeEvent::YieldRequested).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_after_pending_frontier() {
+    let harness = spawn_cell_actor_harness(ObserveMode::PendingFrontier);
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    harness.event_tx.send(RuntimeEvent::Pending).unwrap();
+    harness
+        .event_tx
+        .send(RuntimeEvent::Result {
+            stored_value_writes: HashMap::new(),
+            error_text: None,
+        })
+        .unwrap();
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
+}
+
+#[tokio::test]
+async fn queued_termination_preserves_output_when_runtime_channel_closes() {
+    let harness = spawn_cell_actor_harness(ObserveMode::YieldAfter(Duration::from_secs(60)));
+    harness
+        .event_tx
+        .send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText {
+                text: "queued output".to_string(),
+            },
+        ))
+        .unwrap();
+    drop(harness.event_tx);
+
+    let termination = harness.handle.terminate();
+    assert_termination_delivers_queued_output(termination, harness.initial_event_rx, harness.task)
+        .await;
 }
 
 #[tokio::test]
@@ -515,6 +635,253 @@ async fn termination_claim_prevents_stored_value_commit() {
         Some(terminated.clone())
     );
     assert_eq!(termination.await, Ok(terminated));
+}
+
+fn progress_test_observer(
+    mode: ObserveMode,
+) -> (Observer, oneshot::Receiver<Result<CellEvent, CellError>>) {
+    let (response_tx, response_rx) = oneshot::channel();
+    (Observer { mode, response_tx }, response_rx)
+}
+
+fn queued_progress_output() -> Vec<OutputItem> {
+    vec![OutputItem::Text {
+        text: "queued progress".to_string(),
+    }]
+}
+
+async fn assert_termination_and_observer_receive(
+    termination: CellEventFuture,
+    observer_rx: oneshot::Receiver<Result<CellEvent, CellError>>,
+    expected: CellEvent,
+) {
+    let expected = Ok(expected);
+    let (termination_result, observer_result) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let termination_result = termination.await;
+            let observer_result = observer_rx.await.expect("observer event");
+            (termination_result, observer_result)
+        })
+        .await
+        .expect("termination and observer events timed out");
+    assert_eq!(termination_result, expected.clone());
+    assert_eq!(observer_result, expected);
+}
+
+#[tokio::test]
+async fn progress_delivery_termination_claim_wins_for_yielded_event() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let termination = cell_state.request_termination();
+    let (observer, observer_rx) = progress_test_observer(ObserveMode::YieldAfter(Duration::ZERO));
+    let mut observer = Some(observer);
+    let mut content_items = Vec::new();
+    let progress = CellEvent::Yielded {
+        content_items: queued_progress_output(),
+    };
+
+    restore_undelivered_yield(
+        send_observer_event(&cell_state, &mut observer, progress.clone()),
+        &mut content_items,
+    );
+
+    assert_eq!(content_items, queued_progress_output());
+    assert_eq!(
+        observer.as_ref().map(|observer| observer.mode),
+        Some(ObserveMode::YieldAfter(Duration::ZERO))
+    );
+    assert!(!observer.as_ref().unwrap().response_tx.is_closed());
+
+    let terminated = CellEvent::Terminated { content_items };
+    finish_termination(
+        &cell_state,
+        observer.take().map(|observer| observer.response_tx),
+        terminated.clone(),
+    );
+    assert_termination_and_observer_receive(termination, observer_rx, terminated).await;
+}
+
+#[tokio::test]
+async fn progress_delivery_termination_claim_wins_for_pending_event() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let termination = cell_state.request_termination();
+    let (observer, observer_rx) = progress_test_observer(ObserveMode::PendingFrontier);
+    let mut observer = Some(observer);
+    let progress = CellEvent::Pending {
+        content_items: queued_progress_output(),
+        pending_tool_call_ids: vec!["tool-1".to_string()],
+    };
+
+    let (content_items, pending_tool_call_ids, pending_frontier_ready) =
+        match send_observer_event(&cell_state, &mut observer, progress) {
+            Ok(()) => panic!("termination claim should reject pending progress"),
+            Err(CellEvent::Pending {
+                content_items: undelivered_items,
+                pending_tool_call_ids: undelivered_tool_call_ids,
+            }) => (undelivered_items, undelivered_tool_call_ids, true),
+            Err(event) => panic!("pending delivery returned an unexpected event: {event:?}"),
+        };
+
+    assert_eq!(content_items, queued_progress_output());
+    assert_eq!(pending_tool_call_ids, vec!["tool-1".to_string()]);
+    assert!(pending_frontier_ready);
+    assert_eq!(
+        observer.as_ref().map(|observer| observer.mode),
+        Some(ObserveMode::PendingFrontier)
+    );
+    assert!(!observer.as_ref().unwrap().response_tx.is_closed());
+
+    let terminated = CellEvent::Terminated { content_items };
+    finish_termination(
+        &cell_state,
+        observer.take().map(|observer| observer.response_tx),
+        terminated.clone(),
+    );
+    assert_termination_and_observer_receive(termination, observer_rx, terminated).await;
+}
+
+#[tokio::test]
+async fn progress_delivery_yielded_event_before_termination_is_not_duplicated() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let (observer, observer_rx) = progress_test_observer(ObserveMode::YieldAfter(Duration::ZERO));
+    let mut observer = Some(observer);
+    let progress = CellEvent::Yielded {
+        content_items: queued_progress_output(),
+    };
+
+    assert_eq!(
+        send_observer_event(&cell_state, &mut observer, progress.clone()),
+        Ok(())
+    );
+    assert!(observer.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observer_rx)
+            .await
+            .expect("yielded progress timed out")
+            .expect("yielded progress observer"),
+        Ok(progress)
+    );
+
+    let termination = cell_state.request_termination();
+    let terminated = CellEvent::Terminated {
+        content_items: Vec::new(),
+    };
+    finish_termination(&cell_state, None, terminated.clone());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), termination)
+            .await
+            .expect("termination event timed out"),
+        Ok(terminated)
+    );
+}
+
+#[tokio::test]
+async fn progress_delivery_pending_event_before_termination_is_not_duplicated() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let (observer, observer_rx) = progress_test_observer(ObserveMode::PendingFrontier);
+    let mut observer = Some(observer);
+    let progress = CellEvent::Pending {
+        content_items: queued_progress_output(),
+        pending_tool_call_ids: vec!["tool-1".to_string()],
+    };
+
+    assert_eq!(
+        send_observer_event(&cell_state, &mut observer, progress.clone()),
+        Ok(())
+    );
+    assert!(observer.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observer_rx)
+            .await
+            .expect("pending progress timed out")
+            .expect("pending progress observer"),
+        Ok(progress)
+    );
+
+    let termination = cell_state.request_termination();
+    let terminated = CellEvent::Terminated {
+        content_items: Vec::new(),
+    };
+    finish_termination(&cell_state, None, terminated.clone());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), termination)
+            .await
+            .expect("termination event timed out"),
+        Ok(terminated)
+    );
+}
+
+#[test]
+fn progress_delivery_closed_yield_observer_rebuffers_output() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let (observer, observer_rx) = progress_test_observer(ObserveMode::YieldAfter(Duration::ZERO));
+    let mut observer = Some(observer);
+    drop(observer_rx);
+    let mut content_items = Vec::new();
+    let progress = CellEvent::Yielded {
+        content_items: queued_progress_output(),
+    };
+
+    restore_undelivered_yield(
+        send_observer_event(&cell_state, &mut observer, progress),
+        &mut content_items,
+    );
+
+    assert!(observer.is_none());
+    assert_eq!(content_items, queued_progress_output());
+}
+
+#[tokio::test]
+async fn progress_delivery_immediate_pending_frontier_restores_observer_after_termination_claim() {
+    let cell_state = CellState::new(CancellationToken::new());
+    let (response_tx, observer_rx) = oneshot::channel();
+    let mut observer = match cell_state.route_observation(ObserveMode::PendingFrontier, response_tx)
+    {
+        ObservationDelivery::Running(response_tx) => Some(Observer {
+            mode: ObserveMode::PendingFrontier,
+            response_tx,
+        }),
+        _ => panic!("pending-frontier observation was not admitted while running"),
+    };
+    let mut content_items = queued_progress_output();
+    let mut pending_tool_call_ids = vec!["tool-1".to_string()];
+    let termination = cell_state.request_termination();
+
+    let pending_frontier_ready = match send_observer_event(
+        &cell_state,
+        &mut observer,
+        CellEvent::Pending {
+            content_items: std::mem::take(&mut content_items),
+            pending_tool_call_ids: std::mem::take(&mut pending_tool_call_ids),
+        },
+    ) {
+        Ok(()) => panic!("termination claim should reject ready pending progress"),
+        Err(CellEvent::Pending {
+            content_items: undelivered_items,
+            pending_tool_call_ids: undelivered_tool_call_ids,
+        }) => {
+            content_items = undelivered_items;
+            pending_tool_call_ids = undelivered_tool_call_ids;
+            true
+        }
+        Err(event) => panic!("pending delivery returned an unexpected event: {event:?}"),
+    };
+
+    assert_eq!(content_items, queued_progress_output());
+    assert_eq!(pending_tool_call_ids, vec!["tool-1".to_string()]);
+    assert!(pending_frontier_ready);
+    assert_eq!(
+        observer.as_ref().map(|observer| observer.mode),
+        Some(ObserveMode::PendingFrontier)
+    );
+    assert!(!observer.as_ref().unwrap().response_tx.is_closed());
+
+    let terminated = CellEvent::Terminated { content_items };
+    finish_termination(
+        &cell_state,
+        observer.take().map(|observer| observer.response_tx),
+        terminated.clone(),
+    );
+    assert_termination_and_observer_receive(termination, observer_rx, terminated).await;
 }
 
 #[test]

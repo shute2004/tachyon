@@ -96,15 +96,16 @@ impl CellHandle {
     }
 }
 
-/// The single linearization point for a cell's terminal outcome.
+/// The single linearization point for a cell's terminal outcome and observer progress.
 ///
 /// The cancellation token is a child of the owning session token. Callback
 /// tokens are children of this token, so cancellation flows strictly from the
 /// session to the cell and then to its callbacks.
 ///
-/// The mutex is held only for synchronous phase transitions and terminal
-/// delivery. Runtime execution, observation waits, and callbacks never run
-/// while it is held.
+/// The mutex is held only for synchronous phase transitions and event
+/// delivery. Nonterminal observer progress is sent while holding the mutex so
+/// it is ordered against a termination claim. Runtime execution, observation
+/// waits, and callbacks never run while it is held.
 pub(crate) struct CellState {
     phase: Mutex<CellPhase>,
     cancellation_token: CancellationToken,
@@ -142,6 +143,15 @@ pub(crate) enum ObservationDelivery {
     Delivered,
     Buffered,
     Closed,
+}
+
+pub(super) enum ProgressDelivery {
+    Delivered,
+    ReceiverClosed(CellEvent),
+    Rejected {
+        response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
+        event: CellEvent,
+    },
 }
 
 impl CellState {
@@ -193,6 +203,38 @@ impl CellState {
                 Box::pin(async { Err(CellError::AlreadyTerminating) })
             }
             CellPhase::Tombstone => closed_event(),
+        }
+    }
+
+    pub(super) fn deliver_progress(
+        &self,
+        response_tx: oneshot::Sender<Result<CellEvent, CellError>>,
+        event: CellEvent,
+    ) -> ProgressDelivery {
+        let phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*phase {
+            CellPhase::Running if !self.cancellation_token.is_cancelled() => {
+                match response_tx.send(Ok(event)) {
+                    Ok(()) => ProgressDelivery::Delivered,
+                    Err(Ok(event)) => ProgressDelivery::ReceiverClosed(event),
+                    Err(Err(error)) => {
+                        panic!(
+                            "observer progress delivery unexpectedly carried an actor error: {error:?}"
+                        )
+                    }
+                }
+            }
+            CellPhase::Running | CellPhase::Terminating { .. } => {
+                ProgressDelivery::Rejected { response_tx, event }
+            }
+            CellPhase::Completed { .. }
+            | CellPhase::CompletionClaimed(_)
+            | CellPhase::Tombstone => {
+                unreachable!("observer progress delivery requires a running or terminating cell")
+            }
         }
     }
 
