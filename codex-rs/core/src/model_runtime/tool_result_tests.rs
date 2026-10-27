@@ -261,6 +261,7 @@ fn discovered_tool_result_adapter_preserves_tool_order_and_wire_shape() {
                 namespace: None,
                 name,
                 strict: true,
+                output_schema: None,
                 availability: ModelToolAvailability::Deferred,
                 purpose: ModelToolPurpose::Invocation,
                 ..
@@ -268,6 +269,7 @@ fn discovered_tool_result_adapter_preserves_tool_order_and_wire_shape() {
             ModelToolSpec::Function {
                 namespace: Some(namespace),
                 name: function_name,
+                output_schema: None,
                 availability: ModelToolAvailability::Immediate,
                 purpose: ModelToolPurpose::Invocation,
                 ..

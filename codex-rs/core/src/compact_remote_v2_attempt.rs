@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::RemoteCompactionV2Output;
@@ -67,7 +68,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
 
     let trace_input_history = compaction_trace
         .is_enabled()
-        .then(|| history.raw_items().cloned().collect());
+        .then(|| history.raw_items().map(Cow::into_owned).collect());
     let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
         .for_prompt_annotated(&turn_context.model_info().input_modalities)
         .into_iter()

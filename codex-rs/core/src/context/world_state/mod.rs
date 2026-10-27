@@ -32,6 +32,7 @@ use serde_json::Map;
 use serde_json::Value;
 use sha1::Digest;
 use sha1::Sha1;
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -411,11 +412,15 @@ impl WorldState {
     }
 
     /// Falls back to retained model history when no exact persisted snapshot is available.
-    pub(crate) fn render_history_diff<'a>(
+    pub(crate) fn render_history_diff<I>(
         &self,
         previous: Option<&WorldStateSnapshot>,
-        items: impl IntoIterator<Item = &'a ResponseItem> + Clone,
-    ) -> Vec<Box<dyn ContextualUserFragment>> {
+        items: I,
+    ) -> Vec<Box<dyn ContextualUserFragment>>
+    where
+        I: IntoIterator + Clone,
+        I::Item: Borrow<ResponseItem>,
+    {
         self.render_with(|id, section| {
             if let Some(previous) = previous.and_then(|previous| previous.sections.get(id)) {
                 if section.has_retained_fragment_matcher()
@@ -444,13 +449,14 @@ impl WorldState {
     }
 }
 
-fn has_retained_fragment<'a>(
-    items: impl IntoIterator<Item = &'a ResponseItem>,
-    section: &dyn ErasedWorldStateSection,
-) -> bool {
+fn has_retained_fragment<I>(items: I, section: &dyn ErasedWorldStateSection) -> bool
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     items.into_iter().any(|item| {
         matches!(
-            item,
+            item.borrow(),
             ResponseItem::Message { role, content, .. }
                 if content.iter().any(|content| {
                     matches!(
@@ -463,13 +469,14 @@ fn has_retained_fragment<'a>(
     })
 }
 
-fn has_legacy_fragment<'a>(
-    items: impl IntoIterator<Item = &'a ResponseItem>,
-    section: &dyn ErasedWorldStateSection,
-) -> bool {
+fn has_legacy_fragment<I>(items: I, section: &dyn ErasedWorldStateSection) -> bool
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     items.into_iter().any(|item| {
         matches!(
-            item,
+            item.borrow(),
             ResponseItem::Message { role, content, .. }
                 if content.iter().any(|content| {
                     matches!(

@@ -1,81 +1,24 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Legacy Tachyon（旧Tachyon）
 
----
+このリポジトリは、Codexを基に開発していた旧Tachyonのコーディングハーネスを保存・整理するためのものです。別方針で始める新Tachyonとは区別します。
 
-## Quickstart
+既存の実装と履歴をまとめることが目的です。未完成だったカーネル抽出の続行、機能追加、上流Codexへの全面追従は、この整理には含めません。
 
-### Installing and running Codex CLI
+## 内容と状態
 
-Run the following on Mac or Linux to install Codex CLI:
+- Rustのハーネス・実行基盤: [`codex-rs/`](codex-rs/)
+- SDK: [`sdk/`](sdk/)
+- 統合元・検証結果・既知の制限: [`LEGACY_TACHYON.md`](LEGACY_TACHYON.md)
+- 当時の設計と抽出方針: [`TACHYON.md`](TACHYON.md)、[`docs/tachyon/architecture.md`](docs/tachyon/architecture.md)
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+モデル・UIからの独立は途中段階です。Codex互換の実装や命名を残しており、完成済みの独立カーネルや全プラットフォーム検証済みのリリースとは扱いません。検証の成功・失敗・未実施は、統合記録で区別します。
 
-Run the following on Windows to install Codex CLI:
+## ソースからの利用
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
+このチェックアウトの [`codex-rs/rust-toolchain.toml`](codex-rs/rust-toolchain.toml)、[`codex-rs/Cargo.lock`](codex-rs/Cargo.lock)、Bazelの固定ファイルを使用してください。ビルド・テスト手順とディスク上限は[統合記録](LEGACY_TACHYON.md#ビルドと検証)に記載しています。
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+元のCodexの紹介・インストール案内は [`README.codex.md`](README.codex.md) にそのまま保存しています。そこにあるOpenAIのインストーラーや配布パッケージは、旧Tachyonのビルドをインストールするものではありません。
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
+## ライセンス
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
-
-Codex CLI can also be installed via the following package managers:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+Codex由来の著作権表示とライセンスは保持しています。[Apache-2.0](LICENSE) と [NOTICE](NOTICE) を参照してください。

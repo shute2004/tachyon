@@ -31,12 +31,14 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
+use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_skills_extension::HostSkillsSnapshot;
 use codex_skills_extension::SkillLoadOutcome;
 use codex_utils_path_uri::PathUri;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::Shared;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
@@ -189,6 +191,12 @@ pub(crate) struct NewTurnContextOptions {
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct TurnGrants {
+    granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
+    strict_auto_review_enabled: bool,
+}
+
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
 pub struct TurnContext {
@@ -238,6 +246,7 @@ pub struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    pub(crate) turn_grants: Arc<tokio::sync::Mutex<TurnGrants>>,
     pub(crate) terminal_error: Arc<Mutex<Option<ErrorEvent>>>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
@@ -251,10 +260,51 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    pub(crate) async fn record_granted_permissions_for_environment(
+        &self,
+        environment_id: &str,
+        permissions: AdditionalPermissionProfile,
+        strict_auto_review: bool,
+    ) {
+        let mut grants = self.turn_grants.lock().await;
+        let merged = merge_permission_profiles(
+            grants
+                .granted_permissions_by_environment_id
+                .get(environment_id),
+            Some(&permissions),
+        );
+        if let Some(merged) = merged {
+            grants
+                .granted_permissions_by_environment_id
+                .insert(environment_id.to_string(), merged);
+        }
+        grants.strict_auto_review_enabled |= strict_auto_review;
+    }
+
+    pub(crate) async fn granted_permissions_for_environment(
+        &self,
+        environment_id: &str,
+    ) -> Option<AdditionalPermissionProfile> {
+        self.turn_grants
+            .lock()
+            .await
+            .granted_permissions_by_environment_id
+            .get(environment_id)
+            .cloned()
+    }
+
+    pub(crate) async fn strict_auto_review_enabled(&self) -> bool {
+        self.turn_grants.lock().await.strict_auto_review_enabled
+    }
+
     /// Legacy: returns the frozen initial-turn model metadata.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
         &self.initial_settings.model_info
+    }
+
+    pub(crate) fn current_model_slug(&self) -> String {
+        self.current_settings.load().model_info.slug.clone()
     }
 
     /// Legacy: returns the frozen initial-turn reasoning-effort selection.
@@ -549,6 +599,7 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             extension_data: Arc::clone(&self.extension_data),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            turn_grants: Arc::clone(&self.turn_grants),
             terminal_error: Arc::clone(&self.terminal_error),
             server_model_warning_emitted: AtomicBool::new(
                 self.server_model_warning_emitted.load(Ordering::Relaxed),
@@ -820,6 +871,7 @@ impl Session {
             turn_metadata_state,
             extension_data,
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            turn_grants: Arc::new(tokio::sync::Mutex::new(TurnGrants::default())),
             terminal_error: Arc::new(Mutex::new(None)),
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),

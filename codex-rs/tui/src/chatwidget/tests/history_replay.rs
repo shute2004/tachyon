@@ -1444,6 +1444,66 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
     assert_eq!(rendered, "• done\n");
 }
 
+fn reasoning_content_part_added(content_index: i64) -> ServerNotification {
+    ServerNotification::ReasoningContentPartAdded(
+        codex_app_server_protocol::ReasoningContentPartAddedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "reasoning-1".to_string(),
+            content_index,
+        },
+    )
+}
+
+#[tokio::test]
+async fn visible_raw_reasoning_content_part_start_splits_the_reasoning_block() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.show_raw_agent_reasoning = true;
+
+    chat.handle_server_notification(
+        ServerNotification::ReasoningTextDelta(
+            codex_app_server_protocol::ReasoningTextDeltaNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "reasoning-1".to_string(),
+                delta: "**First raw section**".to_string(),
+                content_index: 0,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(reasoning_content_part_added(1), /*replay_kind*/ None);
+
+    assert_eq!(
+        chat.reasoning_summary_parts,
+        vec!["**First raw section**".to_string()]
+    );
+    assert!(chat.reasoning_buffer.is_empty());
+    assert!(chat.reasoning_header.is_none());
+}
+
+#[tokio::test]
+async fn hidden_raw_reasoning_content_part_start_does_not_split_visible_summary() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.show_raw_agent_reasoning = false;
+
+    chat.handle_server_notification(
+        ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "reasoning-1".to_string(),
+            delta: "**Visible summary**".to_string(),
+            summary_index: 0,
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(reasoning_content_part_added(1), /*replay_kind*/ None);
+
+    assert_eq!(chat.reasoning_buffer, "**Visible summary**");
+    assert!(chat.reasoning_summary_parts.is_empty());
+    assert_eq!(chat.reasoning_header.as_deref(), Some("Visible summary"));
+}
+
 #[tokio::test]
 async fn thread_snapshot_replayed_turn_started_marks_task_running() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

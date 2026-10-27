@@ -553,7 +553,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
         .raw_items()
         .next()
         .expect("history item")
-        .clone();
+        .into_owned();
 
     let router = test_tool_router(
         step_context.as_ref(),

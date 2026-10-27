@@ -8,8 +8,11 @@ use codex_app_server_protocol::ThreadItem;
 use codex_protocol::ThreadId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::McpToolCallItem;
+use codex_protocol::items::McpToolCallStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
@@ -429,6 +432,293 @@ WHERE thread_id = ?
     .await
     .expect("read projection state");
     assert_eq!(projection_state, (rollout_len, 5));
+}
+
+#[tokio::test]
+async fn paginated_live_append_truncates_persisted_command_output_only() {
+    const OUTPUT_LIMIT: usize = 64 * 1024;
+    const TRUNCATION_MARKER: &str = "... command output truncated for persistence ...";
+
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    let oversized_output =
+        |name: &str| format!("{name}-prefix{}-{name}-suffix", "x".repeat(70 * 1024));
+    let command = serde_json::from_value::<TurnItem>(serde_json::json!({
+        "type": "CommandExecution",
+        "id": "command-1",
+        "command": ["echo", "large output"],
+        "cwd": "file:///tmp",
+        "parsed_cmd": [],
+        "source": "agent",
+        "interaction_input": "preserve this input",
+        "status": "completed",
+        "stdout": oversized_output("stdout"),
+        "stderr": oversized_output("stderr"),
+        "aggregated_output": oversized_output("aggregate"),
+        "exit_code": 0,
+        "duration": {"secs": 1, "nanos": 0},
+        "formatted_output": oversized_output("formatted")
+    }))
+    .expect("build oversized command execution item");
+    let original_item = completed_item(thread_id, "turn-1", command);
+    let original_serialization = serde_json::to_vec(&original_item).expect("serialize input item");
+
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                original_item.clone(),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("append oversized command output");
+    assert_eq!(
+        serde_json::to_vec(&original_item).expect("serialize original after append"),
+        original_serialization,
+        "persistence projection must not mutate the caller's item"
+    );
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let durable_command = fs::read_to_string(rollout_path.as_path())
+        .expect("read durable rollout")
+        .lines()
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
+        .find_map(|line| match line.item {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => match event.item {
+                TurnItem::CommandExecution(command) => Some(command),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("find persisted command execution");
+    for (name, output) in [
+        ("stdout", durable_command.stdout.as_deref()),
+        ("stderr", durable_command.stderr.as_deref()),
+        ("aggregate", durable_command.aggregated_output.as_deref()),
+        ("formatted", durable_command.formatted_output.as_deref()),
+    ] {
+        let output = output.expect("all command outputs are present");
+        assert!(
+            output.len() <= OUTPUT_LIMIT,
+            "{name} exceeds persistence cap"
+        );
+        assert!(output.starts_with(&format!("{name}-prefix")));
+        assert!(output.ends_with(&format!("-{name}-suffix")));
+        assert!(output.contains(TRUNCATION_MARKER));
+    }
+    assert_eq!(durable_command.id, "command-1");
+    assert_eq!(
+        durable_command.command,
+        vec!["echo".to_string(), "large output".to_string()]
+    );
+    assert_eq!(
+        durable_command.interaction_input.as_deref(),
+        Some("preserve this input")
+    );
+    assert_eq!(durable_command.exit_code, Some(0));
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let item_json = sqlx::query_scalar::<_, String>(
+        "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .bind("command-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read SQLite command projection");
+    let sqlite_item = serde_json::from_str::<ThreadItem>(&item_json).expect("parse SQLite item");
+    let ThreadItem::CommandExecution {
+        aggregated_output, ..
+    } = sqlite_item
+    else {
+        panic!("SQLite item should be a command execution");
+    };
+    assert_eq!(
+        aggregated_output,
+        durable_command
+            .aggregated_output
+            .clone()
+            .filter(|output| !output.is_empty()),
+        "SQLite should reflect the durable projected output"
+    );
+}
+
+#[tokio::test]
+async fn paginated_live_append_truncates_persisted_mcp_result_only() {
+    const RESULT_LIMIT: usize = 64 * 1024;
+    const TRUNCATION_MARKER: &str = "\n... MCP tool result truncated for persistence ...\n";
+
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    let payload = format!("MCP-HEAD|{}|MCP-TAIL", "雪💥\"\\\n".repeat(8_000));
+    let original_result = CallToolResult {
+        content: vec![serde_json::json!({"type": "text", "text": payload})],
+        structured_content: Some(serde_json::json!({"record": "structured payload"})),
+        is_error: Some(true),
+        meta: Some(serde_json::json!({"source": "metadata payload"})),
+    };
+    let original_item = completed_item(
+        thread_id,
+        "turn-1",
+        TurnItem::McpToolCall(McpToolCallItem {
+            id: "mcp-call-1".to_string(),
+            server: "example-server".to_string(),
+            tool: "lookup".to_string(),
+            arguments: serde_json::json!({"query": "preserve this argument", "limit": 3}),
+            connector_id: Some("connector-1".to_string()),
+            mcp_app_resource_uri: Some("mcp://example/resource".to_string()),
+            link_id: Some("link-1".to_string()),
+            app_name: Some("example-app".to_string()),
+            action_name: Some("lookup".to_string()),
+            plugin_id: Some("example-plugin".to_string()),
+            read_only_hint: Some(true),
+            status: McpToolCallStatus::Completed,
+            result: Some(original_result),
+            error: None,
+            duration: Some(Duration::from_millis(17)),
+        }),
+    );
+    let original_serialization = serde_json::to_vec(&original_item).expect("serialize input item");
+    let RolloutItem::EventMsg(EventMsg::ItemCompleted(original_event)) = &original_item else {
+        unreachable!()
+    };
+    let TurnItem::McpToolCall(original_call) = &original_event.item else {
+        unreachable!()
+    };
+    assert!(
+        serde_json::to_vec(original_call.result.as_ref().expect("input MCP result"))
+            .expect("serialize oversized input result")
+            .len()
+            > RESULT_LIMIT
+    );
+
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                original_item.clone(),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("append oversized MCP result");
+    assert_eq!(
+        serde_json::to_vec(&original_item).expect("serialize original after append"),
+        original_serialization,
+        "persistence projection must not mutate the caller's item"
+    );
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let durable_line = fs::read_to_string(rollout_path.as_path())
+        .expect("read durable rollout")
+        .lines()
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
+        .find(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                    if matches!(&event.item, TurnItem::McpToolCall(_))
+            )
+        })
+        .expect("find persisted MCP tool call");
+    let RolloutItem::EventMsg(EventMsg::ItemCompleted(durable_event)) = &durable_line.item else {
+        panic!("persisted MCP tool call should be an item-completed event");
+    };
+    let TurnItem::McpToolCall(durable_call) = &durable_event.item else {
+        panic!("persisted item should be an MCP tool call");
+    };
+    let durable_result = durable_call.result.as_ref().expect("persisted MCP result");
+    assert!(
+        serde_json::to_vec(durable_result)
+            .expect("serialize durable MCP result")
+            .len()
+            <= RESULT_LIMIT,
+        "persisted MCP result must fit its serialized cap"
+    );
+    assert_eq!(durable_result.content.len(), 1);
+    let preview = durable_result.content[0]
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .expect("persisted MCP result should be a text preview");
+    assert!(preview.contains("MCP-HEAD"));
+    assert!(preview.contains(TRUNCATION_MARKER));
+    assert!(preview.contains("MCP-TAIL"));
+    assert_eq!(durable_result.structured_content, None);
+    assert_eq!(durable_result.meta, None);
+    assert_eq!(durable_result.is_error, Some(true));
+    assert_eq!(durable_event.thread_id, thread_id);
+    assert_eq!(durable_event.turn_id, "turn-1");
+
+    let mut expected_durable_item = original_item.clone();
+    let RolloutItem::EventMsg(EventMsg::ItemCompleted(expected_event)) = &mut expected_durable_item
+    else {
+        unreachable!()
+    };
+    let TurnItem::McpToolCall(expected_call) = &mut expected_event.item else {
+        unreachable!()
+    };
+    expected_call.result = Some((*durable_result).clone());
+    assert_eq!(
+        serde_json::to_value(expected_durable_item).expect("serialize expected durable item"),
+        serde_json::to_value(&durable_line.item).expect("serialize actual durable item")
+    );
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let item_json = sqlx::query_scalar::<_, String>(
+        "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .bind("mcp-call-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read SQLite MCP projection");
+    let sqlite_item = serde_json::from_str::<ThreadItem>(&item_json).expect("parse SQLite item");
+    assert_eq!(
+        sqlite_item,
+        ThreadItem::from(TurnItem::McpToolCall((*durable_call).clone())),
+        "SQLite should match the exposed projection of the durable rollout item"
+    );
+    let ThreadItem::McpToolCall {
+        id,
+        server,
+        tool,
+        arguments,
+        result: Some(sqlite_result),
+        ..
+    } = sqlite_item
+    else {
+        panic!("SQLite item should be an MCP tool call with a result");
+    };
+    assert_eq!(id, durable_call.id);
+    assert_eq!(server, durable_call.server);
+    assert_eq!(tool, durable_call.tool);
+    assert_eq!(arguments, durable_call.arguments);
+    assert_eq!(sqlite_result.content, durable_result.content);
+    assert_eq!(sqlite_result.structured_content, None);
+    assert_eq!(sqlite_result.meta, None);
 }
 
 #[tokio::test]

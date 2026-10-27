@@ -14,6 +14,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
 use dirs::home_dir;
+use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -210,14 +211,17 @@ async fn build_recent_work_section(
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
-fn build_current_thread_section<'a>(
-    items: impl IntoIterator<Item = &'a ResponseItem>,
-) -> Option<String> {
+fn build_current_thread_section<I>(items: I) -> Option<String>
+where
+    I: IntoIterator,
+    I::Item: Borrow<ResponseItem>,
+{
     let mut turns = Vec::new();
     let mut current_user = Vec::new();
     let mut current_assistant = Vec::new();
 
     for item in items {
+        let item = item.borrow();
         match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
                 if is_contextual_user_message_content(content) {

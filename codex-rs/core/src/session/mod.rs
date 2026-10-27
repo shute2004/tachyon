@@ -72,6 +72,7 @@ use codex_extension_api::TurnContextContributionInput;
 use codex_features::FEATURES;
 use codex_features::Feature;
 use codex_features::unstable_features_warning_event;
+use codex_history::InputSource;
 use codex_history::RolloutItem;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
@@ -105,7 +106,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::EnteredReviewModeItem;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
-use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
@@ -219,6 +219,7 @@ mod environment;
 pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
+mod input_association;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -234,6 +235,7 @@ pub(crate) mod session;
 mod step_activation;
 pub(crate) mod step_context;
 pub(crate) mod step_settings;
+mod submission;
 mod thread_settings;
 pub(crate) mod time_reminder;
 mod token_budget;
@@ -256,6 +258,7 @@ use self::session::Session;
 use self::session::SessionConfiguration;
 use self::session::SessionSettingsCommit;
 pub(crate) use self::session::SessionSettingsUpdate;
+pub(crate) use self::submission::SessionSubmission;
 #[cfg(test)]
 use self::turn::AssistantMessageStreamParsers;
 use self::turn::agent_message_text;
@@ -275,7 +278,7 @@ mod rollout_reconstruction_tests;
 /// `realtime_active -> false` transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreviousTurnSettings {
-    pub(crate) model: String,
+    pub(crate) model_selection: crate::model_runtime::HistoricalModelSelection,
     pub(crate) comp_hash: Option<String>,
     pub(crate) realtime_active: Option<bool>,
 }
@@ -381,7 +384,7 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// submission senders be dropped to terminate the session loop. The shared
 /// completion future observes that shutdown.
 pub(crate) struct SessionIo {
-    pub(crate) tx_sub: Sender<Submission>,
+    pub(crate) tx_sub: Sender<SessionSubmission>,
     pub(crate) rx_event: Receiver<Event>,
     // Last known status of the agent.
     pub(crate) agent_status: watch::Receiver<AgentStatus>,
@@ -850,12 +853,20 @@ impl SessionIo {
     }
 
     /// Use sparingly: prefer `submit()` so submission IDs are generated consistently.
-    pub(crate) async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
-        if sub.trace.is_none() {
-            sub.trace = current_span_w3c_trace_context();
+    pub(crate) async fn submit_with_id(&self, sub: Submission) -> CodexResult<()> {
+        self.submit_session_submission(sub.into()).await
+    }
+
+    /// Submits an envelope received from another internal Core session without losing its source.
+    pub(crate) async fn submit_session_submission(
+        &self,
+        mut submission: SessionSubmission,
+    ) -> CodexResult<()> {
+        if submission.submission.trace.is_none() {
+            submission.submission.trace = current_span_w3c_trace_context();
         }
         self.tx_sub
-            .send(sub)
+            .send(submission)
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(())
@@ -867,22 +878,45 @@ impl SessionIo {
     /// session loop exits before replying, the caller gets `InternalAgentDied`.
     pub(crate) async fn submit_turn_input(
         &self,
+        request: TurnInputRequest,
+        mode: TurnInputMode,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_source(request, mode, InputSource::Unknown)
+            .await
+    }
+
+    /// Submits a turn input constructed internally by a Core-owned producer.
+    pub(crate) async fn submit_synthetic_turn_input(
+        &self,
+        request: TurnInputRequest,
+        mode: TurnInputMode,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_source(request, mode, InputSource::Synthetic)
+            .await
+    }
+
+    async fn submit_turn_input_with_source(
+        &self,
         mut request: TurnInputRequest,
         mode: TurnInputMode,
+        input_source: InputSource,
     ) -> CodexResult<TurnInputSubmission> {
         let id = new_submission_id();
         let (reply_tx, reply_rx) = oneshot::channel();
         let trace = request.trace.take();
-        self.submit_with_id(Submission {
-            id,
-            op: Op::TurnInput {
-                request: Box::new(request),
-                mode,
-                reply: reply_tx,
+        self.submit_session_submission(SessionSubmission {
+            submission: Submission {
+                id,
+                op: Op::TurnInput {
+                    request: Box::new(request),
+                    mode,
+                    reply: reply_tx,
+                },
+                trace,
+                parent_turn_id: None,
+                root_turn_id: None,
             },
-            trace,
-            parent_turn_id: None,
-            root_turn_id: None,
+            input_source,
         })
         .await?;
         reply_rx.await.unwrap_or(Err(CodexErr::InternalAgentDied))
@@ -1389,7 +1423,7 @@ impl Session {
                 let curr: &str = turn_context.model_info().slug.as_str();
                 if let Some(prev) = previous_turn_settings
                     .as_ref()
-                    .map(|settings| settings.model.as_str())
+                    .map(|settings| settings.model_selection.model_id())
                     .filter(|model| *model != curr)
                 {
                     warn!("resuming session with different model: previous={prev}, current={curr}");
@@ -1473,12 +1507,18 @@ impl Session {
             && turn_context.config.memories.disable_on_external_context
         {
             let history = self.clone_history().await;
-            if let Some(item) = history
-                .raw_items()
-                .find(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }))
-            {
-                mark_thread_memory_mode_polluted_if_external_context(self, &turn_context, item)
-                    .await;
+            if let Some(item) = history.raw_items().find(|item| {
+                matches!(
+                    item.as_ref(),
+                    ResponseItem::FunctionCallOutput { call_id: None, .. }
+                )
+            }) {
+                mark_thread_memory_mode_polluted_if_external_context(
+                    self,
+                    &turn_context,
+                    item.as_ref(),
+                )
+                .await;
             }
         }
     }
@@ -1512,11 +1552,11 @@ impl Session {
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
         // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
-        // the prior batch behavior and carry history-only metadata in a positional sidecar.
-        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
-            .into_iter()
-            .map(|envelope| (envelope.item, envelope.metadata))
-            .unzip();
+        // the prior batch behavior while leaving unchanged primary records and metadata intact.
+        let mut prepared_history = history
+            .iter()
+            .map(|record| record.response_item().into_owned())
+            .collect::<Vec<_>>();
         let _ = prepare_image_response_items(
             &mut prepared_history,
             ImagePreparationMode::DetailBased,
@@ -1525,17 +1565,17 @@ impl Session {
         prepare_audio_response_items(&mut prepared_history);
         assert_eq!(
             prepared_history.len(),
-            metadata.len(),
+            history.len(),
             "replay media preparation must remain one-to-one when resize notices are disabled"
         );
-        history = prepared_history
-            .into_iter()
-            .zip(metadata)
-            .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
-            .collect();
+        for (record, prepared_item) in history.iter_mut().zip(prepared_history) {
+            if record.response_item().as_ref() != &prepared_item {
+                record.replace_response_item(prepared_item);
+            }
+        }
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(
+            state.replace_history_records(
                 history,
                 reference_context_item,
                 HistoryReplacement::Reset,
@@ -2658,10 +2698,6 @@ impl Session {
 
         if crate::guardian::routes_approval_policy_to_guardian(approval_policy, approvals_reviewer)
         {
-            let originating_turn_state = {
-                let active = self.active_turn.lock().await;
-                active.as_ref().map(|active| Arc::clone(&active.turn_state))
-            };
             let action = ApprovalAction::RequestPermissions {
                 id: call_id.clone(),
                 turn_id: turn_context.sub_id.clone(),
@@ -2730,7 +2766,7 @@ impl Session {
             self.record_granted_request_permissions_for_turn(
                 &response,
                 &environment.environment_id,
-                originating_turn_state.as_ref(),
+                Some(turn_context.as_ref()),
             )
             .await;
             return Some(response);
@@ -2749,6 +2785,7 @@ impl Session {
                             tx_response,
                             requested_permissions: requested_permissions.clone(),
                             environment: environment.clone(),
+                            origin_turn: Arc::clone(turn_context),
                         },
                     )
                 }
@@ -2863,16 +2900,14 @@ impl Session {
         call_id: &str,
         response: RequestPermissionsResponse,
     ) {
-        let (entry, originating_turn_state) = {
+        let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    let entry = ts.remove_pending_request_permissions(call_id);
-                    let originating_turn_state = entry.as_ref().map(|_| Arc::clone(&at.turn_state));
-                    (entry, originating_turn_state)
+                    ts.remove_pending_request_permissions(call_id)
                 }
-                None => (None, None),
+                None => None,
             }
         };
         match entry {
@@ -2900,7 +2935,7 @@ impl Session {
                 self.record_granted_request_permissions_for_turn(
                     &response,
                     &entry.environment.environment_id,
-                    originating_turn_state.as_ref(),
+                    Some(entry.origin_turn.as_ref()),
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -2944,21 +2979,23 @@ impl Session {
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
-        originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        originating_turn_context: Option<&TurnContext>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
         match response.scope {
             PermissionGrantScope::Turn => {
-                if let Some(turn_state) = originating_turn_state {
-                    let mut ts = turn_state.lock().await;
+                if let Some(turn_context) = originating_turn_context {
                     let permissions: AdditionalPermissionProfile =
                         response.permissions.clone().into();
-                    ts.record_granted_permissions(environment_id, permissions);
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
-                    }
+                    turn_context
+                        .record_granted_permissions_for_environment(
+                            environment_id,
+                            permissions,
+                            response.strict_auto_review,
+                        )
+                        .await;
                 }
             }
             PermissionGrantScope::Session => {
@@ -2973,21 +3010,7 @@ impl Session {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "active turn reads must stay consistent with the matching turn state"
-    )]
-    pub(crate) async fn granted_turn_permissions(
-        &self,
-        environment_id: &str,
-    ) -> Option<AdditionalPermissionProfile> {
-        let active = self.active_turn.lock().await;
-        let active = active.as_ref()?;
-        let ts = active.turn_state.lock().await;
-        ts.granted_permissions(environment_id)
-    }
-
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn reads must stay consistent with the matching turn state"
+        reason = "active turn context and strict grants must be read together"
     )]
     pub(crate) async fn active_turn_context_and_strict_auto_review(
         &self,
@@ -2997,8 +3020,8 @@ impl Session {
         let task = active.task.as_ref()?;
         let turn_context = Arc::clone(&task.turn_context);
         let step_settings = turn_context.current_settings.load_full();
-        let ts = active.turn_state.lock().await;
-        Some((turn_context, step_settings, ts.strict_auto_review_enabled()))
+        let strict_auto_review = turn_context.strict_auto_review_enabled().await;
+        Some((turn_context, step_settings, strict_auto_review))
     }
 
     pub(crate) async fn granted_session_permissions(
@@ -3240,6 +3263,24 @@ impl Session {
             .await;
     }
 
+    /// Records items emitted by full-context, WorldState-diff, or turn-context-diff producers.
+    ///
+    /// Do not use this for arbitrary conversation inputs: the item-shape check does not establish
+    /// that an item belongs to a complete, rebuildable context bundle.
+    async fn record_context_injection_items(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+    ) {
+        let envelopes = items
+            .iter()
+            .cloned()
+            .map(crate::context_manager::updates::context_injection_envelope)
+            .collect();
+        self.record_annotated_conversation_items(turn_context, envelopes)
+            .await;
+    }
+
     pub(crate) async fn record_step_world_state_if_changed(
         &self,
         previous_world_state: &Arc<WorldState>,
@@ -3258,7 +3299,8 @@ impl Session {
             world_state.render_diff(&previous_snapshot),
         );
         if !items.is_empty() {
-            self.record_conversation_items(turn_context, &items).await;
+            self.record_context_injection_items(turn_context, &items)
+                .await;
         }
 
         // ContextManager remembers this for later turns; run_turn owns the live value.
@@ -3941,11 +3983,10 @@ impl Session {
                 crate::compact_remote_v2::truncate_retained_messages_for_remote_compaction(
                     history
                         .annotated_items()
-                        .iter()
+                        .into_iter()
                         .filter(|item| {
                             crate::compact_remote_v2::is_client_authored_developer_message(item)
                         })
-                        .cloned()
                         .collect(),
                     crate::compact_remote_v2::RETAINED_MESSAGE_TOKEN_BUDGET,
                 )
@@ -3961,7 +4002,7 @@ impl Session {
             .build_initial_context_with_world_state(turn_context, world_state.as_ref())
             .await
             .into_iter()
-            .map(ResponseItemEnvelope::new)
+            .map(crate::context_manager::updates::context_injection_envelope)
             .chain(retained_client_developer_messages)
             .collect();
         let turn_context_item = turn_context.to_turn_context_item();
@@ -4051,7 +4092,7 @@ impl Session {
             return Ok(world_state);
         }
         if !context_items.is_empty() {
-            self.record_conversation_items(turn_context, &context_items)
+            self.record_context_injection_items(turn_context, &context_items)
                 .await;
         }
         // Persist state only after any model-visible context generated from it.
@@ -4228,27 +4269,6 @@ impl Session {
             self.emit_turn_item_started(turn_context, &item).await;
             self.emit_turn_item_completed(turn_context, item).await;
         }
-    }
-
-    pub(crate) async fn record_user_prompt_and_emit_turn_item(
-        &self,
-        turn_context: &TurnContext,
-        input: &[UserInput],
-        client_id: Option<String>,
-        persist_context: PersistContext,
-    ) {
-        // Persist the user message to history, but emit the turn item from `UserInput` so
-        // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
-        // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let response_item = self.response_item_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
-            .await;
-        let mut user_message_item = UserMessageItem::new(input);
-        user_message_item.client_id = client_id;
-        let turn_item = TurnItem::UserMessage(user_message_item);
-        self.emit_turn_item_started(turn_context, &turn_item).await;
-        self.emit_turn_item_completed(turn_context, turn_item).await;
-        self.ensure_rollout_materialized(persist_context).await;
     }
 
     pub(crate) async fn notify_stream_error(

@@ -5,6 +5,7 @@ use crate::client::WebsocketStreamOutcome;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::model_runtime::HistoricalModelSelection;
 use crate::model_runtime::codex_event::CodexEventMapper;
 use crate::model_runtime::codex_event::ModelRuntimeEvent;
 use crate::model_runtime::codex_request::prompt_from_model_request;
@@ -14,18 +15,81 @@ use crate::model_runtime::route::ModelProviderId;
 use crate::model_runtime::route::ModelRoute;
 use crate::model_runtime::route::ModelTransport;
 use crate::responses_metadata::CodexResponsesMetadata;
+use crate::session::turn_context::TurnContext;
+use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::Result;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 
 const FALLBACK_TO_HTTP_WARNING: &str = "Falling back from WebSockets to HTTPS transport.";
 const OPENAI_RESPONSES_PROTOCOL_ID: &str = "openai.responses";
+
+/// Codex-specific prior-turn selection retained behind the generic historical selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CodexHistoricalModelSelection {
+    cyber_access_program: Option<CyberAccessProgram>,
+}
+
+impl CodexHistoricalModelSelection {
+    pub(super) fn new(cyber_access_program: Option<CyberAccessProgram>) -> Self {
+        Self {
+            cyber_access_program,
+        }
+    }
+}
+
+pub(super) fn historical_model_selection_from_codex_turn_context(
+    turn_context: &TurnContext,
+) -> HistoricalModelSelection {
+    HistoricalModelSelection::from_codex_adapter(
+        turn_context.model_info().slug.clone(),
+        CodexHistoricalModelSelection::new(turn_context.cyber_access_program),
+    )
+}
+
+pub(super) fn historical_model_selection_from_codex_turn_context_item(
+    turn_context: &TurnContextItem,
+) -> HistoricalModelSelection {
+    HistoricalModelSelection::from_codex_adapter(
+        turn_context.model.clone(),
+        CodexHistoricalModelSelection::new(turn_context.cyber_access_program),
+    )
+}
+
+pub(super) async fn turn_context_for_historical_selection(
+    current: &TurnContext,
+    selection: &HistoricalModelSelection,
+    models_manager: &SharedModelsManager,
+) -> TurnContext {
+    let mut historical_context = current
+        .with_model(selection.model_id().to_string(), models_manager)
+        .await;
+    historical_context.cyber_access_program =
+        selection.codex_adapter_selection().cyber_access_program;
+    historical_context
+}
+
+pub(super) fn local_compaction_prompt(
+    input: Vec<ResponseItem>,
+    base_instructions: BaseInstructions,
+    turn_context: &TurnContext,
+) -> Prompt {
+    Prompt {
+        input,
+        base_instructions,
+        cyber_access_program: turn_context.cyber_access_program,
+        ..Default::default()
+    }
+}
 
 fn codex_transport(websocket_enabled: bool) -> ModelTransport {
     if websocket_enabled {
@@ -310,3 +374,56 @@ impl CodexModelTurnRuntimeAdapter {
 #[cfg(test)]
 #[path = "codex_route_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod local_compaction_prompt_tests {
+    use super::local_compaction_prompt;
+    use crate::client_common::Prompt;
+    use crate::session::tests::make_session_and_context;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::turn_input::CyberAccessProgram;
+
+    #[tokio::test]
+    async fn local_compaction_prompt_preserves_selection_and_other_fields() {
+        let (_, mut turn_context) = make_session_and_context().await;
+        let current_model = turn_context.model_info().slug.clone();
+        let input = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "summarize this history".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+        let base_instructions = BaseInstructions {
+            text: "preserved local compaction instructions".to_string(),
+            provenance: None,
+        };
+
+        for selected_program in [Some(CyberAccessProgram::DaybreakBlue), None] {
+            turn_context.cyber_access_program = selected_program;
+            let expected = Prompt {
+                input: input.clone(),
+                base_instructions: base_instructions.clone(),
+                cyber_access_program: selected_program,
+                ..Default::default()
+            };
+            let actual =
+                local_compaction_prompt(input.clone(), base_instructions.clone(), &turn_context);
+
+            assert_eq!(actual.input, expected.input);
+            assert_eq!(actual.base_instructions, expected.base_instructions);
+            assert_eq!(actual.cyber_access_program, expected.cyber_access_program);
+            assert_eq!(actual.tools.as_ref(), expected.tools.as_ref());
+            assert_eq!(actual.parallel_tool_calls, expected.parallel_tool_calls);
+            assert_eq!(actual.output_schema, expected.output_schema);
+            assert_eq!(actual.output_schema_strict, expected.output_schema_strict);
+
+            assert_eq!(turn_context.model_info().slug, current_model);
+            assert_eq!(turn_context.cyber_access_program, selected_program);
+        }
+    }
+}

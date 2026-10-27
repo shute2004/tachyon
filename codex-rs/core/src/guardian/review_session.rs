@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -269,29 +270,31 @@ impl GuardianReviewSessionReuseKey {
     }
 }
 
-fn encrypted_parent_compaction<'a, I>(items: I) -> Option<ResponseItem>
+fn encrypted_parent_compaction<I>(items: I) -> Option<ResponseItem>
 where
-    I: IntoIterator<Item = &'a ResponseItem>,
+    I: IntoIterator,
     I::IntoIter: DoubleEndedIterator,
+    I::Item: Borrow<ResponseItem>,
 {
-    let item = items.into_iter().rev().find(|item| {
-        matches!(
-            item,
+    let item = items.into_iter().rev().find_map(|item| {
+        let is_compaction = matches!(
+            item.borrow(),
             ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-        )
+        );
+        is_compaction.then_some(item)
     })?;
 
-    match item {
+    match item.borrow() {
         ResponseItem::Compaction {
             id: Some(_),
             encrypted_content,
             ..
-        } if !encrypted_content.is_empty() => Some(item.clone()),
+        } if !encrypted_content.is_empty() => Some(item.borrow().clone()),
         ResponseItem::ContextCompaction {
             id: Some(_),
             encrypted_content: Some(encrypted_content),
             ..
-        } if !encrypted_content.is_empty() => Some(item.clone()),
+        } if !encrypted_content.is_empty() => Some(item.borrow().clone()),
         _ => None,
     }
 }
@@ -1005,7 +1008,7 @@ async fn run_review_on_session(
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "user" && content.iter().any(|content| {
                 matches!(content, ContentItem::InputText { text }
                     if text == GUARDIAN_TRANSCRIPT_START)
@@ -1057,13 +1060,17 @@ async fn run_review_on_session(
                 let reviewer_history = review_session.session.clone_history().await;
                 let reviewer_image_urls = reviewer_history
                     .raw_items()
-                    .flat_map(|item| match item {
-                        ResponseItem::Message { content, .. } => content.as_slice(),
-                        _ => &[],
-                    })
-                    .filter_map(|item| match item {
-                        ContentItem::InputImage { image_url, .. } => Some(image_url.as_str()),
-                        _ => None,
+                    .flat_map(|item| match item.as_ref() {
+                        ResponseItem::Message { content, .. } => content
+                            .iter()
+                            .filter_map(|item| match item {
+                                ContentItem::InputImage { image_url, .. } => {
+                                    Some(image_url.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
                     })
                     .collect::<HashSet<_>>();
                 let context_window = model_info.resolved_context_window().map(|supported| {
@@ -1190,7 +1197,7 @@ async fn run_review_on_session(
         .unwrap_or_else(|| params.parent_context.turn().config.cwd.clone());
 
     let parent_turn = params.parent_context.turn();
-    let submission = review_session.io.submit_turn_input(
+    let submission = review_session.io.submit_synthetic_turn_input(
         TurnInputRequest::user_input(prompt_items.items)
             .with_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
                 environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
@@ -1292,7 +1299,7 @@ async fn ensure_guardian_followup_reminder(review_session: &GuardianReviewSessio
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "developer"
                 && content.iter().any(|content| {
                     matches!(content, ContentItem::InputText { text }
@@ -1336,7 +1343,7 @@ async fn ensure_guardian_node_repl_policy(
         .await
         .raw_items()
         .any(|item| {
-            matches!(item, ResponseItem::Message { role, content, .. }
+            matches!(item.as_ref(), ResponseItem::Message { role, content, .. }
             if role == "developer"
                 && content.iter().any(|content| {
                     matches!(content, ContentItem::InputText { text } if text == &policy_body)
@@ -1644,10 +1651,11 @@ async fn interrupt_and_drain_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionSubmission;
+    use codex_history::InputSource;
     use codex_protocol::openai_models::AutoReviewMessages;
     use codex_protocol::protocol::AgentStatus;
     use codex_protocol::protocol::ErrorEvent;
-    use codex_protocol::protocol::Submission;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;
@@ -1655,7 +1663,7 @@ mod tests {
     async fn test_review_session() -> (
         GuardianReviewSession,
         async_channel::Sender<Event>,
-        async_channel::Receiver<Submission>,
+        async_channel::Receiver<SessionSubmission>,
     ) {
         let (session, _turn, _rx) = crate::session::tests::make_session_and_context_with_rx().await;
         let (tx_sub, rx_sub) = async_channel::bounded(4);
@@ -2321,8 +2329,9 @@ mod tests {
             .await
         });
         let submission = rx_sub.recv().await.expect("guardian submission");
-        let id = submission.id;
-        let Op::TurnInput { reply, .. } = submission.op else {
+        assert_eq!(submission.input_source, InputSource::Synthetic);
+        let id = submission.submission.id;
+        let Op::TurnInput { reply, .. } = submission.submission.op else {
             panic!("expected turn-input submission");
         };
         reply
@@ -2373,8 +2382,9 @@ mod tests {
         let manager_for_review = Arc::clone(&manager);
         let review = tokio::spawn(async move { manager_for_review.run_review(params).await });
         let submission = rx_sub.recv().await.expect("guardian submission");
-        let id = submission.id;
-        let Op::TurnInput { reply, .. } = submission.op else {
+        assert_eq!(submission.input_source, InputSource::Synthetic);
+        let id = submission.submission.id;
+        let Op::TurnInput { reply, .. } = submission.submission.op else {
             panic!("expected turn-input submission");
         };
         reply
@@ -2545,7 +2555,7 @@ mod tests {
         let tx_interrupt_event = tx_event.clone();
         let interrupt_response = tokio::spawn(async move {
             let submission = rx_sub.recv().await.expect("interrupt submission");
-            assert!(matches!(submission.op, Op::Interrupt));
+            assert!(matches!(submission.submission.op, Op::Interrupt));
             tx_interrupt_event
                 .send(turn_aborted_event("current-turn"))
                 .await
@@ -2580,7 +2590,7 @@ mod tests {
         let tx_interrupt_event = tx_event.clone();
         let interrupt_response = tokio::spawn(async move {
             let submission = rx_sub.recv().await.expect("interrupt submission");
-            assert!(matches!(submission.op, Op::Interrupt));
+            assert!(matches!(submission.submission.op, Op::Interrupt));
             tx_interrupt_event
                 .send(turn_aborted_event("current-turn"))
                 .await

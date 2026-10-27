@@ -13585,6 +13585,33 @@
       ],
       "type": "object"
     },
+    "ReasoningContentPartAddedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "EXPERIMENTAL - Marks the start of a raw reasoning content part without carrying text.",
+      "properties": {
+        "contentIndex": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contentIndex",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ReasoningContentPartAddedNotification",
+      "type": "object"
+    },
     "ReasoningEffort": {
       "description": "A non-empty reasoning effort value advertised by the model.",
       "minLength": 1,
@@ -16418,6 +16445,27 @@
             "params"
           ],
           "title": "Item/reasoning/summaryPartAddedNotification",
+          "type": "object"
+        },
+        {
+          "description": "EXPERIMENTAL - Marks the start of a raw reasoning content part.",
+          "properties": {
+            "method": {
+              "enum": [
+                "item/reasoning/contentPartAdded"
+              ],
+              "title": "Item/reasoning/contentPartAddedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ReasoningContentPartAddedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Item/reasoning/contentPartAddedNotification",
           "type": "object"
         },
         {

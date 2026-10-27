@@ -23,6 +23,7 @@ use codex_websocket_client::WebSocketTlsMode;
 use crate::ExecServerClient;
 use crate::ExecServerError;
 use crate::client::accepted::AcceptedConnectionSource;
+use crate::client::is_environment_offline_error;
 use crate::client::is_retryable_registry_error;
 use crate::client::registry_recovery_retry_delay;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
@@ -47,6 +48,7 @@ const ENVIRONMENT_CLIENT_NAME: &str = "codex-environment";
 const INITIAL_REGISTRY_MAX_RETRIES: u32 = 4;
 const INITIAL_REGISTRY_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_REGISTRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(14);
+const PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Everything the recovery loop needs for one connection attempt.
 ///
@@ -170,7 +172,7 @@ impl ExecServerClient {
             transport_params => (transport_params, None),
         };
 
-        if let Some(mut readiness) = deferred_readiness {
+        let provisioning_deadline = if let Some(mut readiness) = deferred_readiness {
             let provisioning_result = readiness
                 .wait_for(Option::is_some)
                 .await
@@ -190,7 +192,10 @@ impl ExecServerClient {
             provisioning_result.map_err(|message| {
                 ExecServerError::Disconnected(format!("environment unavailable: {message}"))
             })?;
-        }
+            Some(Instant::now() + PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT)
+        } else {
+            None
+        };
 
         let (websocket_url, connect_timeout, initialize_timeout) = match transport_params {
             ExecServerTransportParams::Deferred(_) => {
@@ -209,6 +214,7 @@ impl ExecServerClient {
                         &provider,
                         &identity,
                         http_client_factory.clone(),
+                        provisioning_deadline,
                     )
                     .await?;
                 let reconnect_strategy = ExecServerReconnectStrategy::NoiseRendezvous {
@@ -252,6 +258,7 @@ impl ExecServerClient {
         provider: &Arc<dyn NoiseRendezvousConnectProvider>,
         identity: &NoiseChannelIdentity,
         http_client_factory: HttpClientFactory,
+        provisioning_deadline: Option<Instant>,
     ) -> Result<
         (
             JsonRpcConnection,
@@ -291,14 +298,26 @@ impl ExecServerClient {
         loop {
             let bundle = match result {
                 Ok(bundle) => bundle,
-                Err(error)
-                    if is_retryable_registry_error(&error)
-                        && retries < INITIAL_REGISTRY_MAX_RETRIES =>
-                {
+                Err(error) => {
+                    let retry_deadline = if is_environment_offline_error(&error) {
+                        if let Some(deadline) = provisioning_deadline {
+                            deadline
+                        } else if retries < INITIAL_REGISTRY_MAX_RETRIES {
+                            deadline
+                        } else {
+                            return Err(error);
+                        }
+                    } else if is_retryable_registry_error(&error)
+                        && retries < INITIAL_REGISTRY_MAX_RETRIES
+                    {
+                        deadline
+                    } else {
+                        return Err(error);
+                    };
                     // Session resumption owns its separate recovery deadline.
                     let delay = registry_recovery_retry_delay(&retry_key, retries);
                     retries += 1;
-                    result = match timeout_at(deadline, async {
+                    result = match timeout_at(retry_deadline, async {
                         sleep(delay).await;
                         connect_bundle().await
                     })
@@ -309,7 +328,6 @@ impl ExecServerClient {
                     };
                     continue;
                 }
-                Err(error) => return Err(error),
             };
             let executor_public_key = bundle.executor_public_key.clone();
             match open_connection(bundle).await {

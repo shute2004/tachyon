@@ -64,7 +64,7 @@ impl GuardianReviewEvidence {
             .filter(|(recorded_call_id, _)| {
                 history.items().any(|item| {
                     matches!(
-                        item,
+                        item.as_ref(),
                         ResponseItem::FunctionCall { call_id, .. }
                             if call_id == recorded_call_id
                     )

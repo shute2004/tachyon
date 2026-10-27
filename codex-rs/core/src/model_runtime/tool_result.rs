@@ -117,6 +117,7 @@ fn model_discovered_tool_spec(
             name,
             description,
             input_schema,
+            output_schema: None,
             strict,
             availability: model_tool_availability(availability),
             purpose: crate::model_runtime::ir::ModelToolPurpose::Invocation,

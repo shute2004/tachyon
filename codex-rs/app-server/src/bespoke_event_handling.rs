@@ -935,6 +935,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         | EventMsg::PlanDelta(_)
         | EventMsg::ReasoningContentDelta(_)
         | EventMsg::ReasoningRawContentDelta(_)
+        | EventMsg::ReasoningRawContentSectionStarted(_)
         | EventMsg::AgentReasoningSectionBreak(_)) => {
             let notification = item_event_to_server_notification(
                 msg,

@@ -166,6 +166,7 @@ mod tool_lifecycle;
 mod tool_parallelism;
 mod tool_result_egress;
 mod tools;
+mod tools_namespace_budget;
 mod truncation;
 mod turn_input_submission;
 mod turn_state;

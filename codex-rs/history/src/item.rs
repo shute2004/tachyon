@@ -1,134 +1,89 @@
-//! Kernel-owned vocabulary for the semantic items that make up conversation history.
+//! Compatibility names for the provider-neutral semantic items in conversation history.
 //!
-//! These types describe durable harness meaning only. They intentionally do not carry wire
-//! serialization derives: the existing rollout representation remains the compatibility format
-//! until a later migration slice can project to these values without losing information.
+//! These aliases preserve existing `codex_history::History*` paths while sharing the canonical
+//! model request vocabulary. Persisted rollout records still use their existing compatibility
+//! representation; this does not make durable history fully provider-neutral.
 
-use std::sync::Arc;
-
-use serde_json::Value;
-
-/// One semantic item in durable conversation history.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HistoryItem {
-    Message(HistoryMessage),
-    Reasoning(HistoryReasoning),
-    ToolCall(HistoryToolCall),
-    ToolResult(HistoryToolResult),
-}
-
-/// A role-bearing message retained in conversation history.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryMessage {
-    pub role: HistoryMessageRole,
-    /// The assistant lifecycle phase, when the source history distinguishes interim narration
-    /// from the terminal answer.
-    pub phase: Option<HistoryMessagePhase>,
-    pub content: Vec<HistoryMessageContent>,
-}
-
-/// Stable semantic roles for history messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryMessageRole {
-    System,
-    Developer,
-    User,
-    Assistant,
-}
-
-/// Optional lifecycle phase for assistant message text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryMessagePhase {
-    Commentary,
-    Final,
-}
-
-/// Content carried by a history message.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HistoryMessageContent {
-    Text(String),
-    Image {
-        source: HistoryMediaSource,
-        detail: Option<HistoryImageDetail>,
-    },
-    Audio {
-        source: HistoryMediaSource,
-    },
-}
-
-/// Media represented without assuming a particular upload or URL mechanism.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HistoryMediaSource {
-    Uri(String),
-    Bytes { media_type: String, data: Arc<[u8]> },
-}
-
-/// Optional image-fidelity hint retained with image content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryImageDetail {
-    Auto,
-    Low,
-    High,
-    Original,
-}
-
-/// Plaintext reasoning exposed by the harness.
-///
-/// Opaque or encrypted continuation state is intentionally not part of this semantic value.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryReasoning {
-    /// Ordered reasoning summary sections.
-    pub summary: Vec<String>,
-    /// Ordered plaintext reasoning sections, when available.
-    pub content: Vec<String>,
-}
-
-/// Correlation identifier for one logical history tool call and its result.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HistoryToolCallId(pub String);
-
-/// A tool invocation retained in conversation history.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryToolCall {
-    pub call_id: HistoryToolCallId,
-    pub namespace: Option<String>,
-    pub name: String,
-    pub input: HistoryToolInput,
-}
-
-/// Tool-call input with its semantic JSON/text distinction preserved.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HistoryToolInput {
-    Json(Value),
-    Text(String),
-}
-
-/// The result produced for a previous history tool call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryToolResult {
-    pub call_id: HistoryToolCallId,
-    pub content: Vec<HistoryToolResultContent>,
-    /// `Some(true)` and `Some(false)` are explicit statuses; `None` means unknown.
-    pub is_error: Option<bool>,
-}
-
-/// Content produced by a history tool result.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HistoryToolResultContent {
-    Text(String),
-    Json(Value),
-    Image {
-        source: HistoryMediaSource,
-        detail: Option<HistoryImageDetail>,
-    },
-    Audio {
-        source: HistoryMediaSource,
-    },
-}
+pub use tachyon_model::ModelContent as HistoryMessageContent;
+pub use tachyon_model::ModelImageDetail as HistoryImageDetail;
+pub use tachyon_model::ModelInputItem as HistoryItem;
+pub use tachyon_model::ModelMediaSource as HistoryMediaSource;
+pub use tachyon_model::ModelMessage as HistoryMessage;
+pub use tachyon_model::ModelMessagePhase as HistoryMessagePhase;
+pub use tachyon_model::ModelMessageRole as HistoryMessageRole;
+pub use tachyon_model::ModelReasoning as HistoryReasoning;
+pub use tachyon_model::ModelToolCall as HistoryToolCall;
+pub use tachyon_model::ModelToolCallId as HistoryToolCallId;
+pub use tachyon_model::ModelToolInput as HistoryToolInput;
+pub use tachyon_model::ModelToolResult as HistoryToolResult;
+pub use tachyon_model::ModelToolResultContent as HistoryToolResultContent;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use pretty_assertions::assert_eq;
+    use serde_json::Value;
+
     use super::*;
+
+    #[test]
+    fn history_names_are_the_canonical_model_item_types() {
+        let data: Arc<[u8]> = Arc::from([0_u8, 1, 2, 3]);
+        let model_item: tachyon_model::ModelInputItem =
+            tachyon_model::ModelInputItem::Message(tachyon_model::ModelMessage {
+                role: tachyon_model::ModelMessageRole::User,
+                phase: None,
+                content: vec![tachyon_model::ModelContent::Image {
+                    source: tachyon_model::ModelMediaSource::Bytes {
+                        media_type: "image/png".to_string(),
+                        data: Arc::clone(&data),
+                    },
+                    detail: Some(tachyon_model::ModelImageDetail::High),
+                }],
+            });
+        let history_item: HistoryItem = model_item.clone();
+        let _: &tachyon_model::ModelInputItem = &history_item;
+        assert_eq!(history_item, model_item);
+        let HistoryItem::Message(message) = history_item else {
+            panic!("expected the aliased canonical message type");
+        };
+        let [
+            HistoryMessageContent::Image {
+                source:
+                    HistoryMediaSource::Bytes {
+                        data: cloned_data, ..
+                    },
+                ..
+            },
+        ] = message.content.as_slice()
+        else {
+            panic!("expected byte-backed image content");
+        };
+        assert!(Arc::ptr_eq(&data, cloned_data));
+
+        let model_result =
+            tachyon_model::ModelInputItem::ToolResult(tachyon_model::ModelToolResult {
+                call_id: tachyon_model::ModelToolCallId("discovery".to_string()),
+                content: vec![
+                    tachyon_model::ModelToolResultContent::Json(Value::Null),
+                    tachyon_model::ModelToolResultContent::DiscoveredTools(Vec::new()),
+                ],
+                is_error: Some(false),
+            });
+        let history_result: HistoryItem = model_result.clone();
+        assert_eq!(history_result, model_result);
+        let HistoryItem::ToolResult(result) = history_result else {
+            panic!("expected the aliased canonical tool-result type");
+        };
+        assert!(matches!(
+            result.content.as_slice(),
+            [
+                HistoryToolResultContent::Json(Value::Null),
+                HistoryToolResultContent::DiscoveredTools(tools)
+            ] if tools.is_empty()
+        ));
+    }
 
     #[test]
     fn top_level_history_categories_are_distinct() {

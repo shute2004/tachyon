@@ -175,6 +175,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         };
         let additional_permissions = apply_granted_turn_permissions(
             invocation.session.as_ref(),
+            invocation.step_context.turn.as_ref(),
             environment,
             environment.cwd(),
             SandboxPermissions::UseDefault,
@@ -414,7 +415,7 @@ mod tests {
                 .raw_items()
                 .next()
                 .expect("history item")
-                .clone(),
+                .into_owned(),
         );
         let raw_history_event = rx.recv().await.expect("history raw response item event");
         let EventMsg::RawResponseItem(raw_history_item) = raw_history_event.msg else {

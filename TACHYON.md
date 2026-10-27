@@ -1,5 +1,7 @@
 # Tachyon
 
+> Historical design of **Legacy Tachyon**. The Codex-based project is being consolidated separately from the new Tachyon direction. This document preserves the original architecture and plans; it is not a requirement to continue the unfinished extraction. See [README.md](README.md) and [LEGACY_TACHYON.md](LEGACY_TACHYON.md) for the current scope and verified status.
+
 Tachyon is a model-agnostic, UI-independent kernel for building coding-agent harnesses.
 
 It is written in Rust and is being extracted from the OpenAI Codex codebase so that mature coding-agent runtime behavior can be preserved while product, UI, and provider-specific coupling is progressively removed.
@@ -122,17 +124,49 @@ ModelTurnRuntime                           Codex adapter
 
 The Codex adapter still provides explicit migration paths for provider-specific or not-yet-extracted semantics. Request shapes that cannot round-trip through the canonical request IR remain on the legacy `Prompt` fallback. On the event side, product/backend notifications and unsupported output shapes remain on an explicit Codex compatibility side channel rather than being forced into `ModelEvent`.
 
-The model-runtime source layout now includes canonical request and event conversion bridges:
+Hosts may also supply a canonical `ModelBackend` through `ModelRuntime::from_backend` and
+`StartThreadOptions::with_model_runtime`. Regular sampling and tool follow-ups then consume
+canonical events without Codex sidecars. The selected runtime is fixed for the session;
+provider identity is checked before each request. Canonical backends require representable
+history and tool declarations, and reject unsupported prompts rather than silently using a
+legacy fallback. Function output schemas and explicit namespace groups preserve generic
+tool contracts, descriptions, empty groups and declaration order. Hosted WebSearch remains
+unsupported by canonical backends; client-discovery results retain their separate flat
+declaration vocabulary. Delegated ThreadSpawn children inherit the selected backend through
+an independent child-session factory when their matching parent is registered. Explicit child
+runtime selection takes precedence; an unsupported child factory fails rather than falling back
+to Codex. Existing running resumes do not create another factory, and Codex parents retain their
+fresh-client path. Local compaction also uses the selected runtime: completed output replaces
+history through the existing compaction path, retryable failures reuse the compaction turn
+handle, and unsupported prompts or premature canonical EOF fail without a Codex fallback.
+Manual and automatic model compaction select the runtime before provider remote-compaction
+capabilities: a canonical backend stays local even when the provider advertises Codex remote V2.
+Codex rate-limit/reasoning notifications and real response IDs remain on the adapter path.
+Remote compaction and realtime backend migration are not completed by this slice.
+
+The canonical request/event vocabulary now belongs to the lightweight `tachyon-model` crate,
+which has no Core, provider, authentication, or UI dependency. Core retains its existing IR
+import path through re-exports. The model-runtime source layout includes:
 
 ```text
+codex-rs/tachyon-model/src/
+├── lib.rs                   # canonical provider-neutral request/event vocabulary
+├── backend.rs               # provider-neutral factory, turn handle, and event-source contract
+├── backend_tests.rs         # factory lifecycle and canonical stream tests
+├── route.rs                 # provider/protocol/transport identities
+└── tests.rs                 # focused IR semantics tests
+
 codex-rs/core/src/model_runtime/
 ├── mod.rs                   # Tachyon-facing runtime boundary
-├── ir.rs                    # canonical provider-neutral request/event vocabulary
-├── ir_tests.rs              # focused IR semantics tests
+├── ir.rs                    # compatibility re-exports from tachyon-model
+├── ir_tests.rs              # cross-path type identity test
+├── route.rs                 # compatibility re-exports from tachyon-model::route
 ├── codex_request.rs         # transitional request conversion / lossless fallback boundary
 ├── codex_request_tests.rs   # focused request conversion tests
 ├── codex_event.rs           # transitional event conversion / compatibility boundary
 ├── codex_event_tests.rs     # focused event conversion tests
+├── harness_event.rs         # canonical lifecycle projection into existing history/tool handlers
+├── harness_event_tests.rs   # canonical mapping and Codex sidecar preservation tests
 ├── codex_adapter.rs         # transitional Codex/OpenAI implementation
 ├── retry.rs                 # model-stream retry policy
 └── retry_tests.rs           # retry policy tests

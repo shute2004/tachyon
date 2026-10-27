@@ -38,7 +38,36 @@ impl SessionTask for CompactTask {
             return Ok(None);
         }
 
-        let result = match ctx.provider.capabilities().remote_compaction {
+        if session
+            .services
+            .model_runtime()
+            .supports_backend_compaction()
+        {
+            emit_compact_metric(
+                &session.services.session_telemetry,
+                "backend",
+                /*manual*/ true,
+            );
+            let result =
+                crate::compact::backend::run_compact_task(session.clone(), ctx.clone()).await;
+            if let Err(err) = result
+                && matches!(err.details(), CodexErrorDetails::TurnAborted)
+            {
+                return Err(err);
+            }
+            return Ok(None);
+        }
+
+        let remote_compaction = if session
+            .services
+            .model_runtime()
+            .supports_codex_remote_compaction()
+        {
+            ctx.provider.capabilities().remote_compaction
+        } else {
+            RemoteCompactionSupport::Unsupported
+        };
+        let result = match remote_compaction {
             RemoteCompactionSupport::V2
                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
             {

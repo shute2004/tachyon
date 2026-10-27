@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CARGO_RS_ROOT = ROOT / "codex-rs"
 WORKSPACE_PACKAGE_FIELDS = ("version", "edition", "license")
 TOP_LEVEL_NAME_EXCEPTIONS = {
+    # The extracted model vocabulary is independent of the Codex adapter.
+    "tachyon-model": "tachyon-model",
     "windows-sandbox-rs": "codex-windows-sandbox",
 }
 UTILITY_NAME_EXCEPTIONS = {

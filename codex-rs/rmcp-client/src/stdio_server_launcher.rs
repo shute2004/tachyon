@@ -670,9 +670,12 @@ impl ExecutorStdioServerLauncher {
             // environment, not copied from Codex. Start from `All` only so the
             // named remote variable is available to the filter below; the
             // effective child env is still limited by `include_only`.
+            // Include Windows runtime vars when this policy is built on Unix.
             crate::utils::DEFAULT_ENV_VARS
                 .iter()
-                .map(|name| (*name).to_string())
+                .copied()
+                .chain(["SYSTEMROOT", "TEMP", "TMP"])
+                .map(|name| name.to_string())
                 .chain(remote_env_vars.iter().cloned())
                 .collect()
         };
@@ -746,6 +749,9 @@ mod tests {
         let env = shell_environment::create_env_from_vars(
             [
                 ("PATH".to_string(), "/remote/bin".to_string()),
+                ("SystemRoot".to_string(), r"C:\Windows".to_string()),
+                ("TEMP".to_string(), r"C:\Temp".to_string()),
+                ("TMP".to_string(), r"C:\Temp".to_string()),
                 ("REMOTE_TOKEN".to_string(), "remote-secret".to_string()),
                 (
                     "UNREQUESTED_SECRET".to_string(),
@@ -757,6 +763,12 @@ mod tests {
         );
 
         assert_eq!(env.get("PATH").map(String::as_str), Some("/remote/bin"));
+        assert_eq!(
+            env.get("SystemRoot").map(String::as_str),
+            Some(r"C:\Windows")
+        );
+        assert_eq!(env.get("TEMP").map(String::as_str), Some(r"C:\Temp"));
+        assert_eq!(env.get("TMP").map(String::as_str), Some(r"C:\Temp"));
         assert_eq!(
             env.get("REMOTE_TOKEN").map(String::as_str),
             Some("remote-secret")

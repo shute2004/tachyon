@@ -425,8 +425,58 @@ async fn windows_auto_mode_prompt_requests_enabling_sandbox_feature() {
         "expected auto mode prompt to mention Administrator permissions, popup: {popup}"
     );
     assert!(
-        popup.contains("Use non-admin sandbox"),
-        "expected auto mode prompt to include non-admin fallback option, popup: {popup}"
+        popup.contains("Quit"),
+        "expected auto mode prompt to offer quit, popup: {popup}"
+    );
+    assert!(
+        !popup.contains("non-admin"),
+        "expected auto mode prompt to omit the retired non-admin choice, popup: {popup}"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_windows_sandbox_prompts_snapshot_copy_and_choices() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+
+    chat.open_windows_sandbox_enable_prompt(preset.clone(), /*profile_selection*/ None);
+    let enable_popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(!enable_popup.contains("Your organization requires"));
+    assert!(!enable_popup.contains("non-admin"));
+    let enable_choices = enable_popup
+        .lines()
+        .filter(|line| line.contains("Set up default sandbox") || line.contains("Quit"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(
+        enable_choices,
+        @"› 1. Set up default sandbox (requires Administrator permissions)\n  2. Quit"
+    );
+
+    chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
+    let fallback_popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(!fallback_popup.contains("Your organization requires"));
+    assert!(!fallback_popup.contains("non-admin"));
+    let fallback_explanation = fallback_popup
+        .lines()
+        .nth(2)
+        .expect("fallback prompt explanation")
+        .trim();
+    insta::assert_snapshot!(
+        fallback_explanation,
+        @"You can retry setting up the default sandbox or quit Codex."
+    );
+    let fallback_choices = fallback_popup
+        .lines()
+        .filter(|line| line.contains("Try setting up admin sandbox again") || line.contains("Quit"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(
+        fallback_choices,
+        @"› 1. Try setting up admin sandbox again\n  2. Quit"
     );
 }
 
@@ -450,8 +500,8 @@ async fn startup_prompts_for_windows_sandbox_when_agent_requested() {
         "expected startup prompt to offer default sandbox setup: {popup}"
     );
     assert!(
-        popup.contains("Use non-admin sandbox"),
-        "expected startup prompt to offer non-admin fallback: {popup}"
+        !popup.contains("non-admin"),
+        "expected startup prompt to omit the retired non-admin choice: {popup}"
     );
     assert!(
         popup.contains("Quit"),
@@ -477,8 +527,16 @@ async fn startup_windows_sandbox_prompt_blocks_disallowed_unelevated_fallback() 
         "expected required sandbox prompt copy: {popup}"
     );
     assert!(
-        !popup.contains("Use non-admin sandbox"),
-        "expected required sandbox prompt to hide non-admin fallback: {popup}"
+        popup.contains("Set up default sandbox"),
+        "expected required sandbox prompt to offer elevated setup: {popup}"
+    );
+    assert!(
+        popup.contains("Quit"),
+        "expected required sandbox prompt to offer quit: {popup}"
+    );
+    assert!(
+        !popup.contains("non-admin"),
+        "expected required sandbox prompt to omit the retired non-admin choice: {popup}"
     );
 }
 
@@ -495,37 +553,58 @@ async fn windows_sandbox_required_enable_prompt_snapshot() {
 
     chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
 
-    assert_chatwidget_snapshot!(
-        "windows_sandbox_required_enable_prompt",
-        render_bottom_popup(&chat, /*width*/ 120)
-    );
+    let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(popup.contains("Your organization requires the default Codex agent sandbox"));
+    assert!(popup.contains("Set up default sandbox"));
+    assert!(popup.contains("2. Quit"));
+    assert!(!popup.contains("non-admin"));
+    assert_chatwidget_snapshot!("windows_sandbox_required_enable_prompt", popup);
 }
 
 #[tokio::test]
-async fn windows_sandbox_required_enable_prompt_reopens_on_cancel_when_unelevated_allowed() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+async fn windows_sandbox_prompts_reopen_on_cancel_for_all_requirement_states() {
+    let requirement_cases = [
+        None,
+        Some(vec![WindowsSandboxModeToml::Elevated]),
+        Some(vec![
+            WindowsSandboxModeToml::Elevated,
+            WindowsSandboxModeToml::Unelevated,
+        ]),
+    ];
 
-    chat.config.permissions.windows_sandbox_mode = Some(WindowsSandboxModeToml::Elevated);
-    chat.config.config_layer_stack = windows_sandbox_requirements_stack(vec![
-        WindowsSandboxModeToml::Elevated,
-        WindowsSandboxModeToml::Unelevated,
-    ]);
-    let preset = builtin_approval_presets()
-        .into_iter()
-        .find(|preset| preset.id == "auto")
-        .expect("auto preset");
+    for allowed_modes in requirement_cases {
+        for use_fallback_prompt in [false, true] {
+            let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+            if let Some(allowed_modes) = allowed_modes.clone() {
+                chat.config.config_layer_stack = windows_sandbox_requirements_stack(allowed_modes);
+                chat.config.permissions.windows_sandbox_mode =
+                    Some(WindowsSandboxModeToml::Elevated);
+            }
+            let preset = builtin_approval_presets()
+                .into_iter()
+                .find(|preset| preset.id == "auto")
+                .expect("auto preset");
 
-    chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            if use_fallback_prompt {
+                chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
+            } else {
+                chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+            }
+            chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(AppEvent::OpenWindowsSandboxEnablePrompt { .. })
-    ));
+            let reopened_prompt = rx.try_recv().expect("cancel should reopen the prompt");
+            assert!(matches!(
+                (use_fallback_prompt, reopened_prompt),
+                (false, AppEvent::OpenWindowsSandboxEnablePrompt { .. })
+                    | (true, AppEvent::OpenWindowsSandboxFallbackPrompt { .. })
+            ));
+            assert!(rx.try_recv().is_err());
+        }
+    }
 }
 
 #[tokio::test]
-async fn fragmented_terminal_response_cannot_select_non_admin_windows_sandbox() {
+async fn fragmented_terminal_response_cannot_select_quit_from_windows_sandbox_prompt() {
     for use_fallback_prompt in [false, true] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
         let preset = builtin_approval_presets()
@@ -542,11 +621,8 @@ async fn fragmented_terminal_response_cannot_select_non_admin_windows_sandbox() 
         for character in "20;rgb:2222/ffff/ffff".chars() {
             chat.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
             assert!(
-                !matches!(
-                    rx.try_recv(),
-                    Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
-                ),
-                "a fragmented terminal response must not choose the non-admin sandbox"
+                rx.try_recv().is_err(),
+                "a fragmented terminal response must not trigger a sandbox prompt action"
             );
         }
 
@@ -554,7 +630,7 @@ async fn fragmented_terminal_response_cannot_select_non_admin_windows_sandbox() 
         chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
             rx.try_recv(),
-            Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
+            Ok(AppEvent::Exit(ExitMode::ShutdownFirst))
         ));
     }
 }
@@ -672,6 +748,12 @@ async fn windows_sandbox_required_fallback_prompt_snapshot() {
     chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
 
     let popup = render_bottom_popup(&chat, /*width*/ 120);
+    assert!(
+        popup.contains("Your organization requires the default sandbox before Codex can continue.")
+    );
+    assert!(popup.contains("1. Try setting up admin sandbox again"));
+    assert!(popup.contains("2. Quit"));
+    assert!(!popup.contains("non-admin"));
     assert_chatwidget_snapshot!("windows_sandbox_required_fallback_prompt", popup);
 }
 

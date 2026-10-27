@@ -1,0 +1,200 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+index 9622cdd7adc50295c9ca6fd38b7f40914cde6bed..3a9bd224942337b9343bb342d34f70c6fcd8a565 100644
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -1121,6 +1121,12 @@
+ 
+     # Wrapper args first
+     process_wrapper_flags = ctx.actions.args()
++
++    # Keep the outer process-wrapper command line bounded independently of the
++    # rustc response file below. On Windows, CreateProcessW can reject the
++    # wrapper command line before rustc starts.
++    process_wrapper_flags.set_param_file_format("multiline")
++    process_wrapper_flags.use_param_file("@%s", use_always = True)
+ 
+     for build_env_file in build_env_files:
+         process_wrapper_flags.add("--env-file", build_env_file)
+diff --git a/util/process_wrapper/flags.rs b/util/process_wrapper/flags.rs
+index 8ea9557d43b2b9b94b91edc15bcf1fe0930c9ada..3cd8c4d936489ab4cdde3157d3721ef95157e3ad 100644
+--- a/util/process_wrapper/flags.rs
++++ b/util/process_wrapper/flags.rs
+@@ -25,6 +25,7 @@
+     ValueMissing(String),
+     ProvidedMultipleTimes(String),
+     ProgramNameMissing,
++    ParamFileReadError { path: String, error: String },
+ }
+ 
+ impl fmt::Display for FlagParseError {
+@@ -38,6 +39,12 @@
+             Self::ProgramNameMissing => {
+                 write!(f, "program name (argv[0]) missing")
+             }
++            Self::ParamFileReadError { path, error } => {
++                write!(
++                    f,
++                    "failed to read process-wrapper parameter file {path:?}: {error}"
++                )
++            }
+         }
+     }
+ }
+@@ -143,6 +150,7 @@
+     }
+ 
+     pub(crate) fn parse(mut self, argv: Vec<String>) -> Result<ParseOutcome, FlagParseError> {
++        let argv = expand_param_file(argv)?;
+         let mut argv_iter = argv.into_iter().peekable();
+         let program_name = argv_iter.next().ok_or(FlagParseError::ProgramNameMissing)?;
+ 
+@@ -185,6 +193,35 @@
+     }
+ }
+ 
++fn expand_param_file(argv: Vec<String>) -> Result<Vec<String>, FlagParseError> {
++    // process_wrapper_flags is the first Args object after argv[0], so Bazel
++    // replaces it with a single @file argument when use_param_file is enabled.
++    // Expand only that pointer; scanning its contents would reinterpret literal
++    // @values (for example a --subst value), and rustc's @files follow --.
++    let Some(param_file_arg) = argv.get(1) else {
++        return Ok(argv);
++    };
++    let Some(param_file_path) = param_file_arg.strip_prefix('@') else {
++        return Ok(argv);
++    };
++    if param_file_path.is_empty() {
++        return Ok(argv);
++    }
++
++    let contents = std::fs::read_to_string(param_file_path).map_err(|error| {
++        FlagParseError::ParamFileReadError {
++            path: param_file_path.to_owned(),
++            error: error.to_string(),
++        }
++    })?;
++    let param_file_args = contents.lines().map(str::to_owned).collect::<Vec<_>>();
++    let mut expanded = Vec::with_capacity(argv.len() - 1 + param_file_args.len());
++    expanded.push(argv[0].clone());
++    expanded.extend(param_file_args);
++    expanded.extend(argv.into_iter().skip(2));
++    Ok(expanded)
++}
++
+ fn consume_args<I: Iterator<Item = String>>(
+     flag: &str,
+     argv_iter: &mut Peekable<I>,
+@@ -202,5 +239,113 @@
+ }
+ 
+ #[cfg(test)]
++mod param_file_test {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::time::{SystemTime, UNIX_EPOCH};
++
++    static NEXT_PARAM_FILE: AtomicUsize = AtomicUsize::new(0);
++
++    fn param_file_path() -> std::path::PathBuf {
++        let timestamp = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap()
++            .as_nanos();
++        let sequence = NEXT_PARAM_FILE.fetch_add(1, Ordering::Relaxed);
++        std::env::temp_dir().join(format!(
++            "rules rust process wrapper params {} {timestamp} {sequence}.txt",
++            std::process::id(),
++        ))
++    }
++
++    fn write_param_file(args: &[&str]) -> std::path::PathBuf {
++        let path = param_file_path();
++        let contents = args
++            .iter()
++            .map(|arg| format!("{arg}\n"))
++            .collect::<String>();
++        std::fs::write(&path, contents).unwrap();
++        path
++    }
++
++    #[test]
++    fn expands_one_param_file_in_order_and_preserves_spaces() {
++        let path = write_param_file(&[
++            "--item",
++            "first value with spaces",
++            "--item",
++            "second value with spaces",
++            "",
++        ]);
++        assert!(path.to_string_lossy().contains(' '));
++        let response_arg = format!("@{}", path.display());
++        let mut item = None;
++        let mut parser = Flags::new();
++        parser.define_repeated_flag("--item", "", &mut item);
++
++        let result = parser
++            .parse(vec!["process_wrapper".to_owned(), response_arg])
++            .unwrap();
++        assert!(matches!(result, ParseOutcome::Parsed(args) if args.is_empty()));
++        assert_eq!(
++            item,
++            Some(vec![
++                "first value with spaces".to_owned(),
++                "second value with spaces".to_owned(),
++                "".to_owned(),
++            ])
++        );
++        std::fs::remove_file(path).unwrap();
++    }
++
++    #[test]
++    fn does_not_expand_substitution_values_or_child_param_files() {
++        let path = write_param_file(&["--subst", "@literal substitution"]);
++        let response_arg = format!("@{}", path.display());
++        let mut subst = None;
++        let mut parser = Flags::new();
++        parser.define_repeated_flag("--subst", "", &mut subst);
++
++        let result = parser
++            .parse(vec![
++                "process_wrapper".to_owned(),
++                response_arg,
++                "--".to_owned(),
++                "rustc".to_owned(),
++                "@rustc params.rsp".to_owned(),
++            ])
++            .unwrap();
++        assert!(matches!(
++            result,
++            ParseOutcome::Parsed(args)
++                if args == vec!["rustc".to_owned(), "@rustc params.rsp".to_owned()]
++        ));
++        assert_eq!(subst, Some(vec!["@literal substitution".to_owned()]));
++        std::fs::remove_file(path).unwrap();
++    }
++
++    #[test]
++    fn reports_missing_param_file_with_its_path() {
++        let path = param_file_path();
++        assert!(!path.exists());
++        let response_arg = format!("@{}", path.display());
++        let error = Flags::new()
++            .parse(vec!["process_wrapper".to_owned(), response_arg])
++            .unwrap_err();
++
++        match error {
++            FlagParseError::ParamFileReadError {
++                path: error_path,
++                error,
++            } => {
++                assert_eq!(error_path, path.to_string_lossy().into_owned());
++                assert!(!error.is_empty());
++            }
++            other => panic!("expected parameter-file error, got {:?}", other),
++        }
++    }
++}
++
++#[cfg(test)]
+ mod test {
+     use super::*;

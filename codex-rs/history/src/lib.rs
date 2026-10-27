@@ -30,11 +30,19 @@ use serde::Serializer;
 use serde::de::Error as _;
 
 mod envelope;
+mod input_association;
+mod input_identity;
 mod item;
 mod response_projection;
+mod responses_record;
 mod rollout_payload;
+mod timeline;
 
 pub use envelope::HistoryEnvelope;
+pub use input_association::InputAssociation;
+pub use input_association::InputSource;
+pub use input_identity::InputIdentity;
+pub use input_identity::InputStreamIncarnation;
 pub use item::HistoryImageDetail;
 pub use item::HistoryItem;
 pub use item::HistoryMediaSource;
@@ -51,23 +59,45 @@ pub use item::HistoryToolResultContent;
 pub use response_projection::HistoryItemProjection;
 pub use response_projection::HistoryProjectionFallback;
 pub use response_projection::project_response_item;
+pub use response_projection::project_response_item_semantics;
+pub use responses_record::ResponsesHistoryRecord;
+pub use timeline::HistoryAppendKind;
+pub use timeline::HistoryReplacement;
+pub use timeline::HistoryTimeline;
 
 /// Migration-era metadata persisted beside a Codex/Responses compatibility item.
 ///
 /// `client_authored` is host-specific and therefore deliberately remains under the
 /// Codex-branded compatibility name instead of being promoted into a generic history contract.
-/// The fallback token budget is reusable harness behavior, but remains here until a later slice
-/// splits generic metadata from compatibility metadata without changing persisted bytes.
+/// These fields remain here until later slices split generic metadata from compatibility metadata
+/// without changing persisted bytes.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
 
+    /// Whether the owning harness explicitly marks this entire message as part of a complete
+    /// current-context bundle rebuilt by its full-context producer at compaction or window reset.
+    /// The rebuilt bundle may include plugin, extension, and MCP state. This is lifecycle metadata,
+    /// not evidence of trust, authority, or admission. Do not infer it from role, text, content
+    /// kind, or input source; arbitrary public extension role-diff fragments remain unmarked.
+    /// Missing legacy values deserialize as false and are unmarked. It does not override
+    /// client-authored or input-association metadata.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reinjectable_context: bool,
+
     /// Overrides history's fallback truncation budget, including on resume.
     /// Measured in tokens, with any tool-specific allowance already included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_token_limit_override: Option<usize>,
+
+    /// Descriptive identity and source for an original input history record.
+    ///
+    /// This provider-neutral value temporarily uses the migration-era metadata sidecar. It is
+    /// forgeable data, not proof of admission, persistence, or transcript completeness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_association: Option<InputAssociation>,
 }
 
 /// Transitional compatibility alias for Responses-shaped history callers.
@@ -420,3 +450,15 @@ mod tests;
 #[cfg(test)]
 #[path = "response_projection_tests.rs"]
 mod response_projection_tests;
+
+#[cfg(test)]
+#[path = "input_identity_tests.rs"]
+mod input_identity_tests;
+
+#[cfg(test)]
+#[path = "input_association_tests.rs"]
+mod input_association_tests;
+
+#[cfg(test)]
+#[path = "timeline_tests.rs"]
+mod timeline_tests;

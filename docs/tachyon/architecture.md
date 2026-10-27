@@ -45,6 +45,8 @@ The kernel is expected to own generally reusable harness semantics, including:
 
 The kernel may be feature-rich. The criterion is model/vendor/UI independence, not minimal feature count.
 
+Turn-scoped permission grants and strict approval review belong to the originating turn, even when a tool or approval response completes after another turn becomes active. Model variants of that turn share its grant store; a fresh turn does not. Session-scoped grants remain live and environment-keyed. Pending permission responses retain their originating turn rather than attributing a late response to the currently active turn.
+
 ## Outside the kernel
 
 The following belong outside the kernel or behind adapters/modules:

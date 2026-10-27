@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -259,8 +260,8 @@ impl ConversationHistorySnapshot for TestConversationHistory {
         self.0.iter().filter(|item| item.is_user_message()).count() as u64
     }
 
-    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.0.iter())
+    fn items(&self) -> Box<dyn Iterator<Item = Cow<'_, ResponseItem>> + Send + '_> {
+        Box::new(self.0.iter().map(|item| Cow::Owned(item.clone())))
     }
 }
 

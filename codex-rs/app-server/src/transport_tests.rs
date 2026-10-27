@@ -1,6 +1,7 @@
 use super::*;
 use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::ReasoningContentPartAddedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerNotificationEnvelope;
@@ -16,12 +17,20 @@ fn absolute_path(path: &str) -> AbsolutePathBuf {
     AbsolutePathBuf::from_absolute_path(path).expect("absolute path")
 }
 
-fn thread_realtime_started_notification() -> ServerNotification {
-    ServerNotification::ThreadRealtimeStarted(ThreadRealtimeStartedNotification {
-        thread_id: "thread-1".to_string(),
-        realtime_session_id: None,
-        version: RealtimeConversationVersion::V1,
-    })
+fn experimental_notifications() -> [ServerNotification; 2] {
+    [
+        ServerNotification::ThreadRealtimeStarted(ThreadRealtimeStartedNotification {
+            thread_id: "thread-1".to_string(),
+            realtime_session_id: None,
+            version: RealtimeConversationVersion::V1,
+        }),
+        ServerNotification::ReasoningContentPartAdded(ReasoningContentPartAddedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "reasoning-1".to_string(),
+            content_index: 4,
+        }),
+    ]
 }
 
 fn app_server_notification(notification: ServerNotification) -> OutgoingMessage {
@@ -178,20 +187,22 @@ async fn experimental_notifications_are_dropped_without_capability() {
         ),
     );
 
-    route_outgoing_envelope(
-        &mut connections,
-        OutgoingEnvelope::ToConnection {
-            connection_id,
-            message: app_server_notification(thread_realtime_started_notification()),
-            write_complete_tx: None,
-        },
-    )
-    .await;
+    for notification in experimental_notifications() {
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: app_server_notification(notification),
+                write_complete_tx: None,
+            },
+        )
+        .await;
 
-    assert!(
-        writer_rx.try_recv().is_err(),
-        "experimental notifications should not reach clients without capability"
-    );
+        assert!(
+            writer_rx.try_recv().is_err(),
+            "experimental notifications should not reach clients without capability"
+        );
+    }
 
     let recovery = AuthRecoveryNotification {
         thread_id: "thread-1".to_string(),
@@ -248,27 +259,30 @@ async fn experimental_notifications_are_preserved_with_capability() {
         ),
     );
 
-    route_outgoing_envelope(
-        &mut connections,
-        OutgoingEnvelope::ToConnection {
-            connection_id,
-            message: app_server_notification(thread_realtime_started_notification()),
-            write_complete_tx: None,
-        },
-    )
-    .await;
+    for notification in experimental_notifications() {
+        let expected_method = notification.to_string();
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: app_server_notification(notification),
+                write_complete_tx: None,
+            },
+        )
+        .await;
 
-    let message = writer_rx
-        .recv()
-        .await
-        .expect("experimental notification should reach opted-in client");
-    assert!(matches!(
-        message.message,
-        OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
-            notification: ServerNotification::ThreadRealtimeStarted(_),
-            ..
-        })
-    ));
+        let message = writer_rx
+            .recv()
+            .await
+            .expect("experimental notification should reach opted-in client");
+        let OutgoingMessage::AppServerNotification(envelope) = message.message else {
+            panic!("experimental notification should be delivered");
+        };
+        assert_eq!(envelope.notification.to_string(), expected_method);
+        if let ServerNotification::ReasoningContentPartAdded(notification) = envelope.notification {
+            assert_eq!(notification.content_index, 4);
+        }
+    }
 }
 
 #[tokio::test]

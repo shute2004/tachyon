@@ -2710,13 +2710,20 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         turn_context.auth_manager.clone(),
     );
 
-    let active_turn = ActiveTurn::default();
-    active_turn
-        .turn_state
-        .lock()
-        .await
-        .enable_strict_auto_review();
-    *session.active_turn.lock().await = Some(active_turn);
+    let active_turn_context_b = session.new_default_turn().await;
+    turn_context
+        .record_granted_permissions_for_environment(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            codex_protocol::models::AdditionalPermissionProfile {
+                network: Some(codex_protocol::models::NetworkPermissions {
+                    enabled: Some(true),
+                }),
+                ..Default::default()
+            },
+            true,
+        )
+        .await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let invocation = McpInvocation {
@@ -2764,6 +2771,8 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
     };
     assert!(message.contains("Reason: The tool call would expose private calendar data"));
     assert!(message.contains("policy circumvention"));
+    assert!(turn_context.strict_auto_review_enabled().await);
+    assert!(!active_turn_context_b.strict_auto_review_enabled().await);
     assert_eq!(
         guardian_request_log.single_request().path(),
         "/v1/responses"

@@ -51,6 +51,32 @@ The serialized rollout shape is intentionally unchanged in this slice. Existing 
 
 This slice therefore neutralizes only the envelope ownership. It does **not** claim that the history item or all metadata semantics have been neutralized.
 
+## Original input association
+
+`InputIdentity` identifies a thread-local input stream by thread, incarnation, and nonzero
+sequence. `InputAssociation` attaches that identity and a descriptive source to the original
+input record, not to every message generated while processing it. Legacy records need not
+have an association; no identity or origin is inferred from their text or client IDs.
+
+Core carries the source in a process-local `SessionSubmission` envelope. Generic submissions
+and realtime text remain `Unknown`. The one-shot review and Guardian review producers
+explicitly classify their constructed prompt inputs as `Synthetic`; forwarding preserves
+that classification. A constructed review prompt may contain user-provided text, so this
+classification is not proof that its content is non-human, trusted, or authorized.
+
+For accepted nonempty user-input admissions, Core reserves an identity through the thread
+store before merging additional context and queuing the input. Rejected, empty, automatic,
+and recovery admissions do not reserve an identity on this path. Reservation is best-effort:
+store errors or a wrong-thread result leave the input unassociated rather than reject the
+work. Reservation, admission, append, materialization, and flush are not one atomic
+transaction, and unused sequence gaps are permitted.
+
+The association is optional canonical history sidecar metadata. It is not part of the
+protocol submission/request shape, serialized pending-input queue, provider request payload,
+or UI turn item. Additional context retains its own unassociated records. Deserializing an
+association establishes neither its source nor successful admission, persistence, or
+transcript completeness.
+
 ## Next slices
 
 The next implementation units should:

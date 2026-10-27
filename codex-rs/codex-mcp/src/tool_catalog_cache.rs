@@ -26,6 +26,7 @@ use tokio::time::Instant;
 use crate::McpProtocolMode;
 use crate::McpRuntimeContext;
 use crate::ToolInfo;
+use crate::server::McpCredentialPolicy;
 use crate::server::McpServerConnectionIdentity;
 use crate::server::has_explicit_http_authorization;
 
@@ -263,6 +264,15 @@ impl ToolCatalogTransportIdentity {
         client_context: (&ElicitationCapability, &ClientMcpExtensions),
         connection_identity: Option<(&McpServerConnectionIdentity, McpProtocolMode, bool)>,
     ) -> Option<Self> {
+        if !matches!(
+            &config.transport,
+            McpServerTransportConfig::StreamableHttp { .. }
+        ) && connection_identity.is_some_and(|(identity, _, _)| {
+            identity.credential_policy == McpCredentialPolicy::ExecutorOnly
+        }) {
+            return None;
+        }
+
         let (client_elicitation_capability, client_mcp_extensions) = client_context;
         if let McpServerTransportConfig::StreamableHttp {
             url,
@@ -308,6 +318,15 @@ impl ToolCatalogTransportIdentity {
                 ))
                 .ok()?,
             );
+            hasher.update(b"mcp-credential-policy-v1\0");
+            match connection_identity.credential_policy {
+                McpCredentialPolicy::HostFallbackAllowed => {
+                    hasher.update(b"host-fallback-allowed\0");
+                }
+                McpCredentialPolicy::ExecutorOnly => {
+                    hasher.update(b"executor-only\0");
+                }
+            }
             let mut env_vars = bearer_token_env_var
                 .iter()
                 .chain(env_http_headers.iter().flat_map(|headers| headers.values()))
@@ -316,9 +335,12 @@ impl ToolCatalogTransportIdentity {
             env_vars.dedup();
             for name in env_vars {
                 hasher.update(name.as_bytes());
-                let mut value_hasher = DefaultHasher::new();
-                std::env::var_os(name).hash(&mut value_hasher);
-                hasher.update(value_hasher.finish().to_le_bytes());
+                if connection_identity.credential_policy == McpCredentialPolicy::HostFallbackAllowed
+                {
+                    let mut value_hasher = DefaultHasher::new();
+                    std::env::var_os(name).hash(&mut value_hasher);
+                    hasher.update(value_hasher.finish().to_le_bytes());
+                }
             }
             return Some(Self::StreamableHttp {
                 fingerprint: hasher.finalize().into(),

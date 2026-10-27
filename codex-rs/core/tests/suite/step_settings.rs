@@ -430,6 +430,10 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
     .await;
     let test = step_settings_test().build_with_auto_env(&server).await?;
     let request = start_paused_turn(&test.codex).await?;
+    assert_eq!(
+        test.codex.current_turn_model("not-the-active-turn").await,
+        None
+    );
 
     core_test_support::submit_thread_settings(
         &test.codex,
@@ -439,6 +443,13 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
         },
     )
     .await?;
+    assert_eq!(
+        test.codex
+            .current_turn_model(&request.turn_id)
+            .await
+            .as_deref(),
+        Some(MODEL_A)
+    );
     assert_eq!(
         submit_turn_settings(
             &test.codex,
@@ -451,6 +462,13 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
         )
         .await?,
         TurnSettingsUpdateOutcome::Applied
+    );
+    assert_eq!(
+        test.codex
+            .current_turn_model(&request.turn_id)
+            .await
+            .as_deref(),
+        Some(MODEL_C)
     );
     answer_paused_turn(&test.codex, &request.turn_id).await?;
     let second_request = wait_for_event_match(&test.codex, |event| match event {
@@ -500,6 +518,7 @@ async fn sparse_updates_preserve_divergent_active_and_future_models() -> Result<
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    assert_eq!(test.codex.current_turn_model(&request.turn_id).await, None);
     test.submit_text_turn("start the next turn").await?;
 
     let requests = response_mock.requests();
