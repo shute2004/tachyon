@@ -1,6 +1,8 @@
-# Legacy Tachyon（旧Tachyon）
+# tachyon-codex（旧Tachyon / Codexフォーク版）
 
 このリポジトリは、Codexを基に開発していた旧Tachyonのコーディングハーネスを保存・整理するためのものです。別方針で始める新Tachyonとは区別します。
+
+旧名は `shute2004/tachyon`、現在の保存先は [`shute2004/tachyon-codex`](https://github.com/shute2004/tachyon-codex) です。Git履歴・既存PR・保存タグを引き継いで改名しています。
 
 既存の実装と履歴をまとめることが目的です。未完成だったカーネル抽出の続行、機能追加、上流Codexへの全面追従は、この整理には含めません。
 
