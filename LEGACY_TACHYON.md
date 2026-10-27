@@ -4,7 +4,7 @@
 
 Codexを基に開発していたコーディングハーネスの最新作業を、一つの参照先にまとめるための記録です。新Tachyonの設計・実装は扱いません。過去の設計文書にある「次の抽出」は当時の計画であり、この保存作業の追加要件ではありません。
 
-最終保存先は、人が選択した既存の `shute2004/tachyon` リポジトリの `main` です。これは旧Tachyonのソーススナップショットを保存するための統合であり、検証済みリリースを示すものではありません。この保存版の固定参照には `legacy-tachyon-2026-10-27` タグを用います。
+最終保存先は、人が選択した既存の `shute2004/tachyon-codex` リポジトリ（旧名 `shute2004/tachyon`）の `main` です。これは旧Tachyonのソーススナップショットを保存するための統合であり、検証済みリリースを示すものではありません。この保存版の固定参照には `legacy-tachyon-2026-10-27` タグを用います。
 
 統合入力は `7d4b2e4bc30c00be9c2e19fc68e3f6fbb1e592f3`（PR #126）、その祖先のCI基盤は `c83d6970fd7a41ae79e3503d6f6f449f8666b333`（PR #124）です。既存のGit履歴・ライセンスを保持し、ディレクトリやcrate名の一括変更は行いません。
 
@@ -12,14 +12,14 @@ Codexを基に開発していたコーディングハーネスの最新作業を
 
 | 元の作業 | 統合入力での扱い |
 | --- | --- |
-| [PR #122](https://github.com/shute2004/tachyon/pull/122) 履歴ストレージ | 後続の `HistoryTimeline<ResponsesHistoryRecord>` に置き換え済み。古い実装を重ねて導入しない。 |
-| [PR #124](https://github.com/shute2004/tachyon/pull/124) CI基盤 | `c83d6970fd` が統合入力の祖先。CIの構成と履歴を含む。 |
-| [PR #125](https://github.com/shute2004/tachyon/pull/125) TLS依存修正 | 後続で取り込み、`rustls 0.23.46` に更新済み。古いlockfileへ戻さない。 |
-| [PR #126](https://github.com/shute2004/tachyon/pull/126) ハーネス統合 | 統合入力の本体。入力・履歴・モデル境界・MCP・Windows旧方式停止などを含む。 |
-| [PR #127](https://github.com/shute2004/tachyon/pull/127) 実行出力の共有 | 元の5ファイルの変更を統合候補に収録。出力を共有し、base64のwire形式と保持上限は維持する。 |
-| [PR #128](https://github.com/shute2004/tachyon/pull/128) Guardian資格情報 | 同等の変更を取り込み済み。子プロセス環境とHTTPヘッダーの双方で制限する。 |
-| [PR #129](https://github.com/shute2004/tachyon/pull/129) MCPページング | Legacy/Modern両方のカーソル継続と繰り返し拒否を後続で取り込み済み。 |
-| [PR #130](https://github.com/shute2004/tachyon/pull/130) Linuxのbind-data FD | 同等の変更を取り込み済み。拒否ファイルごとに別のFDを保持する。 |
+| [PR #122](https://github.com/shute2004/tachyon-codex/pull/122) 履歴ストレージ | 後続の `HistoryTimeline<ResponsesHistoryRecord>` に置き換え済み。古い実装を重ねて導入しない。 |
+| [PR #124](https://github.com/shute2004/tachyon-codex/pull/124) CI基盤 | `c83d6970fd` が統合入力の祖先。CIの構成と履歴を含む。 |
+| [PR #125](https://github.com/shute2004/tachyon-codex/pull/125) TLS依存修正 | 後続で取り込み、`rustls 0.23.46` に更新済み。古いlockfileへ戻さない。 |
+| [PR #126](https://github.com/shute2004/tachyon-codex/pull/126) ハーネス統合 | 統合入力の本体。入力・履歴・モデル境界・MCP・Windows旧方式停止などを含む。 |
+| [PR #127](https://github.com/shute2004/tachyon-codex/pull/127) 実行出力の共有 | 元の5ファイルの変更を統合候補に収録。出力を共有し、base64のwire形式と保持上限は維持する。 |
+| [PR #128](https://github.com/shute2004/tachyon-codex/pull/128) Guardian資格情報 | 同等の変更を取り込み済み。子プロセス環境とHTTPヘッダーの双方で制限する。 |
+| [PR #129](https://github.com/shute2004/tachyon-codex/pull/129) MCPページング | Legacy/Modern両方のカーソル継続と繰り返し拒否を後続で取り込み済み。 |
+| [PR #130](https://github.com/shute2004/tachyon-codex/pull/130) Linuxのbind-data FD | 同等の変更を取り込み済み。拒否ファイルごとに別のFDを保持する。 |
 
 この表はソースの照合結果です。元のPRが閉じられたことや、全テストが成功したことを意味しません。
 
@@ -31,7 +31,7 @@ Codexを基に開発していたコーディングハーネスの最新作業を
 
 ## 検証の基準点
 
-統合入力7d4の [blocking-ci run 38712839615](https://github.com/shute2004/tachyon/actions/runs/38712839615) は失敗で終了しています。
+統合入力7d4の [blocking-ci run 38712839615](https://github.com/shute2004/tachyon-codex/actions/runs/38712839615) は失敗で終了しています。
 
 - Windows GNU向けリリースビルド、cargo-deny、リポジトリ検査、整形などのジョブは成功しました。
 - SDKビルドはTUIの無条件コードから参照する型のimport不足で失敗しました。
@@ -63,19 +63,19 @@ Codexを基に開発していたコーディングハーネスの最新作業を
 
 | 作業版の公開タグ | mainと同一の変更対象ファイル |
 | --- | ---: |
-| [legacy-wip/20261025-approved-fs-restrictions](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-approved-fs-restrictions) | 0 / 7 |
-| [legacy-wip/20261025-exec-id-isolation](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-exec-id-isolation) | 2 / 2 |
-| [legacy-wip/20261025-executor-startup-grace](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-executor-startup-grace) | 4 / 4 |
-| [legacy-wip/20261025-historical-model-selection](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-historical-model-selection) | 5 / 13 |
-| [legacy-wip/20261025-mcp-credential-authority](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-credential-authority) | 14 / 20 |
-| [legacy-wip/20261025-mcp-current-call](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-current-call) | 6 / 11 |
-| [legacy-wip/20261025-mcp-handler-cache](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-handler-cache) | 2 / 4 |
-| [legacy-wip/20261025-metadata-touch-fast-path](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-metadata-touch-fast-path) | 3 / 4 |
-| [legacy-wip/20261025-privacy-info-logs](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-privacy-info-logs) | 1 / 2 |
-| [legacy-wip/20261025-retained-history-budget](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-retained-history-budget) | 0 / 6 |
-| [legacy-wip/20261025-tool-namespace-budget](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-tool-namespace-budget) | 4 / 6 |
+| [legacy-wip/20261025-approved-fs-restrictions](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-approved-fs-restrictions) | 0 / 7 |
+| [legacy-wip/20261025-exec-id-isolation](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-exec-id-isolation) | 2 / 2 |
+| [legacy-wip/20261025-executor-startup-grace](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-executor-startup-grace) | 4 / 4 |
+| [legacy-wip/20261025-historical-model-selection](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-historical-model-selection) | 5 / 13 |
+| [legacy-wip/20261025-mcp-credential-authority](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-mcp-credential-authority) | 14 / 20 |
+| [legacy-wip/20261025-mcp-current-call](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-mcp-current-call) | 6 / 11 |
+| [legacy-wip/20261025-mcp-handler-cache](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-mcp-handler-cache) | 2 / 4 |
+| [legacy-wip/20261025-metadata-touch-fast-path](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-metadata-touch-fast-path) | 3 / 4 |
+| [legacy-wip/20261025-privacy-info-logs](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-privacy-info-logs) | 1 / 2 |
+| [legacy-wip/20261025-retained-history-budget](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-retained-history-budget) | 0 / 6 |
+| [legacy-wip/20261025-tool-namespace-budget](https://github.com/shute2004/tachyon-codex/tree/legacy-wip/20261025-tool-namespace-budget) | 4 / 6 |
 
-mainへ収録済みの出力欠落修正も、元の履歴を [legacy-work/fix-cell-termination-output](https://github.com/shute2004/tachyon/tree/legacy-work/fix-cell-termination-output) に保存しています。公開タグのコミットIDはローカルの元の保存点と照合しました。設定・作業記録を含む主チェックアウトの保存点とstashは公開対象外です。
+mainへ収録済みの出力欠落修正も、元の履歴を [legacy-work/fix-cell-termination-output](https://github.com/shute2004/tachyon-codex/tree/legacy-work/fix-cell-termination-output) に保存しています。公開タグのコミットIDはローカルの元の保存点と照合しました。設定・作業記録を含む主チェックアウトの保存点とstashは公開対象外です。
 
 作業版を復元する場合は、タグを明示して取得し、通常のmainとは区別してください。
 
@@ -91,7 +91,7 @@ git switch --detach legacy-wip/20261025-retained-history-budget
 以下では、統合コードの保存点 `24215daf26f9cf8ba2924e8983d08733a6ead7a4` を明示してcheckoutします。後からmainやブランチが更新されても、同じソースを取得できます。
 
 ```sh
-git clone https://github.com/shute2004/tachyon.git legacy-tachyon
+git clone https://github.com/shute2004/tachyon-codex.git legacy-tachyon
 git -C legacy-tachyon checkout --detach 24215daf26f9cf8ba2924e8983d08733a6ead7a4
 cd legacy-tachyon/codex-rs
 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 \
