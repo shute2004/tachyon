@@ -53,7 +53,36 @@ Codexを基に開発していたコーディングハーネスの最新作業を
 
 整理前に、主チェックアウトと11個の機能別作業ツリーに残っていた83パスを、ローカル専用の `codex/legacy-preservation/20261025-*` 保存点へ取り込みました。元の作業ファイル・index・ブランチを変更せずに保存しています。
 
-これらにはローカルの設定・作業文脈も含むため、保存点を一括でリモートへpushしてはいけません。元の作業ツリーを整理する場合も、未統合の実験とローカル設定を復元できることを先に確認します。ビルドキャッシュはソースと区別し、ソース・履歴の代わりに保存することはしません。
+このうち主チェックアウトの1件にはローカルの設定・作業文脈が含まれるため、一括で公開してはいけません。一方、コードだけの11件をローカルにしか残していなかった保全の不足は、以下の公開タグで補完しました。個人用の指示書・設定・作業記録は外部のローカルバックアップに分離してあり、開発コードの唯一の保存先にはしていません。ビルドキャッシュはソースと区別し、ソース・履歴の代わりに保存することはしません。
+
+### ローカル作業版の公開保存（2026-10-27補完）
+
+以下は作業当時の正確なコミットを保存するタグであり、完成済み機能や新たな検証成功を示すものではありません。多数のファイルは既にmainと同じか、その後に編集されています。古い作業版を一括でmainに適用して、後続の修正を巻き戻してはいけません。
+
+「同一」は統合版 `0bd7393a` と作業版で、変更対象ファイル全体のバイト列が一致する数です。不一致は未実装を意味せず、後続の編集や別実装も含みます。
+
+| 作業版の公開タグ | mainと同一の変更対象ファイル |
+| --- | ---: |
+| [legacy-wip/20261025-approved-fs-restrictions](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-approved-fs-restrictions) | 0 / 7 |
+| [legacy-wip/20261025-exec-id-isolation](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-exec-id-isolation) | 2 / 2 |
+| [legacy-wip/20261025-executor-startup-grace](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-executor-startup-grace) | 4 / 4 |
+| [legacy-wip/20261025-historical-model-selection](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-historical-model-selection) | 5 / 13 |
+| [legacy-wip/20261025-mcp-credential-authority](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-credential-authority) | 14 / 20 |
+| [legacy-wip/20261025-mcp-current-call](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-current-call) | 6 / 11 |
+| [legacy-wip/20261025-mcp-handler-cache](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-mcp-handler-cache) | 2 / 4 |
+| [legacy-wip/20261025-metadata-touch-fast-path](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-metadata-touch-fast-path) | 3 / 4 |
+| [legacy-wip/20261025-privacy-info-logs](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-privacy-info-logs) | 1 / 2 |
+| [legacy-wip/20261025-retained-history-budget](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-retained-history-budget) | 0 / 6 |
+| [legacy-wip/20261025-tool-namespace-budget](https://github.com/shute2004/tachyon/tree/legacy-wip/20261025-tool-namespace-budget) | 4 / 6 |
+
+mainへ収録済みの出力欠落修正も、元の履歴を [legacy-work/fix-cell-termination-output](https://github.com/shute2004/tachyon/tree/legacy-work/fix-cell-termination-output) に保存しています。公開タグのコミットIDはローカルの元の保存点と照合しました。設定・作業記録を含む主チェックアウトの保存点とstashは公開対象外です。
+
+作業版を復元する場合は、タグを明示して取得し、通常のmainとは区別してください。
+
+```sh
+git fetch origin 'refs/tags/legacy-wip/*:refs/tags/legacy-wip/*'
+git switch --detach legacy-wip/20261025-retained-history-budget
+```
 
 ## ビルドと検証
 
